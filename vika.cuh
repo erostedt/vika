@@ -174,6 +174,11 @@ class CudaOwningTensor
     std::array<usize, Dimensions> _extents;
 };
 
+using CudaOwningTensor1f = CudaOwningTensor<f32, 1>;
+using CudaOwningTensor2f = CudaOwningTensor<f32, 2>;
+using CudaOwningTensor3f = CudaOwningTensor<f32, 3>;
+using CudaOwningTensor4f = CudaOwningTensor<f32, 4>;
+
 __global__ void double_kernel(f32 *data, u32 n)
 {
     u32 i = blockIdx.x * blockDim.x + threadIdx.x;
