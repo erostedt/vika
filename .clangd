@@ -1,0 +1,10 @@
+CompileFlags:
+  Remove:
+    - "-forward-unknown-to-host-compiler"
+    - "--forward-unknown-to-host-compiler"
+    - "--options-file"
+    - "*includes_CUDA.rsp"
+    - "--generate-code=*"
+    - "--compiler-options=*"
+  Add:
+    - "--cuda-gpu-arch=sm_86"
