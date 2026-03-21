@@ -106,9 +106,9 @@ auto byte_count(const std::array<usize, Dimensions> &extents) -> usize
 }
 
 template <typename T, usize Dimensions>
-class CudaOwningBuffer
+class CudaOwningTensor
 {
-    using Self = CudaOwningBuffer<T, Dimensions>;
+    using Self = CudaOwningTensor<T, Dimensions>;
 
   public:
     static auto create(const std::array<usize, Dimensions> &extents) -> Result<Self, cudaError_t>
@@ -154,7 +154,7 @@ class CudaOwningBuffer
     }
 
   private:
-    CudaOwningBuffer(T *data, const std::array<usize, Dimensions> &extents) : _data(data), _extents(extents)
+    CudaOwningTensor(T *data, const std::array<usize, Dimensions> &extents) : _data(data), _extents(extents)
     {
     }
 

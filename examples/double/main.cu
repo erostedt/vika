@@ -5,9 +5,9 @@
 
 int main()
 {
-    auto buffer = CudaOwningBuffer<f32, 1>::create({5}).unwrap();
+    auto tensor = CudaOwningTensor<f32, 1>::create({5}).unwrap();
     std::vector<f32> data = {1, 2, 3, 4, 5};
-    cudaError_t err = buffer.upload(data);
+    cudaError_t err = tensor.upload(data);
     if (err != cudaSuccess)
     {
         std::cerr << "Upload failed: " << cudaGetErrorString(err) << std::endl;
@@ -16,7 +16,7 @@ int main()
 
     u32 threads = 128;
     u32 blocks = (data.size() + threads - 1) / threads;
-    double_kernel<<<blocks, threads>>>(buffer.data(), data.size());
+    double_kernel<<<blocks, threads>>>(tensor.data(), data.size());
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess)
     {
@@ -25,7 +25,7 @@ int main()
     }
 
     std::vector<f32> out;
-    err = buffer.download(out);
+    err = tensor.download(out);
     if (err != cudaSuccess)
     {
         std::cerr << "cudaMemcpy D2H failed: " << cudaGetErrorString(err) << std::endl;
