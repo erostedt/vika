@@ -1,2 +1,2 @@
 include_directories(..)
-add_subdirectory(double)
+add_subdirectory(matmul)
