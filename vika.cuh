@@ -138,6 +138,17 @@ class CudaOwningTensor
         return cudaMemcpy(data.data(), _data.get(), byte_count(), cudaMemcpyDeviceToHost);
     }
 
+    auto download() -> Result<std::vector<T>, cudaError_t>
+    {
+        std::vector<T> data(element_count());
+        cudaError_t err = cudaMemcpy(data.data(), _data.get(), byte_count(), cudaMemcpyDeviceToHost);
+        if (err)
+        {
+            return err;
+        }
+        return data;
+    }
+
     auto element_count() const -> usize
     {
         return ::element_count<Dimensions>(_extents);

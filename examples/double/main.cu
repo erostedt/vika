@@ -24,13 +24,7 @@ int main()
         return 1;
     }
 
-    std::vector<f32> out;
-    err = tensor.download(out);
-    if (err != cudaSuccess)
-    {
-        std::cerr << "cudaMemcpy D2H failed: " << cudaGetErrorString(err) << std::endl;
-        return 1;
-    }
+    const auto out = tensor.download().unwrap();
 
     for (u32 i = 0; i < out.size(); i++)
     {
