@@ -291,3 +291,49 @@ __global__ void matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<con
     out(row, col) = sum;
 }
 }; // namespace vika
+
+// TODO (ecrt):
+// - Tiled matmul
+// - CpuTensor
+//
+// - Sigmoid forward
+// - Sigmoid backward
+// - Sigmoid weight update
+// - Sigmoid Layer
+//
+// - Flatten Forward
+// - Flatten Backward
+// - Flatten weight update
+// - Flatten Layer
+//
+// - Dense Forward
+// - Dense Backward
+// - Dense weight update
+// - Dense Layer
+//
+// - Conv Forward
+// - Conv Backward
+// - Conv weight update
+// - Conv Layer
+//
+// - Maxpool Forward
+// - Maxpool Backward
+// - Maxpool weight update
+// - Maxpool Layer
+//
+// - Softmax Forward
+// - Softmax Backward
+// - Softmax weight update
+// - Softmax Layer
+//
+// - CategoricalCrossEntropy Forward
+// - CategoricalCrossEntropy Backward
+// - CategoricalCrossEntropy weight update
+// - CategoricalCrossEntropy Layer
+//
+// - Adam optimizer
+// - Link layers
+// - Pick device
+// - Events/Async/Streams?
+//
+// - stb header only
