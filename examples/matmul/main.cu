@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
+#define VIKA_IMPLEMENTATION
 #include "vika.cuh"
 
 int main()
