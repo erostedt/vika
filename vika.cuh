@@ -86,6 +86,19 @@ class Result
     std::variant<T, E> _union;
 };
 
+template <usize Rank>
+auto element_count(const std::array<usize, Rank> &extents) -> usize
+{
+    using namespace std;
+    return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
+}
+
+template <typename T, usize Rank>
+auto byte_count(const std::array<usize, Rank> &extents) -> usize
+{
+    return element_count(extents) * sizeof(T);
+}
+
 template <typename T>
 struct CudaDeleter
 {
@@ -95,29 +108,16 @@ struct CudaDeleter
     }
 };
 
-template <usize Dimensions>
-auto element_count(const std::array<usize, Dimensions> &extents) -> usize
-{
-    using namespace std;
-    return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
-}
-
-template <typename T, usize Dimensions>
-auto byte_count(const std::array<usize, Dimensions> &extents) -> usize
-{
-    return element_count(extents) * sizeof(T);
-}
-
-template <typename T, usize Dimensions>
+template <typename T, usize Rank>
 struct CudaTensorView;
 
-template <typename T, usize Dimensions>
+template <typename T, usize Rank>
 class CudaOwningTensor
 {
-    using Self = CudaOwningTensor<T, Dimensions>;
+    using Self = CudaOwningTensor<T, Rank>;
 
   public:
-    static auto create(const std::array<usize, Dimensions> &extents) -> Result<Self, cudaError_t>
+    static auto create(const std::array<usize, Rank> &extents) -> Result<Self, cudaError_t>
     {
         T *ptr = nullptr;
         const auto err = cudaMalloc(&ptr, vika::byte_count<T>(extents));
@@ -157,7 +157,7 @@ class CudaOwningTensor
 
     auto element_count() const -> usize
     {
-        return vika::element_count<Dimensions>(_extents);
+        return vika::element_count<Rank>(_extents);
     }
 
     auto byte_count() const -> usize
@@ -170,9 +170,9 @@ class CudaOwningTensor
         return _data.get();
     }
 
-    auto view() -> CudaTensorView<T, Dimensions>
+    auto view() -> CudaTensorView<T, Rank>
     {
-        CudaTensorView<T, Dimensions> tensor_view = {.data = _data.get()};
+        CudaTensorView<T, Rank> tensor_view = {.data = _data.get()};
         for (usize i = 0; i < _extents.size(); ++i)
         {
             tensor_view.extents[i] = _extents[i];
@@ -181,9 +181,9 @@ class CudaOwningTensor
         return tensor_view;
     }
 
-    auto const_view() -> CudaTensorView<const T, Dimensions>
+    auto const_view() -> CudaTensorView<const T, Rank>
     {
-        CudaTensorView<const T, Dimensions> tensor_view = {.data = _data.get()};
+        CudaTensorView<const T, Rank> tensor_view = {.data = _data.get()};
         for (usize i = 0; i < _extents.size(); ++i)
         {
             tensor_view.extents[i] = _extents[i];
@@ -193,64 +193,64 @@ class CudaOwningTensor
     }
 
   private:
-    CudaOwningTensor(T *data, const std::array<usize, Dimensions> &extents) : _data(data), _extents(extents)
+    CudaOwningTensor(T *data, const std::array<usize, Rank> &extents) : _data(data), _extents(extents)
     {
     }
 
   private:
     std::unique_ptr<T[], CudaDeleter<T>> _data;
-    std::array<usize, Dimensions> _extents;
+    std::array<usize, Rank> _extents;
 };
 
-template <typename T, usize Dimensions>
+template <typename T, usize Rank>
 struct CudaTensorView
 {
     T *data;
-    usize extents[Dimensions];
+    usize extents[Rank];
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 1>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 1>>
     __host__ __device__ inline T &operator()(usize x)
     {
         return data[x];
     }
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 1>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 1>>
     __host__ __device__ inline const T &operator()(usize x) const
     {
         return data[x];
     }
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 2>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 2>>
     __host__ __device__ inline T &operator()(usize x, usize y)
     {
         return data[x * extents[1] + y];
     }
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 2>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 2>>
     __host__ __device__ inline const T &operator()(usize x, usize y) const
     {
         return data[x * extents[1] + y];
     }
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 3>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 3>>
     __host__ __device__ inline T &operator()(usize x, usize y, usize z)
     {
         return data[(x * extents[1] + y) * extents[2] + z];
     }
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 3>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 3>>
     __host__ __device__ inline const T &operator()(usize x, usize y, usize z) const
     {
         return data[(x * extents[1] + y) * extents[2] + z];
     }
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 4>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 4>>
     __host__ __device__ inline T &operator()(usize x, usize y, usize z, usize w)
     {
         return data[((x * extents[1] + y) * extents[2] + z) * extents[3] + w];
     }
 
-    template <usize D = Dimensions, typename = std::enable_if_t<D == 4>>
+    template <usize D = Rank, typename = std::enable_if_t<D == 4>>
     __host__ __device__ inline const T &operator()(usize x, usize y, usize z, usize w) const
     {
         return data[((x * extents[1] + y) * extents[2] + z) * extents[3] + w];
@@ -293,8 +293,9 @@ __global__ void matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<con
 }; // namespace vika
 
 // TODO (ecrt):
-// - Tiled matmul
 // - CpuTensor
+// - Requirements on T and Rank
+// - Tiled matmul
 //
 // - Sigmoid forward
 // - Sigmoid backward
