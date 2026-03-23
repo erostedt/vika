@@ -267,15 +267,6 @@ using CudaTensorView2f = CudaTensorView<f32, 2>;
 using CudaTensorView3f = CudaTensorView<f32, 3>;
 using CudaTensorView4f = CudaTensorView<f32, 4>;
 
-__global__ void double_kernel(f32 *data, u32 n)
-{
-    u32 i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n)
-    {
-        data[i] *= 2.0f;
-    }
-}
-
 __global__ void matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<const f32, 2> b,
                               CudaTensorView<f32, 2> out)
 {
