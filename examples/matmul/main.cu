@@ -5,6 +5,7 @@
 
 int main()
 {
+    using namespace vika;
     auto a = CudaOwningTensor2f::create({2, 3}).unwrap();
     auto b = CudaOwningTensor2f::create({3, 2}).unwrap();
     auto c = CudaOwningTensor2f::create({2, 2}).unwrap();

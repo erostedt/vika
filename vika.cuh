@@ -26,6 +26,9 @@ using usize = size_t;
         }                                                                                                              \
     } while (0)
 
+namespace vika
+{
+
 auto to_string(cudaError_t e) -> std::string
 {
     return cudaGetErrorString(e);
@@ -117,7 +120,7 @@ class CudaOwningTensor
     static auto create(const std::array<usize, Dimensions> &extents) -> Result<Self, cudaError_t>
     {
         T *ptr = nullptr;
-        const auto err = cudaMalloc(&ptr, ::byte_count<T>(extents));
+        const auto err = cudaMalloc(&ptr, vika::byte_count<T>(extents));
         if (err)
         {
             return err;
@@ -154,12 +157,12 @@ class CudaOwningTensor
 
     auto element_count() const -> usize
     {
-        return ::element_count<Dimensions>(_extents);
+        return vika::element_count<Dimensions>(_extents);
     }
 
     auto byte_count() const -> usize
     {
-        return ::byte_count<T>(_extents);
+        return vika::byte_count<T>(_extents);
     }
 
     auto data() -> T *
@@ -296,3 +299,4 @@ __global__ void matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<con
 
     out(row, col) = sum;
 }
+}; // namespace vika
