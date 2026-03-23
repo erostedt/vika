@@ -117,7 +117,7 @@ class CudaOwningTensor
     using Self = CudaOwningTensor<T, Rank>;
 
   public:
-    static auto create(const std::array<usize, Rank> &extents) -> Result<Self, cudaError_t>
+    static auto empty(const std::array<usize, Rank> &extents) -> Result<Self, cudaError_t>
     {
         T *ptr = nullptr;
         const auto err = cudaMalloc(&ptr, vika::byte_count<T>(extents));
