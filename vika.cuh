@@ -384,6 +384,26 @@ struct CudaTensorView
     T *data;
     usize extents[Rank];
 
+    __host__ __device__ inline usize element_count()
+    {
+        usize count = 1;
+        for (usize i = 0; i < Rank; ++i)
+        {
+            count *= extents[i];
+        }
+        return count;
+    }
+
+    __host__ __device__ inline T &operator[](usize i)
+    {
+        return data[i];
+    }
+
+    __host__ __device__ inline const T &operator[](usize i) const
+    {
+        return data[i];
+    }
+
     template <usize R = Rank, typename = std::enable_if_t<R == 1>>
     __host__ __device__ inline T &operator()(usize x)
     {
@@ -445,6 +465,21 @@ using CudaTensorView4f = CudaTensorView<f32, 4>;
 
 __global__ auto matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<const f32, 2> b,
                               CudaTensorView<f32, 2> out) -> void;
+
+__host__ __device__ inline auto sigmoid(f32 x) -> f32
+{
+    return 1.0f / (1.0f + std::exp(-x));
+}
+
+template <usize Rank>
+__global__ auto sigmoid_kernel(CudaTensorView<const f32, Rank> a, CudaTensorView<f32, Rank> out) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < a.element_count())
+    {
+        out[i] = sigmoid(a[i]);
+    }
+}
 
 }; // namespace vika
 
