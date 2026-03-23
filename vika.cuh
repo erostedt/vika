@@ -8,6 +8,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -111,7 +112,7 @@ struct CudaDeleter
 template <typename T, usize Rank>
 struct CudaTensorView;
 
-template <typename T, usize Rank>
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
 class CudaOwningTensor
 {
     using Self = CudaOwningTensor<T, Rank>;
