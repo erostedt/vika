@@ -30,7 +30,10 @@ using usize = size_t;
 namespace vika
 {
 
-auto to_string(cudaError_t e) -> std::string;
+inline auto to_string(cudaError_t e) -> std::string
+{
+    return cudaGetErrorString(e);
+}
 
 template <typename T, typename E>
 class Result
@@ -448,10 +451,6 @@ __global__ auto matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<con
 #ifdef VIKA_IMPLEMENTATION
 namespace vika
 {
-auto to_string(cudaError_t e) -> std::string
-{
-    return cudaGetErrorString(e);
-}
 
 __global__ auto matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<const f32, 2> b,
                               CudaTensorView<f32, 2> out) -> void
@@ -480,8 +479,6 @@ __global__ auto matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<con
 #endif
 
 // TODO (ecrt):
-// - CpuTensor
-// - Requirements on T and Rank
 // - Tiled matmul
 //
 // - Sigmoid forward
@@ -523,5 +520,3 @@ __global__ auto matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<con
 // - Link layers
 // - Pick device
 // - Events/Async/Streams?
-//
-// - stb header only
