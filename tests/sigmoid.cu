@@ -7,13 +7,11 @@
 UTEST(sigmoid, small)
 {
     using namespace vika;
-    std::vector<f32> data_a = {-3, -2, -1, 0, 1, 2, 3};
-    auto a = CudaOwningTensor1f::empty({data_a.size()}).unwrap();
-    auto b = CudaOwningTensor1f::empty({data_a.size()}).unwrap();
-    ASSERT_EQ(a.upload(data_a), cudaSuccess);
+    auto a = CudaOwningTensor1f::from({-3, -2, -1, 0, 1, 2, 3}).unwrap();
+    auto b = CudaOwningTensor1f::empty_like(a).unwrap();
 
     dim3 block(1);
-    dim3 grid(data_a.size());
+    dim3 grid(a.element_count());
     sigmoid_kernel<<<grid, block>>>(a.const_view(), b.view());
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
