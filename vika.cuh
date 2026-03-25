@@ -291,9 +291,10 @@ template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmeti
 class CudaOwningTensor
 {
     using Self = CudaOwningTensor<T, Rank>;
+    using Extents = std::array<usize, Rank>;
 
   public:
-    static auto empty(const std::array<usize, Rank> &extents) -> Result<Self, cudaError_t>
+    static auto empty(const Extents &extents) -> Result<Self, cudaError_t>
     {
         T *ptr = nullptr;
         const auto err = cudaMalloc(&ptr, vika::byte_count<T>(extents));
@@ -341,6 +342,16 @@ class CudaOwningTensor
         return vika::byte_count<T>(_extents);
     }
 
+    auto extents() const -> const Extents &
+    {
+        return _extents;
+    }
+
+    auto data() const -> const T *
+    {
+        return _data.get();
+    }
+
     auto data() -> T *
     {
         return _data.get();
@@ -369,13 +380,13 @@ class CudaOwningTensor
     }
 
   private:
-    CudaOwningTensor(T *data, const std::array<usize, Rank> &extents) : _data(data), _extents(extents)
+    CudaOwningTensor(T *data, const Extents &extents) : _data(data), _extents(extents)
     {
     }
 
   private:
     std::unique_ptr<T[], CudaDeleter<T>> _data;
-    std::array<usize, Rank> _extents;
+    Extents _extents;
 };
 
 template <typename T, usize Rank>
