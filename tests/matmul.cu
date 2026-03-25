@@ -1,5 +1,7 @@
 #include "utest.h"
 
+#include "comparison.cuh"
+
 #include "vika.cuh"
 
 UTEST(matmul, small)
@@ -20,7 +22,7 @@ UTEST(matmul, small)
     matmul_kernel<<<grid, block>>>(a.const_view(), b.const_view(), c.view());
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-    const auto out = c.download().unwrap();
+    const auto out = download(c).unwrap();
     const std::vector<f32> expected = {58, 64, 139, 154};
-    ASSERT_TRUE(out == expected);
+    ASSERT_TRUE(are_close(out, expected, 1e-5f));
 }

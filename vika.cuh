@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -35,6 +36,11 @@ inline auto to_string(cudaError_t e) -> std::string
     return cudaGetErrorString(e);
 }
 
+inline auto is_error(cudaError_t err) -> bool
+{
+    return err != cudaSuccess;
+}
+
 template <typename T, typename E>
 class Result
 {
@@ -53,6 +59,12 @@ class Result
 
     Result(E &&error) : _union(std::in_place_index<1>, std::move(error))
     {
+    }
+
+    auto unwrap() & -> T &
+    {
+        CHECK_MSG(is_some(), to_string(std::get<1>(_union)));
+        return std::get<0>(_union);
     }
 
     auto unwrap() && -> T
@@ -218,6 +230,11 @@ class HostTensor
         return HostTensor(std::vector<T>(HostTensor<T, Rank>::size(extents), T{}), extents);
     }
 
+    static auto empty(const Extents &extents) -> Self
+    {
+        return HostTensor(std::vector<T>(HostTensor<T, Rank>::size(extents)), extents);
+    }
+
     template <usize R = Rank, typename = std::enable_if_t<R == 1>>
     static auto zero(usize element_count) -> Self
     {
@@ -311,16 +328,6 @@ class CudaOwningTensor
         return cudaMemcpy(_data.get(), data.data(), data.size() * sizeof(T), cudaMemcpyHostToDevice);
     }
 
-    auto download(std::vector<T> &data) -> cudaError_t
-    {
-        const auto count = element_count();
-        if (data.size() != count)
-        {
-            data.resize(count);
-        }
-        return cudaMemcpy(data.data(), _data.get(), byte_count(), cudaMemcpyDeviceToHost);
-    }
-
     auto download() -> Result<std::vector<T>, cudaError_t>
     {
         std::vector<T> data(element_count());
@@ -388,6 +395,45 @@ class CudaOwningTensor
     std::unique_ptr<T[], CudaDeleter<T>> _data;
     Extents _extents;
 };
+
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+auto upload(const HostTensor<T, Rank> &src) -> Result<CudaOwningTensor<T, Rank>, cudaError_t>
+{
+    auto dst = CudaOwningTensor<T, Rank>::empty(src.extents());
+    if (dst.is_error())
+    {
+        return dst;
+    }
+
+    const auto err = copy(src, dst.unwrap());
+    return is_error(err) ? err : dst.unwrap();
+}
+
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+auto copy(const CudaOwningTensor<T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
+{
+    CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
+    return cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
+}
+
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+auto copy(const HostTensor<T, Rank> &src, CudaOwningTensor<T, Rank> &dst) -> cudaError_t
+{
+    CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
+    return cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
+}
+
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+auto download(const CudaOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
+{
+    auto dst = HostTensor<T, Rank>::empty(src.extents());
+    const auto err = copy(src, dst);
+    if (is_error(err))
+    {
+        return err;
+    }
+    return dst;
+}
 
 template <typename T, usize Rank>
 struct CudaTensorView
