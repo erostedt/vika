@@ -9,6 +9,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -654,6 +655,14 @@ using DeviceTensorConstView2f = DeviceTensorConstViewf<2>;
 using DeviceTensorConstView3f = DeviceTensorConstViewf<3>;
 using DeviceTensorConstView4f = DeviceTensorConstViewf<4>;
 
+inline auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f
+{
+    auto transposed_view = view;
+    std::swap(transposed_view.strides[0], transposed_view.strides[1]);
+    std::swap(transposed_view.extents[0], transposed_view.extents[1]);
+    return transposed_view;
+}
+
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
 __global__ auto dense_forward(DeviceTensorConstView2f inputs, DeviceTensorConstView2f weights,
@@ -679,6 +688,8 @@ __global__ auto sigmoid_kernel(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf
 
 __global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out)
     -> void;
+
+__global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out) -> void;
 
 template <typename T>
 struct KernelJob
@@ -733,18 +744,32 @@ struct DenseLayer
         return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
     }
 
-    auto backward(const DeviceTensorConstView2f &upstream_gradient) -> DeviceTensorConstView2f
+    auto backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
     {
-        const u32 M = outputs.extent<0>();
-        const u32 N = outputs.extent<1>();
+        const u32 M = d_inputs.extent<0>();
+        const u32 N = d_inputs.extent<1>();
         dim3 block(16, 16);
         dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-        dense_backward<<<grid, block>>>(upstream_gradient, weights.const_view(), d_inputs.view());
-        return d_inputs.const_view();
+        matmul_kernel<<<grid, block, 0, stream>>>(upstream_gradient, transposed(weights.const_view()), d_inputs.view());
+        return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
     }
 
     auto weight_gradients(const DeviceTensorConstView2f &inputs, const DeviceTensorConstView2f &upstream_gradient)
-        -> std::tuple<DeviceTensorConstView2f, DeviceTensorConstView2f>;
+        -> KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>
+    {
+        const u32 M = d_inputs.extent<0>();
+        const u32 N = d_inputs.extent<1>();
+        dim3 block(16, 16);
+        dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+        // NOTE: Run in separate streams?
+        matmul_kernel<<<grid, block, 0, stream>>>(transposed(inputs), upstream_gradient, d_weights.view());
+
+        const auto block_dim = dim3(256);
+        const auto grid_dim = dim3(upstream_gradient.extents[0] + block_dim.x - 1 / block_dim.x);
+        sum_rows<<<block_dim, grid_dim, 0, stream>>>(transposed(upstream_gradient), d_biases.view());
+        return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>{
+            std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
+    }
     auto update() -> void;
 
     DeviceOwningTensor2f outputs;
@@ -764,6 +789,26 @@ struct DenseLayer
 namespace vika
 {
 
+__global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out) -> void
+{
+    // NOTE: Reduce in blocks?
+    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize row_count = matrix.extents[0];
+
+    if (row >= row_count)
+    {
+        return;
+    }
+
+    const usize col_count = matrix.extents[1];
+    f32 sum = 0.0f;
+    for (usize col = 0; col < col_count; ++col)
+    {
+        sum += matrix(row, col);
+    }
+    out[row] = sum;
+}
+
 __global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void
 {
     const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
@@ -780,32 +825,9 @@ __global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f
     out(sample_index, col) += biases[col];
 }
 
-__global__ auto dense_backward(DeviceTensorConstView2f d_outputs, DeviceTensorConstView2f weights,
-                               DeviceTensorView2f d_inputs) -> void
-{
-    const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
-    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
-
-    const usize sample_count = d_outputs.extents[0];
-    const usize neuron_count = d_outputs.extents[1];
-    const usize feature_count = weights.extents[0];
-
-    if (sample_index >= sample_count || row >= feature_count)
-    {
-        return;
-    }
-
-    f32 sum = 0;
-    for (usize neuron_index = 0; neuron_index < neuron_count; ++neuron_index)
-    {
-        sum += d_outputs(sample_index, neuron_index) * weights(row, neuron_index);
-    }
-
-    d_inputs(sample_index, row) = sum;
-}
-
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void
 {
+    // NOTE: Multiply in tiles?
     const usize row = blockIdx.y * blockDim.y + threadIdx.y;
     const usize col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -831,38 +853,32 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 #endif
 
 // TODO (ecrt):
-// - Tiled matmul
-//
 // - Sigmoid forward
 // - Sigmoid backward
-// - Sigmoid weight update
 // - Sigmoid Layer
 //
 // - Flatten Forward
 // - Flatten Backward
-// - Flatten weight update
 // - Flatten Layer
 //
 // - Dense weight update
 //
 // - Conv Forward
 // - Conv Backward
+// - Conv weight gradients
 // - Conv weight update
 // - Conv Layer
 //
 // - Maxpool Forward
 // - Maxpool Backward
-// - Maxpool weight update
 // - Maxpool Layer
 //
 // - Softmax Forward
 // - Softmax Backward
-// - Softmax weight update
 // - Softmax Layer
 //
 // - CategoricalCrossEntropy Forward
 // - CategoricalCrossEntropy Backward
-// - CategoricalCrossEntropy weight update
 // - CategoricalCrossEntropy Layer
 //
 // - Adam optimizer
