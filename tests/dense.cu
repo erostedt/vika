@@ -12,9 +12,8 @@ UTEST(dense, layer_forward)
     auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
 
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
-    const auto outputs = layer.forward(inputs.const_view());
-    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
+    auto job = layer.forward(inputs.const_view());
+    const auto outputs = job.wait().unwrap();
     const auto out = download(outputs).unwrap();
     const std::vector<f32> expected = {59.0f, 66.0f, 140.0f, 156.0f};
 

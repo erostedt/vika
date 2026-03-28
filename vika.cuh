@@ -177,6 +177,16 @@ class Result
     std::variant<T, E> storage;
 };
 
+#define return_on_cuda_error(cudacall)                                                                                 \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        const auto _err = (cudacall);                                                                                  \
+        if (is_error(_err))                                                                                            \
+        {                                                                                                              \
+            return error(_err);                                                                                        \
+        }                                                                                                              \
+    } while (0)
+
 template <usize Rank>
 inline auto element_count(const std::array<usize, Rank> &extents) -> usize
 {
@@ -667,6 +677,22 @@ __global__ auto sigmoid_kernel(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf
     }
 }
 
+template <typename T>
+struct KernelJob
+{
+    auto wait() -> Result<T, cudaError_t>
+    {
+        const auto err = cudaStreamSynchronize(stream);
+        if (is_error(err))
+        {
+            return error(err);
+        }
+        return ok(value);
+    }
+    T value;
+    cudaStream_t stream;
+};
+
 struct DenseLayer
 {
     auto static with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
@@ -680,25 +706,29 @@ struct DenseLayer
         auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
         auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+        cudaStream_t stream;
+        return_on_cuda_error(cudaStreamCreate(&stream));
         return ok<DenseLayer>({
-            std::move(outputs),
-            std::move(weights),
-            std::move(biases),
-            std::move(d_inputs),
-            std::move(d_weights),
-            std::move(d_biases),
+            .outputs = std::move(outputs),
+            .weights = std::move(weights),
+            .biases = std::move(biases),
+            .d_inputs = std::move(d_inputs),
+            .d_weights = std::move(d_weights),
+            .d_biases = std::move(d_biases),
+            .stream = stream,
         });
     }
 
-    auto forward(const DeviceTensorConstView2f &inputs) -> DeviceTensorConstView2f
+    auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
     {
         const u32 M = outputs.extent<0>();
         const u32 N = outputs.extent<1>();
         dim3 block(16, 16);
         dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-        dense_forward<<<grid, block>>>(inputs, weights.const_view(), biases.const_view(), outputs.view());
-        return outputs.const_view();
+        dense_forward<<<grid, block, 0, stream>>>(inputs, weights.const_view(), biases.const_view(), outputs.view());
+        return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
     }
+
     auto backward(const DeviceTensorConstView2f &upstream_gradient) -> DeviceTensorConstView2f
     {
         const u32 M = outputs.extent<0>();
@@ -720,10 +750,10 @@ struct DenseLayer
     DeviceOwningTensor2f d_inputs;
     DeviceOwningTensor2f d_weights;
     DeviceOwningTensor1f d_biases;
+    cudaStream_t stream;
 };
 
 }; // namespace vika
-   //
 
 #ifdef VIKA_IMPLEMENTATION
 
