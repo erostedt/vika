@@ -992,10 +992,6 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 #endif
 
 // TODO (ecrt):
-// - Sigmoid forward
-// - Sigmoid backward
-// - Sigmoid Layer
-//
 // - Flatten Forward
 // - Flatten Backward
 // - Flatten Layer
