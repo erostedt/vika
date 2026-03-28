@@ -11,6 +11,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -636,10 +637,12 @@ struct DeviceTensorView
     }
 };
 
-using DeviceOwningTensor1f = DeviceOwningTensor<f32, 1>;
-using DeviceOwningTensor2f = DeviceOwningTensor<f32, 2>;
-using DeviceOwningTensor3f = DeviceOwningTensor<f32, 3>;
-using DeviceOwningTensor4f = DeviceOwningTensor<f32, 4>;
+template <usize Rank>
+using DeviceOwningTensorf = DeviceOwningTensor<f32, Rank>;
+using DeviceOwningTensor1f = DeviceOwningTensorf<1>;
+using DeviceOwningTensor2f = DeviceOwningTensorf<2>;
+using DeviceOwningTensor3f = DeviceOwningTensorf<3>;
+using DeviceOwningTensor4f = DeviceOwningTensorf<4>;
 
 template <usize Rank>
 using DeviceTensorViewf = DeviceTensorView<f32, Rank>;
@@ -707,6 +710,19 @@ struct KernelJob
     cudaStream_t stream;
 };
 
+struct AdamParameters
+{
+    f32 learning_rate = 1e-1f;
+    f32 beta1 = 0.9f;
+    f32 beta2 = 0.999f;
+    f32 epsilon = 1e-8f;
+};
+
+template <usize Rank>
+__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf<Rank> d_weights,
+                            DeviceTensorViewf<Rank> weights, DeviceTensorViewf<Rank> m_weights,
+                            DeviceTensorViewf<Rank> v_weights) -> void;
+
 struct DenseLayer
 {
     auto static with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
@@ -716,10 +732,18 @@ struct DenseLayer
         const auto neuron_count = weights.extent<1>();
 
         auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+
         auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
         auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
         auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+
+        auto m_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
+        auto v_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
+
+        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
         return ok<DenseLayer>({
@@ -729,6 +753,10 @@ struct DenseLayer
             .d_inputs = std::move(d_inputs),
             .d_weights = std::move(d_weights),
             .d_biases = std::move(d_biases),
+            .m_weights = std::move(m_weights),
+            .v_weights = std::move(v_weights),
+            .m_biases = std::move(m_biases),
+            .v_biases = std::move(v_biases),
             .stream = stream,
         });
     }
@@ -770,7 +798,21 @@ struct DenseLayer
         return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>{
             std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
     }
-    auto update() -> void;
+
+    auto update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases, const AdamParameters &parameters,
+                usize t) -> KernelJob<std::monostate>
+    {
+        const auto weight_count = d_weights.element_count();
+        const auto bias_count = d_biases.element_count();
+        usize threads = 256;
+        usize weight_blocks = (weight_count + threads - 1) / threads;
+        usize bias_blocks = (bias_count + threads - 1) / threads;
+        adam_update<2><<<weight_blocks, threads, 0, stream>>>(parameters, (f32)t, d_weights, weights.view(),
+                                                              m_weights.view(), v_weights.view());
+        adam_update<1><<<bias_blocks, threads, 0, stream>>>(parameters, (f32)t, d_biases, biases.view(),
+                                                            m_biases.view(), v_biases.view());
+        return KernelJob<std::monostate>{std::monostate{}, stream};
+    }
 
     DeviceOwningTensor2f outputs;
     DeviceOwningTensor2f weights;
@@ -779,8 +821,49 @@ struct DenseLayer
     DeviceOwningTensor2f d_inputs;
     DeviceOwningTensor2f d_weights;
     DeviceOwningTensor1f d_biases;
+
+    DeviceOwningTensor2f m_weights;
+    DeviceOwningTensor2f v_weights;
+    DeviceOwningTensor1f m_biases;
+    DeviceOwningTensor1f v_biases;
+
     cudaStream_t stream;
 };
+
+template <usize Rank>
+__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf<Rank> d_weights,
+                            DeviceTensorViewf<Rank> weights, DeviceTensorViewf<Rank> m_weights,
+                            DeviceTensorViewf<Rank> v_weights) -> void
+{
+    usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= weights.element_count())
+    {
+        return;
+    }
+
+    f32 m_hat_scale = 1.0 / (1.0 - std::pow(parameters.beta1, t));
+    f32 v_hat_scale = 1.0 / (1.0 - std::pow(parameters.beta2, t));
+
+    f32 g = d_weights[i];
+    f32 m = m_weights[i];
+    f32 v = v_weights[i];
+
+    m = parameters.beta1 * m + (1.0 - parameters.beta1) * g;
+    v = parameters.beta2 * v + (1.0 - parameters.beta2) * (g * g);
+
+    m_weights[i] = m;
+    v_weights[i] = v;
+
+    f32 m_hat = m * m_hat_scale;
+    f32 v_hat = v * v_hat_scale;
+
+    if (v_hat < 0)
+    {
+        v_hat = 0.0f;
+    }
+
+    weights[i] -= parameters.learning_rate * m_hat / (std::sqrt(v_hat) + parameters.epsilon);
+}
 
 }; // namespace vika
 

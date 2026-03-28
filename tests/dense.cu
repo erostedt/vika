@@ -65,3 +65,77 @@ UTEST(dense, layer_weight_gradients)
     ASSERT_TRUE(are_close(d_weights_cpu, expected_d_weights, 1e-5f));
     ASSERT_TRUE(are_close(d_biases_cpu, expected_d_biases, 1e-5f));
 }
+
+UTEST(dense, layer_adam_update)
+{
+    using namespace vika;
+    auto weights = DeviceOwningTensor2f::from({0.1f, -0.2f, 0.3f, 0.4f, -0.5f, 0.6f}, {2, 3}).unwrap();
+    auto biases = DeviceOwningTensor1f::from({0.01f, -0.02f, 0.03f}).unwrap();
+    const auto d_weights = DeviceOwningTensor2f::from({0.7f, -0.8f, 0.9f, -1.0f, 1.1f, -1.2f}, {2, 3}).unwrap();
+    const auto d_biases = DeviceOwningTensor1f::from({0.05f, -0.06f, 0.07f}).unwrap();
+
+    auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(biases)).unwrap();
+
+    const auto parameters = AdamParameters{
+        .learning_rate = 0.1f,
+        .beta1 = 0.9f,
+        .beta2 = 0.999f,
+        .epsilon = 1e-8f,
+    };
+
+    const std::vector<std::vector<f32>> expected_weights = {
+        {7.0780516e-07f, -1.0000070e-01f, 2.0000072e-01f, 4.9999928e-01f, -5.9999931e-01f, 6.9999933e-01f},
+        {-9.99982506e-02f, -1.73598528e-06f, 1.00001745e-01f, 5.99998236e-01f, -6.99998260e-01f, 7.99998283e-01f},
+        {-1.9999787e-01f, 9.9997871e-02f, 2.1308661e-06f, 6.9999784e-01f, -7.9999787e-01f, 8.9999789e-01f},
+    };
+
+    const std::vector<std::vector<f32>> expected_biases = {
+        {-0.08999871f, 0.07999881f, -0.06999888f},
+        {-0.18999726f, 0.17999741f, -0.16999754f},
+        {-0.2899965f, 0.27999675f, -0.2699969f},
+    };
+
+    const std::vector<std::vector<f32>> expected_m_weights = {
+        {0.07f, -0.08000001f, 0.09f, -0.1f, 0.11000001f, -0.12f},
+        {0.133f, -0.15200001f, 0.171f, -0.19f, 0.209f, -0.22800002f},
+        {0.1897f, -0.2168f, 0.2439f, -0.271f, 0.2981f, -0.32520002f},
+    };
+
+    const std::vector<std::vector<f32>> expected_v_weights = {
+        {0.00049f, 0.00064f, 0.00081f, 0.001f, 0.00121f, 0.00144f},
+        {0.00097951f, 0.00127936f, 0.00161919f, 0.001999f, 0.00241879f, 0.00287856f},
+        {0.00146853f, 0.00191808f, 0.00242757f, 0.002997f, 0.00362637f, 0.00431568f},
+    };
+
+    const std::vector<std::vector<f32>> expected_m_biases = {
+        {0.005f, -0.006f, 0.007f},
+        {0.0095f, -0.0114f, 0.0133f},
+        {0.01355f, -0.01626f, 0.01897f},
+    };
+
+    const std::vector<std::vector<f32>> expected_v_biases = {
+        {2.5000004e-06f, 3.6000001e-06f, 4.9000005e-06f},
+        {4.9975006e-06f, 7.1964005e-06f, 9.7951006e-06f},
+        {7.4925033e-06f, 1.0789205e-05f, 1.4685305e-05f},
+    };
+
+    for (usize step = 1; step <= 3; ++step)
+    {
+        layer.update(d_weights.const_view(), d_biases.const_view(), parameters, step).wait().unwrap();
+
+        const auto host_weights = download(layer.weights).unwrap();
+        const auto host_biases = download(layer.biases).unwrap();
+        const auto host_m_weights = download(layer.m_weights).unwrap();
+        const auto host_v_weights = download(layer.v_weights).unwrap();
+        const auto host_m_biases = download(layer.m_biases).unwrap();
+        const auto host_v_biases = download(layer.v_biases).unwrap();
+
+        const auto index = step - 1;
+        ASSERT_TRUE(are_close(host_weights, expected_weights[index], 1e-5f));
+        ASSERT_TRUE(are_close(host_biases, expected_biases[index], 1e-5f));
+        ASSERT_TRUE(are_close(host_m_weights, expected_m_weights[index], 1e-5f));
+        ASSERT_TRUE(are_close(host_v_weights, expected_v_weights[index], 1e-5f));
+        ASSERT_TRUE(are_close(host_m_biases, expected_m_biases[index], 1e-5f));
+        ASSERT_TRUE(are_close(host_v_biases, expected_v_biases[index], 1e-5f));
+    }
+}
