@@ -41,62 +41,119 @@ inline auto is_error(cudaError_t err) -> bool
     return err != cudaSuccess;
 }
 
+template <typename T>
+struct Ok
+{
+    T value;
+};
+
+template <typename E>
+struct Error
+{
+    E value;
+};
+
+template <typename T>
+auto ok(T value) -> Ok<std::decay_t<T>>
+{
+    return Ok<std::decay_t<T>>{std::move(value)};
+}
+
+template <typename E>
+auto error(E value) -> Error<std::decay_t<E>>
+{
+    return Error<std::decay_t<E>>{std::move(value)};
+}
+
 template <typename T, typename E>
 class Result
 {
   public:
-    Result(const T &value) : _union(std::in_place_index<0>, value)
+    using value_type = T;
+    using error_type = E;
+
+    static auto ok(T value) -> Result
+    {
+        return Result(std::move(value));
+    }
+
+    static auto error(E error) -> Result
+    {
+        return Result(std::move(error));
+    }
+
+    Result(Ok<T> ok) : storage(std::move(ok.value))
     {
     }
 
-    Result(T &&value) : _union(std::in_place_index<0>, std::move(value))
+    Result(Error<E> error) : storage(std::move(error.value))
     {
     }
 
-    Result(const E &error) : _union(std::in_place_index<1>, error)
+    auto is_ok() const -> bool
     {
-    }
-
-    Result(E &&error) : _union(std::in_place_index<1>, std::move(error))
-    {
-    }
-
-    auto unwrap() & -> T &
-    {
-        CHECK_MSG(is_some(), to_string(std::get<1>(_union)));
-        return std::get<0>(_union);
-    }
-
-    auto unwrap() && -> T
-    {
-        CHECK_MSG(is_some(), to_string(std::get<1>(_union)));
-        return std::move(std::get<0>(_union));
-    }
-
-    auto is_some() const -> bool
-    {
-        return _union.index() == 0;
+        return std::holds_alternative<T>(storage);
     }
 
     auto is_error() const -> bool
     {
-        return _union.index() == 1;
+        return std::holds_alternative<E>(storage);
+    }
+
+    auto unwrap() & -> T &
+    {
+        CHECK_MSG(is_ok(), "called unwrap() on Error Result");
+        return std::get<T>(storage);
+    }
+
+    auto unwrap() const & -> const T &
+    {
+        CHECK_MSG(is_ok(), "called unwrap() on Error Result");
+        return std::get<T>(storage);
+    }
+
+    auto unwrap() && -> T &&
+    {
+        CHECK_MSG(is_ok(), "called unwrap() on Error Result");
+        return std::move(std::get<T>(storage));
+    }
+
+    auto unwrap_error() & -> E &
+    {
+        CHECK_MSG(is_error(), "called unwrap_error() on Ok Result");
+        return std::get<E>(storage);
+    }
+
+    auto unwrap_error() const & -> const E &
+    {
+        CHECK_MSG(is_error(), "called unwrap_error() on Ok Result");
+        return std::get<E>(storage);
+    }
+
+    auto unwrap_error() && -> E &&
+    {
+        CHECK_MSG(is_error(), "called unwrap_error() on Ok Result");
+        return std::move(std::get<E>(storage));
+    }
+
+    auto unwrap_or(T fallback) const -> T
+    {
+        if (is_ok())
+        {
+            return std::get<T>(storage);
+        }
+        return std::move(fallback);
     }
 
   private:
-    template <typename... Args>
-    explicit Result(std::in_place_index_t<0>, Args &&...args)
-        : _union(std::in_place_index<0>, std::forward<Args>(args)...)
+    explicit Result(T value) : storage(std::move(value))
+    {
+    }
+    explicit Result(E error) : storage(std::move(error))
     {
     }
 
-    template <typename... Args>
-    explicit Result(std::in_place_index_t<1>, Args &&...args)
-        : _union(std::in_place_index<1>, std::forward<Args>(args)...)
-    {
-    }
-
-    std::variant<T, E> _union;
+    std::variant<T, E> storage;
 };
 
 template <usize Rank>
@@ -317,9 +374,9 @@ class CudaOwningTensor
         const auto err = cudaMalloc(&ptr, vika::byte_count<T>(extents));
         if (err)
         {
-            return err;
+            return error(err);
         }
-        return Self(ptr, extents);
+        return ok(Self(ptr, extents));
     }
 
     static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, cudaError_t>
@@ -334,7 +391,7 @@ class CudaOwningTensor
 
         if (is_error(err))
         {
-            return err;
+            return error(err);
         }
         return tensor;
     }
@@ -427,15 +484,15 @@ auto upload(const HostTensor<T, Rank> &src) -> Result<CudaOwningTensor<T, Rank>,
     auto dst = CudaOwningTensor<T, Rank>::empty(src.extents());
     if (dst.is_error())
     {
-        return dst;
+        return error(dst);
     }
 
     const auto err = copy(src, dst.unwrap());
     if (is_error(err))
     {
-        return err;
+        return error(err);
     }
-    return dst;
+    return ok(dst);
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
@@ -445,9 +502,9 @@ auto download(const CudaOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank
     const auto err = copy(src, dst);
     if (is_error(err))
     {
-        return err;
+        return error(err);
     }
-    return dst;
+    return ok(dst);
 }
 
 template <typename T, usize Rank>
