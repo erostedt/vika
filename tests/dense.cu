@@ -4,29 +4,6 @@
 
 #include "vika.cuh"
 
-UTEST(dense, forward)
-{
-    using namespace vika;
-    const auto inputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
-    const auto weights = DeviceOwningTensor2f::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
-    const auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
-    auto outputs = DeviceOwningTensor2f::empty({2, 2}).unwrap();
-
-    const u32 M = outputs.extent<0>();
-    const u32 N = outputs.extent<1>();
-    dim3 block(16, 16);
-    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    dense_forward<<<grid, block>>>(inputs.const_view(), weights.const_view(), bias.const_view(), outputs.view());
-    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-    const auto out = download(outputs).unwrap();
-    const std::vector<f32> expected = {59.0f, 66.0f, 140.0f, 156.0f};
-
-    EXPECT_EQ(out.rows(), 2u);
-    EXPECT_EQ(out.cols(), 2u);
-    ASSERT_TRUE(are_close(out, expected, 1e-5f));
-}
-
 UTEST(dense, layer_forward)
 {
     using namespace vika;
@@ -43,5 +20,24 @@ UTEST(dense, layer_forward)
 
     EXPECT_EQ(out.rows(), 2u);
     EXPECT_EQ(out.cols(), 2u);
+    ASSERT_TRUE(are_close(out, expected, 1e-5f));
+}
+
+UTEST(dense, layer_backward)
+{
+    using namespace vika;
+    const auto d_outputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
+    auto weights = DeviceOwningTensor2f::from({5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
+
+    const auto d_inputs = layer.backward(d_outputs.const_view());
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    const auto out = download(d_inputs).unwrap();
+    const std::vector<f32> expected = {17.0f, 23.0f, 29.0f, 39.0f, 53.0f, 67.0f};
+
+    EXPECT_EQ(out.rows(), 2u);
+    EXPECT_EQ(out.cols(), 3u);
     ASSERT_TRUE(are_close(out, expected, 1e-5f));
 }

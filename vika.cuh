@@ -552,8 +552,8 @@ auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Ra
 template <typename T, usize Rank>
 struct DeviceTensorView
 {
-    T *data;
-    usize extents[Rank];
+    T *data = nullptr;
+    usize extents[Rank] = {};
 
     __host__ __device__ inline usize element_count() const
     {
@@ -653,6 +653,9 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 __global__ auto dense_forward(DeviceTensorConstView2f inputs, DeviceTensorConstView2f weights,
                               DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void;
 
+__global__ auto dense_backward(DeviceTensorConstView2f d_outputs, DeviceTensorConstView2f weights,
+                               DeviceTensorView2f d_inputs) -> void;
+
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
     return 1.0f / (1.0f + std::exp(-x));
@@ -686,7 +689,6 @@ struct DenseLayer
             std::move(weights),
             std::move(biases),
             std::move(d_inputs),
-            std::move(d_outputs),
             std::move(d_weights),
             std::move(d_biases),
         });
@@ -701,9 +703,18 @@ struct DenseLayer
         dense_forward<<<grid, block>>>(inputs, weights.const_view(), biases.const_view(), outputs.view());
         return outputs.const_view();
     }
-    auto backward(const DeviceTensorConstView2f &gradient)
+    auto backward(const DeviceTensorConstView2f &upstream_gradient) -> DeviceTensorConstView2f
+    {
+        const u32 M = outputs.extent<0>();
+        const u32 N = outputs.extent<1>();
+        dim3 block(16, 16);
+        dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+        dense_backward<<<grid, block>>>(upstream_gradient, weights.const_view(), d_inputs.view());
+        return d_inputs.const_view();
+    }
+
+    auto weight_gradients(const DeviceTensorConstView2f &inputs, const DeviceTensorConstView2f &upstream_gradient)
         -> std::tuple<DeviceTensorConstView2f, DeviceTensorConstView2f>;
-    auto weight_gradients() -> std::tuple<DeviceTensorConstView2f, DeviceTensorConstView2f>;
     auto update() -> void;
 
     DeviceOwningTensor2f outputs;
@@ -711,17 +722,41 @@ struct DenseLayer
     DeviceOwningTensor1f biases;
 
     DeviceOwningTensor2f d_inputs;
-    DeviceOwningTensor2f d_outputs;
     DeviceOwningTensor2f d_weights;
     DeviceOwningTensor1f d_biases;
 };
 
 }; // namespace vika
+   //
 
 #ifdef VIKA_IMPLEMENTATION
 
 namespace vika
 {
+
+__global__ auto dense_backward(DeviceTensorConstView2f d_outputs, DeviceTensorConstView2f weights,
+                               DeviceTensorView2f d_inputs) -> void
+{
+    const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const usize sample_count = d_outputs.extents[0];
+    const usize neuron_count = d_outputs.extents[1];
+    const usize feature_count = weights.extents[0];
+
+    if (sample_index >= sample_count || row >= feature_count)
+    {
+        return;
+    }
+
+    f32 sum = 0;
+    for (usize neuron_index = 0; neuron_index < neuron_count; ++neuron_index)
+    {
+        sum += d_outputs(sample_index, neuron_index) * weights(row, neuron_index);
+    }
+
+    d_inputs(sample_index, row) = sum;
+}
 
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void
 {
@@ -785,9 +820,7 @@ __global__ auto dense_forward(DeviceTensorConstView2f inputs, DeviceTensorConstV
 // - Flatten weight update
 // - Flatten Layer
 //
-// - Dense Backward
 // - Dense weight update
-// - Dense Layer
 //
 // - Conv Forward
 // - Conv Backward
