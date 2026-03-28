@@ -379,7 +379,7 @@ struct DeviceDeleter
     }
 };
 
-template <typename T, usize Rank>
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
 struct DeviceTensorView;
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
@@ -461,24 +461,12 @@ class DeviceOwningTensor
 
     auto view() -> DeviceTensorView<T, Rank>
     {
-        DeviceTensorView<T, Rank> tensor_view = {.data = _data.get()};
-        for (usize i = 0; i < _extents.size(); ++i)
-        {
-            tensor_view.extents[i] = _extents[i];
-        }
-
-        return tensor_view;
+        return DeviceTensorView<T, Rank>(_data.get(), _extents);
     }
 
     auto const_view() const -> DeviceTensorView<const T, Rank>
     {
-        DeviceTensorView<const T, Rank> tensor_view = {.data = _data.get()};
-        for (usize i = 0; i < _extents.size(); ++i)
-        {
-            tensor_view.extents[i] = _extents[i];
-        }
-
-        return tensor_view;
+        return DeviceTensorView<const T, Rank>(_data.get(), _extents);
     }
 
   private:
@@ -549,11 +537,18 @@ auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Ra
     return download(src.const_view());
 }
 
-template <typename T, usize Rank>
+template <typename T, usize Rank, typename>
 struct DeviceTensorView
 {
+    DeviceTensorView(T *data_, const std::array<usize, Rank> &extents_) : data(data_)
+    {
+        std::copy(std::begin(extents_), std::end(extents_), extents);
+        std::exclusive_scan(std::rbegin(extents_), std::rend(extents_), std::rbegin(strides), 1, std::multiplies<>{});
+    }
+
     T *data = nullptr;
     usize extents[Rank] = {};
+    usize strides[Rank] = {};
 
     __host__ __device__ inline usize element_count() const
     {
@@ -595,37 +590,38 @@ struct DeviceTensorView
     template <usize R = Rank, typename = std::enable_if_t<R == 2>>
     __host__ __device__ inline T &operator()(usize x, usize y)
     {
-        return data[x * extents[1] + y];
+        return data[x * strides[0] + y * strides[1]];
     }
 
     template <usize R = Rank, typename = std::enable_if_t<R == 2>>
     __host__ __device__ inline const T &operator()(usize x, usize y) const
     {
-        return data[x * extents[1] + y];
+        return data[x * strides[0] + y * strides[1]];
     }
 
     template <usize R = Rank, typename = std::enable_if_t<R == 3>>
     __host__ __device__ inline T &operator()(usize x, usize y, usize z)
     {
-        return data[(x * extents[1] + y) * extents[2] + z];
+        return data[x * strides[0] + y * strides[1] + z * strides[2]];
     }
 
     template <usize R = Rank, typename = std::enable_if_t<R == 3>>
     __host__ __device__ inline const T &operator()(usize x, usize y, usize z) const
     {
-        return data[(x * extents[1] + y) * extents[2] + z];
+
+        return data[x * strides[0] + y * strides[1] + z * strides[2]];
     }
 
     template <usize R = Rank, typename = std::enable_if_t<R == 4>>
     __host__ __device__ inline T &operator()(usize x, usize y, usize z, usize w)
     {
-        return data[((x * extents[1] + y) * extents[2] + z) * extents[3] + w];
+        return data[x * strides[0] + y * strides[1] + z * strides[2] + w * strides[3]];
     }
 
     template <usize R = Rank, typename = std::enable_if_t<R == 4>>
     __host__ __device__ inline const T &operator()(usize x, usize y, usize z, usize w) const
     {
-        return data[((x * extents[1] + y) * extents[2] + z) * extents[3] + w];
+        return data[x * strides[0] + y * strides[1] + z * strides[2] + w * strides[3]];
     }
 };
 
