@@ -417,6 +417,12 @@ class DeviceOwningTensor
         return vika::byte_count<T>(_extents);
     }
 
+    template <usize Dimension, usize R = Rank, typename = std::enable_if_t<(Dimension < Rank)>>
+    auto extent() const -> usize
+    {
+        return _extents[Dimension];
+    }
+
     auto extents() const -> const Extents &
     {
         return _extents;
@@ -443,7 +449,7 @@ class DeviceOwningTensor
         return tensor_view;
     }
 
-    auto const_view() -> DeviceTensorView<const T, Rank>
+    auto const_view() const -> DeviceTensorView<const T, Rank>
     {
         DeviceTensorView<const T, Rank> tensor_view = {.data = _data.get()};
         for (usize i = 0; i < _extents.size(); ++i)
@@ -603,6 +609,9 @@ using DeviceTensorConstView4f = DeviceTensorConstViewf<4>;
 
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
+__global__ auto dense_forward(DeviceTensorConstView2f inputs, DeviceTensorConstView2f weights,
+                              DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void;
+
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
     return 1.0f / (1.0f + std::exp(-x));
@@ -621,6 +630,7 @@ __global__ auto sigmoid_kernel(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf
 }; // namespace vika
 
 #ifdef VIKA_IMPLEMENTATION
+
 namespace vika
 {
 
@@ -646,6 +656,30 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 
     out(row, col) = sum;
 }
+
+__global__ auto dense_forward(DeviceTensorConstView2f inputs, DeviceTensorConstView2f weights,
+                              DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void
+{
+    const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const usize sample_count = inputs.extents[0];
+    const usize feature_count = inputs.extents[1];
+    const usize n = weights.extents[1];
+
+    if (sample_index >= sample_count || col >= n)
+    {
+        return;
+    }
+
+    f32 sum = 0;
+    for (usize feature_index = 0; feature_index < feature_count; ++feature_index)
+    {
+        sum += inputs(sample_index, feature_index) * weights(feature_index, col);
+    }
+
+    out(sample_index, col) = sum + biases[col];
+}
 }; // namespace vika
 #endif
 
@@ -662,7 +696,6 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 // - Flatten weight update
 // - Flatten Layer
 //
-// - Dense Forward
 // - Dense Backward
 // - Dense weight update
 // - Dense Layer
