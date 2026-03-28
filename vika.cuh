@@ -350,7 +350,7 @@ using Vectoru = HostTensor<u32, 1>;
 using Matrixf = HostTensor2f;
 
 template <typename T>
-struct CudaDeleter
+struct DeviceDeleter
 {
     auto operator()(T *ptr)
     {
@@ -359,12 +359,12 @@ struct CudaDeleter
 };
 
 template <typename T, usize Rank>
-struct CudaTensorView;
+struct DeviceTensorView;
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-class CudaOwningTensor
+class DeviceOwningTensor
 {
-    using Self = CudaOwningTensor<T, Rank>;
+    using Self = DeviceOwningTensor<T, Rank>;
     using Extents = std::array<usize, Rank>;
 
   public:
@@ -432,9 +432,9 @@ class CudaOwningTensor
         return _data.get();
     }
 
-    auto view() -> CudaTensorView<T, Rank>
+    auto view() -> DeviceTensorView<T, Rank>
     {
-        CudaTensorView<T, Rank> tensor_view = {.data = _data.get()};
+        DeviceTensorView<T, Rank> tensor_view = {.data = _data.get()};
         for (usize i = 0; i < _extents.size(); ++i)
         {
             tensor_view.extents[i] = _extents[i];
@@ -443,9 +443,9 @@ class CudaOwningTensor
         return tensor_view;
     }
 
-    auto const_view() -> CudaTensorView<const T, Rank>
+    auto const_view() -> DeviceTensorView<const T, Rank>
     {
-        CudaTensorView<const T, Rank> tensor_view = {.data = _data.get()};
+        DeviceTensorView<const T, Rank> tensor_view = {.data = _data.get()};
         for (usize i = 0; i < _extents.size(); ++i)
         {
             tensor_view.extents[i] = _extents[i];
@@ -455,33 +455,33 @@ class CudaOwningTensor
     }
 
   private:
-    CudaOwningTensor(T *data, const Extents &extents) : _data(data), _extents(extents)
+    DeviceOwningTensor(T *data, const Extents &extents) : _data(data), _extents(extents)
     {
     }
 
   private:
-    std::unique_ptr<T[], CudaDeleter<T>> _data;
+    std::unique_ptr<T[], DeviceDeleter<T>> _data;
     Extents _extents;
 };
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const CudaOwningTensor<T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
+auto copy(const DeviceOwningTensor<T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
 {
     CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
     return cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const HostTensor<T, Rank> &src, CudaOwningTensor<T, Rank> &dst) -> cudaError_t
+auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> cudaError_t
 {
     CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
     return cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto upload(const HostTensor<T, Rank> &src) -> Result<CudaOwningTensor<T, Rank>, cudaError_t>
+auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank>, cudaError_t>
 {
-    auto dst = CudaOwningTensor<T, Rank>::empty(src.extents());
+    auto dst = DeviceOwningTensor<T, Rank>::empty(src.extents());
     if (dst.is_error())
     {
         return error(dst);
@@ -496,7 +496,7 @@ auto upload(const HostTensor<T, Rank> &src) -> Result<CudaOwningTensor<T, Rank>,
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const CudaOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
+auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
 {
     auto dst = HostTensor<T, Rank>::empty(src.extents());
     const auto err = copy(src, dst);
@@ -508,7 +508,7 @@ auto download(const CudaOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank
 }
 
 template <typename T, usize Rank>
-struct CudaTensorView
+struct DeviceTensorView
 {
     T *data;
     usize extents[Rank];
@@ -582,18 +582,26 @@ struct CudaTensorView
     }
 };
 
-using CudaOwningTensor1f = CudaOwningTensor<f32, 1>;
-using CudaOwningTensor2f = CudaOwningTensor<f32, 2>;
-using CudaOwningTensor3f = CudaOwningTensor<f32, 3>;
-using CudaOwningTensor4f = CudaOwningTensor<f32, 4>;
+using DeviceOwningTensor1f = DeviceOwningTensor<f32, 1>;
+using DeviceOwningTensor2f = DeviceOwningTensor<f32, 2>;
+using DeviceOwningTensor3f = DeviceOwningTensor<f32, 3>;
+using DeviceOwningTensor4f = DeviceOwningTensor<f32, 4>;
 
-using CudaTensorView1f = CudaTensorView<f32, 1>;
-using CudaTensorView2f = CudaTensorView<f32, 2>;
-using CudaTensorView3f = CudaTensorView<f32, 3>;
-using CudaTensorView4f = CudaTensorView<f32, 4>;
+template <usize Rank>
+using DeviceTensorViewf = DeviceTensorView<f32, Rank>;
+using DeviceTensorView1f = DeviceTensorViewf<1>;
+using DeviceTensorView2f = DeviceTensorViewf<2>;
+using DeviceTensorView3f = DeviceTensorViewf<3>;
+using DeviceTensorView4f = DeviceTensorViewf<4>;
 
-__global__ auto matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<const f32, 2> b,
-                              CudaTensorView<f32, 2> out) -> void;
+template <usize Rank>
+using DeviceTensorConstViewf = DeviceTensorView<const f32, Rank>;
+using DeviceTensorConstView1f = DeviceTensorConstViewf<1>;
+using DeviceTensorConstView2f = DeviceTensorConstViewf<2>;
+using DeviceTensorConstView3f = DeviceTensorConstViewf<3>;
+using DeviceTensorConstView4f = DeviceTensorConstViewf<4>;
+
+__global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
@@ -601,7 +609,7 @@ __host__ __device__ inline auto sigmoid(f32 x) -> f32
 }
 
 template <usize Rank>
-__global__ auto sigmoid_kernel(CudaTensorView<const f32, Rank> a, CudaTensorView<f32, Rank> out) -> void
+__global__ auto sigmoid_kernel(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf<Rank> out) -> void
 {
     const usize i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < a.element_count())
@@ -616,8 +624,7 @@ __global__ auto sigmoid_kernel(CudaTensorView<const f32, Rank> a, CudaTensorView
 namespace vika
 {
 
-__global__ auto matmul_kernel(CudaTensorView<const f32, 2> a, CudaTensorView<const f32, 2> b,
-                              CudaTensorView<f32, 2> out) -> void
+__global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void
 {
     const usize row = blockIdx.y * blockDim.y + threadIdx.y;
     const usize col = blockIdx.x * blockDim.x + threadIdx.x;

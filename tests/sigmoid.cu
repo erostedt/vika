@@ -7,8 +7,8 @@
 UTEST(sigmoid, small)
 {
     using namespace vika;
-    auto a = CudaOwningTensor1f::from({-3, -2, -1, 0, 1, 2, 3}).unwrap();
-    auto b = CudaOwningTensor1f::empty_like(a).unwrap();
+    auto a = DeviceOwningTensor1f::from({-3, -2, -1, 0, 1, 2, 3}).unwrap();
+    auto b = DeviceOwningTensor1f::empty_like(a).unwrap();
 
     dim3 block(1);
     dim3 grid(a.element_count());

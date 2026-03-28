@@ -7,9 +7,9 @@
 UTEST(matmul, small)
 {
     using namespace vika;
-    auto a = CudaOwningTensor2f::from({1, 2, 3, 4, 5, 6}, {2, 3}).unwrap();
-    auto b = CudaOwningTensor2f::from({7, 8, 9, 10, 11, 12}, {3, 2}).unwrap();
-    auto c = CudaOwningTensor2f::empty({2, 2}).unwrap();
+    auto a = DeviceOwningTensor2f::from({1, 2, 3, 4, 5, 6}, {2, 3}).unwrap();
+    auto b = DeviceOwningTensor2f::from({7, 8, 9, 10, 11, 12}, {3, 2}).unwrap();
+    auto c = DeviceOwningTensor2f::empty({2, 2}).unwrap();
 
     u32 M = 2;
     u32 N = 2;
