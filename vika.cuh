@@ -64,6 +64,12 @@ inline auto to_extents(const usize data[Rank]) -> std::array<usize, Rank>
     return extents;
 }
 
+template <usize Rank>
+inline auto extents_equal(const usize e1[Rank], const usize e2[Rank]) -> bool
+{
+    return std::equal(e1, e1 + Rank, e2, e2 + Rank);
+}
+
 template <typename T>
 struct Ok
 {
@@ -492,7 +498,7 @@ class DeviceOwningTensor
 };
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const DeviceOwningTensor<T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
+auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T, Rank> &dst) -> cudaError_t
 {
     CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
     return cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
@@ -501,9 +507,8 @@ auto copy(const DeviceOwningTensor<T, Rank> &src, HostTensor<T, Rank> &dst) -> c
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
 auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
 {
-    std::array<usize, Rank> extents;
-    std::copy(src.extents, src.extents + Rank, extents.begin());
-    CHECK_MSG((dst.extents() == extents), "element_mismatch");
+    const auto extents = to_extents<Rank>(src.extents);
+    CHECK_MSG(dst.extents() == extents, "element_mismatch");
     return cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
 }
 
@@ -680,12 +685,24 @@ __host__ __device__ inline auto sigmoid(f32 x) -> f32
 }
 
 template <usize Rank>
-__global__ auto sigmoid_kernel(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf<Rank> out) -> void
+__global__ auto sigmoid_forward(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf<Rank> out) -> void
 {
     const usize i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < a.element_count())
     {
         out[i] = sigmoid(a[i]);
+    }
+}
+
+template <usize Rank>
+__global__ auto sigmoid_backward(DeviceTensorConstViewf<Rank> a, DeviceTensorConstViewf<Rank> upstream_gradient,
+                                 DeviceTensorViewf<Rank> out) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < a.element_count())
+    {
+
+        out[i] = a[i] * (1.0 - a[i]) * upstream_gradient[i];
     }
 }
 
@@ -830,6 +847,45 @@ struct DenseLayer
     cudaStream_t stream;
 };
 
+struct SigmoidLayer
+{
+    static auto with_extents(const std::array<usize, 2> &extents) -> Result<SigmoidLayer, cudaError_t>
+    {
+        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
+
+        cudaStream_t stream;
+        return_on_cuda_error(cudaStreamCreate(&stream));
+        return ok(SigmoidLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = stream});
+    }
+
+    auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
+    {
+        CHECK_MSG(to_extents<2>(inputs.extents) == outputs.extents(), "MISMATCH");
+        usize threads = 256;
+        usize blocks = (inputs.element_count() + threads - 1) / threads;
+
+        sigmoid_forward<2><<<blocks, threads, 0, stream>>>(inputs, outputs.view());
+        return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
+    }
+
+    auto backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
+    {
+        CHECK_MSG(to_extents<2>(upstream_gradient.extents) == d_inputs.extents(), "MISMATCH");
+        CHECK_MSG(d_inputs.extents() == outputs.extents(), "MISMATCH");
+        usize threads = 256;
+        usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
+
+        sigmoid_backward<2><<<blocks, threads, 0, stream>>>(outputs.const_view(), upstream_gradient, d_inputs.view());
+        return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
+    }
+
+    DeviceOwningTensor2f outputs;
+    DeviceOwningTensor2f d_inputs;
+
+    cudaStream_t stream;
+};
+
 template <usize Rank>
 __global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf<Rank> d_weights,
                             DeviceTensorViewf<Rank> weights, DeviceTensorViewf<Rank> m_weights,
@@ -943,8 +999,6 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 // - Flatten Forward
 // - Flatten Backward
 // - Flatten Layer
-//
-// - Dense weight update
 //
 // - Conv Forward
 // - Conv Backward
