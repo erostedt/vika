@@ -886,6 +886,34 @@ struct SigmoidLayer
     cudaStream_t stream;
 };
 
+template <usize Rank, typename = std::enable_if_t<(Rank >= 2)>>
+struct Flatten2DLayer
+{
+    static auto with_extents(const std::array<usize, Rank> &extents) -> Flatten2DLayer<Rank>
+    {
+        return {extents};
+    }
+
+    inline auto forward(DeviceTensorConstViewf<Rank> inputs) const -> DeviceTensorConstView2f
+    {
+        CHECK_MSG(to_extents<Rank>(inputs.extents) == extents, "INVALID EXTENTS");
+
+        const auto batch = inputs.extents[0];
+        const usize features =
+            std::accumulate(inputs.extents + 1, inputs.extents + Rank, 1ul, std::multiplies<usize>{});
+        return DeviceTensorConstView2f(inputs.data, {batch, features});
+    }
+
+    inline auto backward(DeviceTensorConstViewf<Rank> upstream_gradient) const -> DeviceTensorConstViewf<Rank>
+    {
+        CHECK_MSG(element_count(to_extents<Rank>(upstream_gradient.extents)) == element_count(extents),
+                  "INVALID EXTENTS");
+        return DeviceTensorConstViewf<Rank>(upstream_gradient.data, extents);
+    }
+
+    std::array<usize, Rank> extents;
+};
+
 template <usize Rank>
 __global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf<Rank> d_weights,
                             DeviceTensorViewf<Rank> weights, DeviceTensorViewf<Rank> m_weights,
@@ -992,10 +1020,6 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 #endif
 
 // TODO (ecrt):
-// - Flatten Forward
-// - Flatten Backward
-// - Flatten Layer
-//
 // - Conv Forward
 // - Conv Backward
 // - Conv weight gradients
