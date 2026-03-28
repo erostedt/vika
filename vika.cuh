@@ -18,6 +18,9 @@ using u32 = uint32_t;
 using f32 = float;
 using usize = size_t;
 
+namespace vika
+{
+
 #define CHECK_MSG(expr, msg)                                                                                           \
     do                                                                                                                 \
     {                                                                                                                  \
@@ -28,8 +31,15 @@ using usize = size_t;
         }                                                                                                              \
     } while (0)
 
-namespace vika
-{
+#define unwrap_or_return(expr)                                                                                         \
+    ({                                                                                                                 \
+        auto _res = (expr);                                                                                            \
+        if (_res.is_error())                                                                                           \
+        {                                                                                                              \
+            return error(_res.unwrap_error());                                                                         \
+        }                                                                                                              \
+        std::move(_res.unwrap());                                                                                      \
+    })
 
 inline auto to_string(cudaError_t e) -> std::string
 {
@@ -39,6 +49,17 @@ inline auto to_string(cudaError_t e) -> std::string
 inline auto is_error(cudaError_t err) -> bool
 {
     return err != cudaSuccess;
+}
+
+template <usize Rank>
+inline auto to_extents(const usize data[Rank]) -> std::array<usize, Rank>
+{
+    std::array<usize, Rank> extents{};
+    for (usize i = 0; i < Rank; ++i)
+    {
+        extents[i] = data[i];
+    }
+    return extents;
 }
 
 template <typename T>
@@ -478,6 +499,15 @@ auto copy(const DeviceOwningTensor<T, Rank> &src, HostTensor<T, Rank> &dst) -> c
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
+{
+    std::array<usize, Rank> extents;
+    std::copy(src.extents, src.extents + Rank, extents.begin());
+    CHECK_MSG((dst.extents() == extents), "element_mismatch");
+    return cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
+}
+
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
 auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> cudaError_t
 {
     CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
@@ -502,9 +532,9 @@ auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
+auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
 {
-    auto dst = HostTensor<T, Rank>::empty(src.extents());
+    auto dst = HostTensor<T, Rank>::empty(to_extents<Rank>(src.extents));
     const auto err = copy(src, dst);
     if (is_error(err))
     {
@@ -513,13 +543,19 @@ auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Ra
     return ok(dst);
 }
 
+template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
+{
+    return download(src.const_view());
+}
+
 template <typename T, usize Rank>
 struct DeviceTensorView
 {
     T *data;
     usize extents[Rank];
 
-    __host__ __device__ inline usize element_count()
+    __host__ __device__ inline usize element_count() const
     {
         usize count = 1;
         for (usize i = 0; i < Rank; ++i)
@@ -527,6 +563,11 @@ struct DeviceTensorView
             count *= extents[i];
         }
         return count;
+    }
+
+    __host__ __device__ inline usize byte_count() const
+    {
+        return element_count() * sizeof(T);
     }
 
     __host__ __device__ inline T &operator[](usize i)
@@ -626,6 +667,54 @@ __global__ auto sigmoid_kernel(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf
         out[i] = sigmoid(a[i]);
     }
 }
+
+struct DenseLayer
+{
+    auto static with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
+        -> Result<DenseLayer, cudaError_t>
+    {
+        const auto feature_count = weights.extent<0>();
+        const auto neuron_count = weights.extent<1>();
+
+        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
+        auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+        auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
+        auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+        return ok<DenseLayer>({
+            std::move(outputs),
+            std::move(weights),
+            std::move(biases),
+            std::move(d_inputs),
+            std::move(d_outputs),
+            std::move(d_weights),
+            std::move(d_biases),
+        });
+    }
+
+    auto forward(const DeviceTensorConstView2f &inputs) -> DeviceTensorConstView2f
+    {
+        const u32 M = outputs.extent<0>();
+        const u32 N = outputs.extent<1>();
+        dim3 block(16, 16);
+        dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+        dense_forward<<<grid, block>>>(inputs, weights.const_view(), biases.const_view(), outputs.view());
+        return outputs.const_view();
+    }
+    auto backward(const DeviceTensorConstView2f &gradient)
+        -> std::tuple<DeviceTensorConstView2f, DeviceTensorConstView2f>;
+    auto weight_gradients() -> std::tuple<DeviceTensorConstView2f, DeviceTensorConstView2f>;
+    auto update() -> void;
+
+    DeviceOwningTensor2f outputs;
+    DeviceOwningTensor2f weights;
+    DeviceOwningTensor1f biases;
+
+    DeviceOwningTensor2f d_inputs;
+    DeviceOwningTensor2f d_outputs;
+    DeviceOwningTensor2f d_weights;
+    DeviceOwningTensor1f d_biases;
+};
 
 }; // namespace vika
 

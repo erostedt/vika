@@ -10,6 +10,8 @@ int main()
     auto a = DeviceOwningTensor2f::from({1, 2, 3, 4, 5, 6}, {2, 3}).unwrap();
     auto b = DeviceOwningTensor2f::from({7, 8, 9, 10, 11, 12}, {3, 2}).unwrap();
     auto c = DeviceOwningTensor2f::empty({2, 2}).unwrap();
+    auto d = DeviceOwningTensor1f::from({1, 2}).unwrap();
+    auto layer = DenseLayer::with_weights(4, std::move(b), std::move(d));
 
     u32 M = 2;
     u32 N = 2;
