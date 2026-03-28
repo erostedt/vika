@@ -677,6 +677,9 @@ __global__ auto sigmoid_kernel(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf
     }
 }
 
+__global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out)
+    -> void;
+
 template <typename T>
 struct KernelJob
 {
@@ -725,7 +728,8 @@ struct DenseLayer
         const u32 N = outputs.extent<1>();
         dim3 block(16, 16);
         dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-        dense_forward<<<grid, block, 0, stream>>>(inputs, weights.const_view(), biases.const_view(), outputs.view());
+        matmul_kernel<<<grid, block, 0, stream>>>(inputs, weights.const_view(), outputs.view());
+        add_bias<<<grid, block, 0, stream>>>(inputs, biases.const_view(), outputs.view());
         return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
     }
 
@@ -759,6 +763,22 @@ struct DenseLayer
 
 namespace vika
 {
+
+__global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void
+{
+    const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const usize sample_count = matrix.extents[0];
+    const usize bias_count = biases.extents[0];
+
+    if (sample_index >= sample_count || col >= bias_count)
+    {
+        return;
+    }
+
+    out(sample_index, col) += biases[col];
+}
 
 __global__ auto dense_backward(DeviceTensorConstView2f d_outputs, DeviceTensorConstView2f weights,
                                DeviceTensorView2f d_inputs) -> void
@@ -807,29 +827,6 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
     out(row, col) = sum;
 }
 
-__global__ auto dense_forward(DeviceTensorConstView2f inputs, DeviceTensorConstView2f weights,
-                              DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void
-{
-    const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
-    const usize col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    const usize sample_count = inputs.extents[0];
-    const usize feature_count = inputs.extents[1];
-    const usize n = weights.extents[1];
-
-    if (sample_index >= sample_count || col >= n)
-    {
-        return;
-    }
-
-    f32 sum = 0;
-    for (usize feature_index = 0; feature_index < feature_count; ++feature_index)
-    {
-        sum += inputs(sample_index, feature_index) * weights(feature_index, col);
-    }
-
-    out(sample_index, col) = sum + biases[col];
-}
 }; // namespace vika
 #endif
 
