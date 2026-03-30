@@ -53,33 +53,6 @@ using usize = size_t;
 namespace vika
 {
 
-inline auto to_string(cudaError_t e) -> std::string
-{
-    return cudaGetErrorString(e);
-}
-
-inline auto is_error(cudaError_t err) -> bool
-{
-    return err != cudaSuccess;
-}
-
-template <usize Rank>
-inline auto to_extents(const usize data[Rank]) -> std::array<usize, Rank>
-{
-    std::array<usize, Rank> extents{};
-    for (usize i = 0; i < Rank; ++i)
-    {
-        extents[i] = data[i];
-    }
-    return extents;
-}
-
-template <usize Rank>
-inline auto extents_equal(const usize e1[Rank], const usize e2[Rank]) -> bool
-{
-    return std::equal(e1, e1 + Rank, e2, e2 + Rank);
-}
-
 template <typename T>
 struct Ok
 {
@@ -194,6 +167,28 @@ class Result
 
     std::variant<T, E> storage;
 };
+
+inline auto is_error(cudaError_t err) -> bool
+{
+    return err != cudaSuccess;
+}
+
+template <usize Rank>
+inline auto to_extents(const usize data[Rank]) -> std::array<usize, Rank>
+{
+    std::array<usize, Rank> extents{};
+    for (usize i = 0; i < Rank; ++i)
+    {
+        extents[i] = data[i];
+    }
+    return extents;
+}
+
+template <usize Rank>
+inline auto extents_equal(const usize e1[Rank], const usize e2[Rank]) -> bool
+{
+    return std::equal(e1, e1 + Rank, e2, e2 + Rank);
+}
 
 template <usize Rank>
 inline auto element_count(const std::array<usize, Rank> &extents) -> usize
