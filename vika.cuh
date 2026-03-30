@@ -20,15 +20,21 @@ using u32 = uint32_t;
 using f32 = float;
 using usize = size_t;
 
-#define panic(reason)                                                                                                  \
-    fprintf(stderr, "Panicked due to: %s \n", (reason));                                                               \
-    exit(1);
-
-#define panic_if(expr, reason)                                                                                         \
-    if (expr)                                                                                                          \
+#define panic(fmt, ...)                                                                                                \
+    do                                                                                                                 \
     {                                                                                                                  \
-        panic(reason)                                                                                                  \
-    }
+        fprintf(stderr, "Panicked: " fmt "\n", ##__VA_ARGS__);                                                         \
+        exit(1);                                                                                                       \
+    } while (0)
+
+#define panic_if(expr, fmt, ...)                                                                                       \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (expr)                                                                                                      \
+        {                                                                                                              \
+            panic(fmt, ##__VA_ARGS__);                                                                                 \
+        }                                                                                                              \
+    } while (0)
 
 #define unwrap_or_return(expr)                                                                                         \
     ({                                                                                                                 \
@@ -46,7 +52,7 @@ using usize = size_t;
         const auto _err = (cudacall);                                                                                  \
         if (is_error(_err))                                                                                            \
         {                                                                                                              \
-            return error(_err);                                                                                        \
+            return error(DeviceError(_err));                                                                           \
         }                                                                                                              \
     } while (0)
 
@@ -172,6 +178,33 @@ inline auto is_error(cudaError_t err) -> bool
 {
     return err != cudaSuccess;
 }
+
+class DeviceError
+{
+  public:
+    DeviceError(cudaError_t err) : _code(err)
+    {
+        panic_if(!is_error(err), "%s %s", "Not an error type: ", cudaGetErrorName(_code));
+    }
+
+    auto name() -> std::string
+    {
+        return cudaGetErrorName(_code);
+    }
+
+    auto string() -> std::string
+    {
+        return cudaGetErrorString(_code);
+    }
+
+    [[noreturn]] auto crash() -> void
+    {
+        panic("Crashed due to: [%s] %s", cudaGetErrorName(_code), cudaGetErrorString(_code));
+    }
+
+  private:
+    cudaError_t _code;
+};
 
 template <usize Rank>
 inline auto to_extents(const usize data[Rank]) -> std::array<usize, Rank>
@@ -402,18 +435,18 @@ class DeviceOwningTensor
     using Extents = std::array<usize, Rank>;
 
   public:
-    static auto empty(const Extents &extents) -> Result<Self, cudaError_t>
+    static auto empty(const Extents &extents) -> Result<Self, DeviceError>
     {
         T *ptr = nullptr;
         const auto err = cudaMalloc(&ptr, vika::byte_count<T>(extents));
         if (err)
         {
-            return error(err);
+            return error(DeviceError(err));
         }
         return ok(Self(ptr, extents));
     }
 
-    static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, cudaError_t>
+    static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, DeviceError>
     {
         auto tensor = empty(extents);
         if (tensor.is_error())
@@ -425,18 +458,18 @@ class DeviceOwningTensor
 
         if (is_error(err))
         {
-            return error(err);
+            return error(DeviceError(err));
         }
         return tensor;
     }
 
     template <usize R = Rank, typename = std::enable_if_t<R == 1>>
-    static auto from(const std::vector<T> &data) -> Result<Self, cudaError_t>
+    static auto from(const std::vector<T> &data) -> Result<Self, DeviceError>
     {
         return from(data, {data.size()});
     }
 
-    static auto empty_like(const Self &other) -> Result<Self, cudaError_t>
+    static auto empty_like(const Self &other) -> Result<Self, DeviceError>
     {
         return empty(other.extents());
     }
@@ -515,7 +548,7 @@ auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> c
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank>, cudaError_t>
+auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank>, DeviceError>
 {
     auto dst = DeviceOwningTensor<T, Rank>::empty(src.extents());
     if (dst.is_error())
@@ -532,19 +565,19 @@ auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
+auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T, Rank>, DeviceError>
 {
     auto dst = HostTensor<T, Rank>::empty(to_extents<Rank>(src.extents));
     const auto err = copy(src, dst);
     if (is_error(err))
     {
-        return error(err);
+        return error(DeviceError(err));
     }
     return ok(dst);
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, cudaError_t>
+auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, DeviceError>
 {
     return download(src.const_view());
 }
@@ -709,12 +742,12 @@ __global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out)
 template <typename T>
 struct KernelJob
 {
-    auto wait() -> Result<T, cudaError_t>
+    auto wait() -> Result<T, DeviceError>
     {
         const auto err = cudaStreamSynchronize(stream);
         if (is_error(err))
         {
-            return error(err);
+            return error(DeviceError(err));
         }
         return ok(value);
     }
@@ -738,7 +771,7 @@ __global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensor
 struct DenseLayer
 {
     auto static with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
-        -> Result<DenseLayer, cudaError_t>
+        -> Result<DenseLayer, DeviceError>
     {
         const auto feature_count = weights.extent<0>();
         const auto neuron_count = weights.extent<1>();
@@ -844,7 +877,7 @@ struct DenseLayer
 
 struct SigmoidLayer
 {
-    static auto with_extents(const std::array<usize, 2> &extents) -> Result<SigmoidLayer, cudaError_t>
+    static auto with_extents(const std::array<usize, 2> &extents) -> Result<SigmoidLayer, DeviceError>
     {
         auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
         auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
