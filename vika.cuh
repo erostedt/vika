@@ -20,15 +20,15 @@ using u32 = uint32_t;
 using f32 = float;
 using usize = size_t;
 
-#define CHECK_MSG(expr, msg)                                                                                           \
-    do                                                                                                                 \
+#define panic(reason)                                                                                                  \
+    fprintf(stderr, "Panicked due to: %s \n", (reason));                                                               \
+    exit(1);
+
+#define panic_if(expr, reason)                                                                                         \
+    if (expr)                                                                                                          \
     {                                                                                                                  \
-        if (!(expr))                                                                                                   \
-        {                                                                                                              \
-            fprintf(stderr, "Check failed: %s\n", msg);                                                                \
-            assert(expr);                                                                                              \
-        }                                                                                                              \
-    } while (0)
+        panic(reason)                                                                                                  \
+    }
 
 #define unwrap_or_return(expr)                                                                                         \
     ({                                                                                                                 \
@@ -141,37 +141,37 @@ class Result
 
     auto unwrap() & -> T &
     {
-        CHECK_MSG(is_ok(), "called unwrap() on Error Result");
+        panic_if(is_error(), "called unwrap() on Error Result");
         return std::get<T>(storage);
     }
 
     auto unwrap() const & -> const T &
     {
-        CHECK_MSG(is_ok(), "called unwrap() on Error Result");
+        panic_if(is_error(), "called unwrap() on Error Result");
         return std::get<T>(storage);
     }
 
     auto unwrap() && -> T &&
     {
-        CHECK_MSG(is_ok(), "called unwrap() on Error Result");
+        panic_if(is_error(), "called unwrap() on Error Result");
         return std::move(std::get<T>(storage));
     }
 
     auto unwrap_error() & -> E &
     {
-        CHECK_MSG(is_error(), "called unwrap_error() on Ok Result");
+        panic_if(is_ok(), "called unwrap_error() on Ok Result");
         return std::get<E>(storage);
     }
 
     auto unwrap_error() const & -> const E &
     {
-        CHECK_MSG(is_error(), "called unwrap_error() on Ok Result");
+        panic_if(is_ok(), "called unwrap_error() on Ok Result");
         return std::get<E>(storage);
     }
 
     auto unwrap_error() && -> E &&
     {
-        CHECK_MSG(is_error(), "called unwrap_error() on Ok Result");
+        panic_if(is_ok(), "called unwrap_error() on Ok Result");
         return std::move(std::get<E>(storage));
     }
 
@@ -500,7 +500,7 @@ class DeviceOwningTensor
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
 auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T, Rank> &dst) -> cudaError_t
 {
-    CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
+    panic_if(src.extents() != dst.extents(), "element_mismatch");
     return cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
 }
 
@@ -508,14 +508,14 @@ template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmeti
 auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
 {
     const auto extents = to_extents<Rank>(src.extents);
-    CHECK_MSG(dst.extents() == extents, "element_mismatch");
+    panic_if(dst.extents() != extents, "element_mismatch");
     return cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
 auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> cudaError_t
 {
-    CHECK_MSG(src.extents() == dst.extents(), "element_mismatch");
+    panic_if(src.extents() != dst.extents(), "element_mismatch");
     return cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
 }
 
@@ -861,7 +861,7 @@ struct SigmoidLayer
 
     auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
     {
-        CHECK_MSG(to_extents<2>(inputs.extents) == outputs.extents(), "MISMATCH");
+        panic_if(to_extents<2>(inputs.extents) != outputs.extents(), "MISMATCH");
         usize threads = 256;
         usize blocks = (inputs.element_count() + threads - 1) / threads;
 
@@ -871,8 +871,8 @@ struct SigmoidLayer
 
     auto backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
     {
-        CHECK_MSG(to_extents<2>(upstream_gradient.extents) == d_inputs.extents(), "MISMATCH");
-        CHECK_MSG(d_inputs.extents() == outputs.extents(), "MISMATCH");
+        panic_if(to_extents<2>(upstream_gradient.extents) != d_inputs.extents(), "MISMATCH");
+        panic_if(d_inputs.extents() != outputs.extents(), "MISMATCH");
         usize threads = 256;
         usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
 
@@ -896,7 +896,7 @@ struct Flatten2DLayer
 
     inline auto forward(DeviceTensorConstViewf<Rank> inputs) const -> DeviceTensorConstView2f
     {
-        CHECK_MSG(to_extents<Rank>(inputs.extents) == extents, "INVALID EXTENTS");
+        panic_if(to_extents<Rank>(inputs.extents) != extents, "INVALID EXTENTS");
 
         const auto batch = inputs.extents[0];
         const usize features =
@@ -906,8 +906,8 @@ struct Flatten2DLayer
 
     inline auto backward(DeviceTensorConstViewf<Rank> upstream_gradient) const -> DeviceTensorConstViewf<Rank>
     {
-        CHECK_MSG(element_count(to_extents<Rank>(upstream_gradient.extents)) == element_count(extents),
-                  "INVALID EXTENTS");
+        panic_if(element_count(to_extents<Rank>(upstream_gradient.extents)) != element_count(extents),
+                 "INVALID EXTENTS");
         return DeviceTensorConstViewf<Rank>(upstream_gradient.data, extents);
     }
 
