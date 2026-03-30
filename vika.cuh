@@ -20,9 +20,6 @@ using u32 = uint32_t;
 using f32 = float;
 using usize = size_t;
 
-namespace vika
-{
-
 #define CHECK_MSG(expr, msg)                                                                                           \
     do                                                                                                                 \
     {                                                                                                                  \
@@ -42,6 +39,19 @@ namespace vika
         }                                                                                                              \
         std::move(_res.unwrap());                                                                                      \
     })
+
+#define return_on_cuda_error(cudacall)                                                                                 \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        const auto _err = (cudacall);                                                                                  \
+        if (is_error(_err))                                                                                            \
+        {                                                                                                              \
+            return error(_err);                                                                                        \
+        }                                                                                                              \
+    } while (0)
+
+namespace vika
+{
 
 inline auto to_string(cudaError_t e) -> std::string
 {
@@ -184,16 +194,6 @@ class Result
 
     std::variant<T, E> storage;
 };
-
-#define return_on_cuda_error(cudacall)                                                                                 \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        const auto _err = (cudacall);                                                                                  \
-        if (is_error(_err))                                                                                            \
-        {                                                                                                              \
-            return error(_err);                                                                                        \
-        }                                                                                                              \
-    } while (0)
 
 template <usize Rank>
 inline auto element_count(const std::array<usize, Rank> &extents) -> usize
