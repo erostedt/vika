@@ -375,15 +375,6 @@ class HostTensor
         return Self::zero(tensor.extents());
     }
 
-    template <usize NewRank>
-    static auto reshaped(const HostTensor<T, Rank> &tensor, const std::array<usize, NewRank> &extents)
-        -> HostTensor<T, NewRank>
-    {
-        assert(tensor.size() == (HostTensor<T, NewRank>::size(extents)));
-        auto data = tensor._data;
-        return HostTensor<T, NewRank>(std::move(data), extents);
-    }
-
     static auto from(std::initializer_list<T> data, const Extents &extents) -> Self
     {
         return copy_from(data, extents);
@@ -1085,7 +1076,5 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 // - CategoricalCrossEntropy Backward
 // - CategoricalCrossEntropy Layer
 //
-// - Adam optimizer
 // - Link layers
-// - Pick device
-// - Events/Async/Streams?
+// - Pick device?
