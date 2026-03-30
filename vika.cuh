@@ -59,6 +59,10 @@ using usize = size_t;
 namespace vika
 {
 
+struct Void
+{
+};
+
 template <typename T>
 struct Ok
 {
@@ -526,25 +530,40 @@ class DeviceOwningTensor
 };
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T, Rank> &dst) -> cudaError_t
+auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T, Rank> &dst) -> Result<Void, DeviceError>
 {
     panic_if(src.extents() != dst.extents(), "element_mismatch");
-    return cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
+    const auto err = cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
+    if (is_error(err))
+    {
+        return error(DeviceError(err));
+    }
+    return ok(Void{});
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T, Rank> &dst) -> cudaError_t
+auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T, Rank> &dst) -> Result<Void, DeviceError>
 {
     const auto extents = to_extents<Rank>(src.extents);
     panic_if(dst.extents() != extents, "element_mismatch");
-    return cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
+    const auto err = cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
+    if (is_error(err))
+    {
+        return error(DeviceError(err));
+    }
+    return ok(Void{});
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> cudaError_t
+auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> Result<Void, DeviceError>
 {
     panic_if(src.extents() != dst.extents(), "element_mismatch");
-    return cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
+    const auto err = cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
+    if (is_error(err))
+    {
+        return error(DeviceError(err));
+    }
+    return ok(Void{});
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
@@ -569,9 +588,9 @@ auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T
 {
     auto dst = HostTensor<T, Rank>::empty(to_extents<Rank>(src.extents));
     const auto err = copy(src, dst);
-    if (is_error(err))
+    if (err.is_error())
     {
-        return error(DeviceError(err));
+        return error(err.unwrap_error());
     }
     return ok(dst);
 }
