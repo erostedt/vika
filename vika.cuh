@@ -563,15 +563,15 @@ auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank
     auto dst = DeviceOwningTensor<T, Rank>::empty(src.extents());
     if (dst.is_error())
     {
-        return error(dst);
+        return error(dst.unwrap_error());
     }
 
     const auto err = copy(src, dst.unwrap());
-    if (is_error(err))
+    if (err.is_error())
     {
-        return error(err);
+        return error(err.unwrap_error());
     }
-    return ok(dst);
+    return dst;
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
@@ -711,6 +711,22 @@ inline auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConst
 
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
+// filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
+// grid: (ceil(W_out/bx), ceil(H_out/by), N*C_out), block: (bx, by, 1)
+__global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstView4f filters,
+                             DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
+    -> void;
+
+// filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
+// grid: (ceil(W_out/bx), ceil(H_out/by), N*C_out), block: (bx, by, 1)
+__global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstView4f filters,
+                             DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
+    -> void;
+
+// filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
+__global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstView4f filters,
+                             DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
+    -> void;
 
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
@@ -947,6 +963,59 @@ struct Flatten2DLayer
     std::array<usize, Rank> extents;
 };
 
+struct Conv2DLayer
+{
+    // filters: [kH, kW, C_in, C_out]
+    static auto with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
+                             DeviceOwningTensor1f biases, usize stride, usize padding)
+        -> Result<Conv2DLayer, DeviceError>
+    {
+        const usize kH    = filters.extent<0>();
+        const usize kW    = filters.extent<1>();
+        const usize C_out = filters.extent<3>();
+
+        const usize out_H = (input_height + 2 * padding - kH) / stride + 1;
+        const usize out_W = (input_width + 2 * padding - kW) / stride + 1;
+
+        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
+
+        cudaStream_t stream;
+        return_on_cuda_error(cudaStreamCreate(&stream));
+        return ok(Conv2DLayer{
+            .outputs = std::move(outputs),
+            .filters = std::move(filters),
+            .biases = std::move(biases),
+            .stride = stride,
+            .padding = padding,
+            .stream = stream,
+        });
+    }
+
+    auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
+    {
+        const usize N = outputs.extent<0>();
+        const usize H_out = outputs.extent<1>();
+        const usize W_out = outputs.extent<2>();
+        const usize C_out = outputs.extent<3>();
+
+        dim3 block(16, 16, 1);
+        dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C_out);
+
+        conv_forward<<<grid, block, 0, stream>>>(inputs, filters.const_view(), biases.const_view(), outputs.view(),
+                                                 stride, padding);
+        return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
+    }
+
+    DeviceOwningTensor4f outputs;
+    DeviceOwningTensor4f filters;
+    DeviceOwningTensor1f biases;
+
+    usize stride;
+    usize padding;
+
+    cudaStream_t stream;
+};
+
 template <usize Rank>
 __global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf<Rank> d_weights,
                             DeviceTensorViewf<Rank> weights, DeviceTensorViewf<Rank> m_weights,
@@ -1047,6 +1116,49 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
     }
 
     out(row, col) = sum;
+}
+
+__global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstView4f filters,
+                             DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
+    -> void
+{
+    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize oc = blockIdx.z % out.extents[3];
+    const usize n = blockIdx.z / out.extents[3];
+
+    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    {
+        return;
+    }
+
+    const usize kH   = filters.extents[0];
+    const usize kW   = filters.extents[1];
+    const usize C_in = filters.extents[2];
+    const usize H_in = inputs.extents[1];
+    const usize W_in = inputs.extents[2];
+
+    f32 sum = biases[oc];
+    for (usize kh = 0; kh < kH; ++kh)
+    {
+        for (usize kw = 0; kw < kW; ++kw)
+        {
+            // TODO: think of a better name for ih_unpadded/iw_unpadded
+            const usize ih_unpadded = oh * stride + kh;
+            const usize iw_unpadded = ow * stride + kw;
+            if (ih_unpadded >= padding && ih_unpadded - padding < H_in && iw_unpadded >= padding &&
+                iw_unpadded - padding < W_in)
+            {
+                const usize ih = ih_unpadded - padding;
+                const usize iw = iw_unpadded - padding;
+                for (usize ic = 0; ic < C_in; ++ic)
+                {
+                    sum += inputs(n, ih, iw, ic) * filters(kh, kw, ic, oc);
+                }
+            }
+        }
+    }
+    out(n, oh, ow, oc) = sum;
 }
 
 }; // namespace vika
