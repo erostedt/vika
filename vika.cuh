@@ -711,11 +711,6 @@ inline auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConst
 
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
-__global__ auto dense_forward(DeviceTensorConstView2f inputs, DeviceTensorConstView2f weights,
-                              DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void;
-
-__global__ auto dense_backward(DeviceTensorConstView2f d_outputs, DeviceTensorConstView2f weights,
-                               DeviceTensorView2f d_inputs) -> void;
 
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
@@ -848,7 +843,7 @@ struct DenseLayer
         matmul_kernel<<<grid, block, 0, stream>>>(transposed(inputs), upstream_gradient, d_weights.view());
 
         const auto block_dim = dim3(256);
-        const auto grid_dim = dim3(upstream_gradient.extents[0] + block_dim.x - 1 / block_dim.x);
+        const auto grid_dim = dim3((upstream_gradient.extents[1] + block_dim.x - 1) / block_dim.x);
         sum_rows<<<block_dim, grid_dim, 0, stream>>>(transposed(upstream_gradient), d_biases.view());
         return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>{
             std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
@@ -1058,6 +1053,7 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 #endif
 
 // TODO (ecrt):
+//
 // - Conv Forward
 // - Conv Backward
 // - Conv weight gradients
@@ -1078,3 +1074,8 @@ __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f
 //
 // - Link layers
 // - Pick device?
+// - Sequential model
+// - Non-sequential builder api
+// - XOR
+// - mnist
+// - unet
