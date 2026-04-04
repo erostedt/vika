@@ -984,6 +984,10 @@ struct Conv2DLayer
         auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
         auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+        auto m_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
+        auto v_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
+        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
 
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
@@ -994,6 +998,10 @@ struct Conv2DLayer
             .biases = std::move(biases),
             .d_filters = std::move(d_filters),
             .d_biases = std::move(d_biases),
+            .m_filters = std::move(m_filters),
+            .v_filters = std::move(v_filters),
+            .m_biases = std::move(m_biases),
+            .v_biases = std::move(v_biases),
             .stride = stride,
             .padding = padding,
             .stream = stream,
@@ -1044,12 +1052,31 @@ struct Conv2DLayer
             std::make_tuple(d_filters.const_view(), d_biases.const_view()), stream};
     }
 
+    auto update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_,
+                const AdamParameters &parameters, usize t) -> KernelJob<Void>
+    {
+        const usize filter_count = filters.element_count();
+        const usize bias_count = biases.element_count();
+        const usize threads = 256;
+
+        adam_update<4><<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
+            parameters, (f32)t, d_filters_, filters.view(), m_filters.view(), v_filters.view());
+        adam_update<1><<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
+            parameters, (f32)t, d_biases_, biases.view(), m_biases.view(), v_biases.view());
+
+        return KernelJob<Void>{Void{}, stream};
+    }
+
     DeviceOwningTensor4f outputs;
     DeviceOwningTensor4f d_inputs;
     DeviceOwningTensor4f filters;
     DeviceOwningTensor1f biases;
     DeviceOwningTensor4f d_filters;
     DeviceOwningTensor1f d_biases;
+    DeviceOwningTensor4f m_filters;
+    DeviceOwningTensor4f v_filters;
+    DeviceOwningTensor1f m_biases;
+    DeviceOwningTensor1f v_biases;
 
     usize stride;
     usize padding;
@@ -1334,10 +1361,6 @@ __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTens
 #endif
 
 // TODO (ecrt):
-//
-// - Conv weight gradients
-// - Conv weight update
-// - Conv Layer
 //
 // - Maxpool Forward
 // - Maxpool Backward
