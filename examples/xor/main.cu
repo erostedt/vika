@@ -1,6 +1,4 @@
 #include <cstdio>
-#include <random>
-#include <vector>
 
 #define VIKA_IMPLEMENTATION
 #include "vika.cuh"
@@ -39,34 +37,11 @@ int main()
     const auto inputs = upload(cpu_inputs).unwrap();
     const auto targets = upload(cpu_targets).unwrap();
 
-    // Weight initialization
-    std::mt19937 rng(42);
-    std::uniform_real_distribution<f32> dist(-1.0f, 1.0f);
-
-    auto rand_vec = [&](usize n) {
-        std::vector<f32> v(n);
-        for (auto &x : v)
-        {
-            x = dist(rng);
-        }
-        return v;
-    };
-
     // Layers
-    auto dense1 = DenseLayer::with_weights(
-                      batch_size, DeviceOwningTensor2f::from(rand_vec(2 * hidden_size), {2, hidden_size}).unwrap(),
-                      DeviceOwningTensor1f::from(rand_vec(hidden_size)).unwrap())
-                      .unwrap();
-
+    auto dense1 = DenseLayer::randomized(batch_size, 2, hidden_size, 42u).unwrap();
     auto sigmoid1 = SigmoidLayer::with_extents({batch_size, hidden_size}).unwrap();
-
-    auto dense2 = DenseLayer::with_weights(
-                      batch_size, DeviceOwningTensor2f::from(rand_vec(hidden_size * 1), {hidden_size, 1}).unwrap(),
-                      DeviceOwningTensor1f::from(rand_vec(1)).unwrap())
-                      .unwrap();
-
+    auto dense2 = DenseLayer::randomized(batch_size, hidden_size, 1, 43u).unwrap();
     auto sigmoid2 = SigmoidLayer::with_extents({batch_size, 1}).unwrap();
-
     auto loss_fn = MSELoss<2>::with_extents({batch_size, 1}).unwrap();
 
     const AdamParameters adam{

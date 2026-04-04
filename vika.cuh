@@ -469,6 +469,21 @@ class DeviceOwningTensor
         return empty(other.extents());
     }
 
+    static auto zero_like(const Self &other) -> Result<Self, DeviceError>
+    {
+        auto tensor = empty_like(other);
+        if (tensor.is_error())
+        {
+            return tensor;
+        }
+        const auto err = cudaMemset(tensor.unwrap().data(), 0, tensor.unwrap().byte_count());
+        if (is_error(err))
+        {
+            return error(DeviceError(err));
+        }
+        return tensor;
+    }
+
     auto element_count() const -> usize
     {
         return vika::element_count<Rank>(_extents);
@@ -789,6 +804,27 @@ auto uniform_tensor(DeviceTensorViewf<Rank> tensor, u32 seed) -> KernelJob<Void>
 }
 
 template <usize Rank>
+__global__ auto xavier_tensor_kernel(DeviceTensorViewf<Rank> tensor, u32 seed, f32 limit) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= tensor.element_count())
+    {
+        return;
+    }
+    tensor[i] = (uniform_f32((u32)i ^ seed) * 2.0f - 1.0f) * limit;
+}
+
+template <usize Rank>
+auto xavier_tensor(DeviceTensorViewf<Rank> tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>
+{
+    const f32 limit = std::sqrt(6.0f / (f32)(fan_in + fan_out));
+    const usize n = tensor.element_count();
+    const usize threads = 256;
+    xavier_tensor_kernel<Rank><<<(n + threads - 1) / threads, threads>>>(tensor, seed, limit);
+    return KernelJob<Void>{Void{}, 0};
+}
+
+template <usize Rank>
 __global__ auto sigmoid_forward(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf<Rank> out) -> void
 {
     const usize i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -843,11 +879,11 @@ struct DenseLayer
         auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
 
-        auto m_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
-        auto v_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
+        auto m_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
+        auto v_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
 
-        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
-        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
+        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
 
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
@@ -864,6 +900,17 @@ struct DenseLayer
             .v_biases = std::move(v_biases),
             .stream = stream,
         });
+    }
+
+    static auto randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
+        -> Result<DenseLayer, DeviceError>
+    {
+        auto weights = unwrap_or_return(DeviceOwningTensor2f::empty({input_features, neuron_count}));
+        auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
+
+        unwrap_or_return(xavier_tensor<2>(weights.view(), seed, input_features, neuron_count).wait());
+
+        return with_weights(batch_size, std::move(weights), std::move(biases));
     }
 
     auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
@@ -1021,10 +1068,10 @@ struct Conv2DLayer
         auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
         auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
-        auto m_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
-        auto v_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
-        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
-        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+        auto m_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
+        auto v_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
+        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
+        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
 
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
@@ -1043,6 +1090,18 @@ struct Conv2DLayer
             .padding = padding,
             .stream = stream,
         });
+    }
+
+    static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
+                           usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>
+    {
+        auto filters = unwrap_or_return(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
+        auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
+
+        unwrap_or_return(xavier_tensor<4>(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
+
+        return with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride,
+                            padding);
     }
 
     auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
@@ -1476,10 +1535,9 @@ __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTens
 // - CategoricalCrossEntropy Backward
 // - CategoricalCrossEntropy Layer
 //
-// - Link layers
+// - Dynamic indexing (remove Rank template)
 // - Pick device?
 // - Sequential model
 // - Non-sequential builder api
-// - XOR
 // - mnist
 // - unet
