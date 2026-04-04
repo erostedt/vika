@@ -120,6 +120,10 @@ UTEST(conv, backward_valid_stride1)
     const auto upstream = upload(cpu_upstream).unwrap();
 
     const auto d_inputs = download(layer.backward(upstream.const_view()).wait().unwrap()).unwrap();
+    const auto [gpu_d_weights, gpu_d_biases] =
+        layer.weight_gradients(inputs.const_view(), upstream.const_view()).wait().unwrap();
+    const auto d_weights = download(gpu_d_weights).unwrap();
+    const auto d_biases = download(gpu_d_biases).unwrap();
 
     EXPECT_EQ(d_inputs.extent<0>(), batch);
     EXPECT_EQ(d_inputs.extent<1>(), height);
@@ -135,4 +139,20 @@ UTEST(conv, backward_valid_stride1)
     EXPECT_NEAR(d_inputs(1, 3, 3, 0), 91.2f, 1e-4f);
     EXPECT_NEAR(d_inputs(1, 0, 0, 1), 5.7f, 1e-4f);
     EXPECT_NEAR(d_inputs(1, 2, 1, 1), 220.2f, 1e-4f);
+
+    EXPECT_EQ(d_weights.extent<0>(), kernel_height);
+    EXPECT_EQ(d_weights.extent<1>(), kernel_width);
+    EXPECT_EQ(d_weights.extent<2>(), channels);
+    EXPECT_EQ(d_weights.extent<3>(), out_channels);
+
+    EXPECT_NEAR(d_weights(0, 0, 0, 0), 4232.8f, 1e-3f);
+    EXPECT_NEAR(d_weights(1, 1, 0, 0), 4290.0f, 1e-3f);
+    EXPECT_NEAR(d_weights(2, 2, 0, 0), 4347.2f, 1e-3f);
+    EXPECT_NEAR(d_weights(0, 0, 1, 0), 4752.8f, 1e-3f);
+    EXPECT_NEAR(d_weights(2, 2, 1, 0), 4867.2f, 1e-3f);
+    EXPECT_NEAR(d_weights(0, 0, 0, 1), 5850.4f, 1e-3f);
+    EXPECT_NEAR(d_weights(1, 1, 0, 1), 5942.8f, 1e-3f);
+    EXPECT_NEAR(d_weights(2, 2, 0, 1), 6035.2f, 1e-3f);
+    EXPECT_NEAR(d_weights(0, 0, 1, 1), 6690.4f, 1e-3f);
+    EXPECT_NEAR(d_weights(2, 2, 1, 1), 6875.2f, 1e-3f);
 }

@@ -717,16 +717,18 @@ __global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstVi
                              DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
     -> void;
 
-// filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
-// grid: (ceil(W_out/bx), ceil(H_out/by), N*C_out), block: (bx, by, 1)
-__global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstView4f filters,
-                             DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
-    -> void;
-
 // filters: [kH, kW, C_in, C_out], upstream: [N, out_H, out_W, C_out], d_inputs: [N, H, W, C_in]
 // grid: (ceil(W_in/bx), ceil(H_in/by), N*C_in), block: (bx, by, 1)
 __global__ auto conv_backward(DeviceTensorConstView4f upstream, DeviceTensorConstView4f filters,
                               DeviceTensorView4f d_inputs, usize stride, usize padding) -> void;
+
+// inputs: [N, H, W, C_in], upstream: [N, out_H, out_W, C_out], d_filters: [kH, kW, C_in, C_out]
+// 1D grid over all filter elements
+__global__ auto conv_weight_gradients(DeviceTensorConstView4f inputs, DeviceTensorConstView4f upstream,
+                                      DeviceTensorView4f d_filters, usize stride, usize padding) -> void;
+
+// upstream: [N, out_H, out_W, C_out], d_biases: [C_out], 1D grid over C_out
+__global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTensorView1f d_biases) -> void;
 
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
@@ -866,7 +868,7 @@ struct DenseLayer
     }
 
     auto update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases, const AdamParameters &parameters,
-                usize t) -> KernelJob<std::monostate>
+                usize t) -> KernelJob<Void>
     {
         const auto weight_count = d_weights.element_count();
         const auto bias_count = d_biases.element_count();
@@ -877,7 +879,7 @@ struct DenseLayer
                                                               m_weights.view(), v_weights.view());
         adam_update<1><<<bias_blocks, threads, 0, stream>>>(parameters, (f32)t, d_biases, biases.view(),
                                                             m_biases.view(), v_biases.view());
-        return KernelJob<std::monostate>{std::monostate{}, stream};
+        return KernelJob<Void>{Void{}, stream};
     }
 
     DeviceOwningTensor2f outputs;
@@ -980,6 +982,8 @@ struct Conv2DLayer
 
         auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
         auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
+        auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
+        auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
 
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
@@ -988,6 +992,8 @@ struct Conv2DLayer
             .d_inputs = std::move(d_inputs),
             .filters = std::move(filters),
             .biases = std::move(biases),
+            .d_filters = std::move(d_filters),
+            .d_biases = std::move(d_biases),
             .stride = stride,
             .padding = padding,
             .stream = stream,
@@ -1023,10 +1029,27 @@ struct Conv2DLayer
         return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
     }
 
+    auto weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
+        -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>
+    {
+        const usize filter_count = d_filters.element_count();
+        const usize C_out = d_biases.element_count();
+        const usize threads = 256;
+
+        conv_weight_gradients<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
+            inputs, upstream, d_filters.view(), stride, padding);
+        conv_bias_gradients<<<(C_out + threads - 1) / threads, threads, 0, stream>>>(upstream, d_biases.view());
+
+        return KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>{
+            std::make_tuple(d_filters.const_view(), d_biases.const_view()), stream};
+    }
+
     DeviceOwningTensor4f outputs;
     DeviceOwningTensor4f d_inputs;
     DeviceOwningTensor4f filters;
     DeviceOwningTensor1f biases;
+    DeviceOwningTensor4f d_filters;
+    DeviceOwningTensor1f d_biases;
 
     usize stride;
     usize padding;
@@ -1231,13 +1254,87 @@ __global__ auto conv_backward(DeviceTensorConstView4f upstream, DeviceTensorCons
     d_inputs(n, h, w, ic) = sum;
 }
 
+__global__ auto conv_weight_gradients(DeviceTensorConstView4f inputs, DeviceTensorConstView4f upstream,
+                                      DeviceTensorView4f d_filters, usize stride, usize padding) -> void
+{
+    const usize idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= d_filters.element_count())
+    {
+        return;
+    }
+
+    const usize C_out = d_filters.extents[3];
+    const usize C_in = d_filters.extents[2];
+    const usize kW = d_filters.extents[1];
+
+    const usize oc = idx % C_out;
+    const usize ic = (idx / C_out) % C_in;
+    const usize kw = (idx / (C_out * C_in)) % kW;
+    const usize kh = idx / (C_out * C_in * kW);
+
+    const usize N = inputs.extents[0];
+    const usize H_in = inputs.extents[1];
+    const usize W_in = inputs.extents[2];
+    const usize H_out = upstream.extents[1];
+    const usize W_out = upstream.extents[2];
+
+    f32 sum = 0.0f;
+    for (usize n = 0; n < N; ++n)
+    {
+        for (usize oh = 0; oh < H_out; ++oh)
+        {
+            const usize ih_unpadded = oh * stride + kh;
+            if (ih_unpadded < padding || ih_unpadded - padding >= H_in)
+            {
+                continue;
+            }
+            const usize ih = ih_unpadded - padding;
+            for (usize ow = 0; ow < W_out; ++ow)
+            {
+                const usize iw_unpadded = ow * stride + kw;
+                if (iw_unpadded < padding || iw_unpadded - padding >= W_in)
+                {
+                    continue;
+                }
+                const usize iw = iw_unpadded - padding;
+                sum += inputs(n, ih, iw, ic) * upstream(n, oh, ow, oc);
+            }
+        }
+    }
+    d_filters(kh, kw, ic, oc) = sum;
+}
+
+__global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTensorView1f d_biases) -> void
+{
+    const usize oc = blockIdx.x * blockDim.x + threadIdx.x;
+    if (oc >= d_biases.extents[0])
+    {
+        return;
+    }
+
+    const usize N = upstream.extents[0];
+    const usize H_out = upstream.extents[1];
+    const usize W_out = upstream.extents[2];
+
+    f32 sum = 0.0f;
+    for (usize n = 0; n < N; ++n)
+    {
+        for (usize oh = 0; oh < H_out; ++oh)
+        {
+            for (usize ow = 0; ow < W_out; ++ow)
+            {
+                sum += upstream(n, oh, ow, oc);
+            }
+        }
+    }
+    d_biases[oc] = sum;
+}
+
 }; // namespace vika
 #endif
 
 // TODO (ecrt):
 //
-// - Conv Forward
-// - Conv Backward
 // - Conv weight gradients
 // - Conv weight update
 // - Conv Layer
