@@ -1119,6 +1119,71 @@ __global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensor
     weights[i] -= parameters.learning_rate * m_hat / (std::sqrt(v_hat) + parameters.epsilon);
 }
 
+template <usize Rank>
+__global__ auto mse_kernel(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets,
+                           DeviceTensorViewf<1> out) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= predictions.element_count())
+    {
+        return;
+    }
+    const f32 diff = predictions[i] - targets[i];
+    atomicAdd(&out[0], diff * diff / (f32)predictions.element_count());
+}
+
+template <usize Rank>
+__global__ auto mse_gradient_kernel(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets,
+                                    DeviceTensorViewf<Rank> out) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= predictions.element_count())
+    {
+        return;
+    }
+    out[i] = 2.0f * (predictions[i] - targets[i]) / (f32)predictions.element_count();
+}
+
+template <usize Rank>
+struct MSELoss
+{
+    static auto with_extents(const std::array<usize, Rank> &extents) -> Result<MSELoss, DeviceError>
+    {
+        auto loss = unwrap_or_return(DeviceOwningTensor1f::empty({1}));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensorf<Rank>::empty(extents));
+
+        cudaStream_t stream;
+        return_on_cuda_error(cudaStreamCreate(&stream));
+        return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = stream});
+    }
+
+    auto forward(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets)
+        -> KernelJob<DeviceTensorConstView1f>
+    {
+        cudaMemsetAsync(loss.data(), 0, sizeof(f32), stream);
+
+        const usize n = predictions.element_count();
+        const usize threads = 256;
+        mse_kernel<Rank><<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, loss.view());
+        return KernelJob<DeviceTensorConstView1f>{loss.const_view(), stream};
+    }
+
+    auto backward(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets)
+        -> KernelJob<DeviceTensorConstViewf<Rank>>
+    {
+        const usize n = predictions.element_count();
+        const usize threads = 256;
+        mse_gradient_kernel<Rank>
+            <<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
+        return KernelJob<DeviceTensorConstViewf<Rank>>{d_inputs.const_view(), stream};
+    }
+
+    DeviceOwningTensor1f loss;
+    DeviceOwningTensorf<Rank> d_inputs;
+
+    cudaStream_t stream;
+};
+
 }; // namespace vika
 
 #ifdef VIKA_IMPLEMENTATION
