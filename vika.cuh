@@ -723,10 +723,10 @@ __global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstVi
                              DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
     -> void;
 
-// filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
-__global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstView4f filters,
-                             DeviceTensorConstView1f biases, DeviceTensorView4f out, usize stride, usize padding)
-    -> void;
+// filters: [kH, kW, C_in, C_out], upstream: [N, out_H, out_W, C_out], d_inputs: [N, H, W, C_in]
+// grid: (ceil(W_in/bx), ceil(H_in/by), N*C_in), block: (bx, by, 1)
+__global__ auto conv_backward(DeviceTensorConstView4f upstream, DeviceTensorConstView4f filters,
+                              DeviceTensorView4f d_inputs, usize stride, usize padding) -> void;
 
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
@@ -970,19 +970,22 @@ struct Conv2DLayer
                              DeviceOwningTensor1f biases, usize stride, usize padding)
         -> Result<Conv2DLayer, DeviceError>
     {
-        const usize kH    = filters.extent<0>();
-        const usize kW    = filters.extent<1>();
+        const usize kH = filters.extent<0>();
+        const usize kW = filters.extent<1>();
         const usize C_out = filters.extent<3>();
 
+        const usize C_in = filters.extent<2>();
         const usize out_H = (input_height + 2 * padding - kH) / stride + 1;
         const usize out_W = (input_width + 2 * padding - kW) / stride + 1;
 
         auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
 
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
         return ok(Conv2DLayer{
             .outputs = std::move(outputs),
+            .d_inputs = std::move(d_inputs),
             .filters = std::move(filters),
             .biases = std::move(biases),
             .stride = stride,
@@ -1006,7 +1009,22 @@ struct Conv2DLayer
         return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
     }
 
+    auto backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
+    {
+        const usize N = d_inputs.extent<0>();
+        const usize H_in = d_inputs.extent<1>();
+        const usize W_in = d_inputs.extent<2>();
+        const usize C_in = d_inputs.extent<3>();
+
+        dim3 block(16, 16, 1);
+        dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, N * C_in);
+
+        conv_backward<<<grid, block, 0, stream>>>(upstream, filters.const_view(), d_inputs.view(), stride, padding);
+        return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
+    }
+
     DeviceOwningTensor4f outputs;
+    DeviceOwningTensor4f d_inputs;
     DeviceOwningTensor4f filters;
     DeviceOwningTensor1f biases;
 
@@ -1132,8 +1150,8 @@ __global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstVi
         return;
     }
 
-    const usize kH   = filters.extents[0];
-    const usize kW   = filters.extents[1];
+    const usize kH = filters.extents[0];
+    const usize kW = filters.extents[1];
     const usize C_in = filters.extents[2];
     const usize H_in = inputs.extents[1];
     const usize W_in = inputs.extents[2];
@@ -1159,6 +1177,58 @@ __global__ auto conv_forward(DeviceTensorConstView4f inputs, DeviceTensorConstVi
         }
     }
     out(n, oh, ow, oc) = sum;
+}
+
+__global__ auto conv_backward(DeviceTensorConstView4f upstream, DeviceTensorConstView4f filters,
+                              DeviceTensorView4f d_inputs, usize stride, usize padding) -> void
+{
+    const usize w = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize h = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize ic = blockIdx.z % d_inputs.extents[3];
+    const usize n = blockIdx.z / d_inputs.extents[3];
+
+    if (w >= d_inputs.extents[2] || h >= d_inputs.extents[1] || n >= d_inputs.extents[0])
+    {
+        return;
+    }
+
+    const usize kH = filters.extents[0];
+    const usize kW = filters.extents[1];
+    const usize C_out = filters.extents[3];
+    const usize H_out = upstream.extents[1];
+    const usize W_out = upstream.extents[2];
+
+    f32 sum = 0.0f;
+    for (usize kh = 0; kh < kH; ++kh)
+    {
+        for (usize kw = 0; kw < kW; ++kw)
+        {
+            // The output position that consumed inputs[n, h, w] via filter[kh, kw] satisfies:
+            // oh * stride = h + padding - kh  (must be a non-negative multiple of stride)
+            // ow * stride = w + padding - kw
+            if (h + padding < kh || w + padding < kw)
+            {
+                continue;
+            }
+            const usize oh_unpadded = h + padding - kh;
+            const usize ow_unpadded = w + padding - kw;
+            if (oh_unpadded % stride != 0 || ow_unpadded % stride != 0)
+            {
+                continue;
+            }
+            const usize oh = oh_unpadded / stride;
+            const usize ow = ow_unpadded / stride;
+            if (oh >= H_out || ow >= W_out)
+            {
+                continue;
+            }
+            for (usize oc = 0; oc < C_out; ++oc)
+            {
+                sum += upstream(n, oh, ow, oc) * filters(kh, kw, ic, oc);
+            }
+        }
+    }
+    d_inputs(n, h, w, ic) = sum;
 }
 
 }; // namespace vika
