@@ -709,6 +709,22 @@ inline auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConst
     return transposed_view;
 }
 
+template <typename T>
+struct KernelJob
+{
+    auto wait() -> Result<T, DeviceError>
+    {
+        const auto err = cudaStreamSynchronize(stream);
+        if (is_error(err))
+        {
+            return error(DeviceError(err));
+        }
+        return ok(value);
+    }
+    T value;
+    cudaStream_t stream;
+};
+
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
 // filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
@@ -733,6 +749,43 @@ __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTens
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
     return 1.0f / (1.0f + std::exp(-x));
+}
+
+__device__ inline auto pcg_hash(u32 input) -> u32
+{
+    u32 state = input * 747796405u + 2891336453u;
+    u32 word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+__device__ inline auto hash_to_float(u32 hash) -> f32
+{
+    return __uint_as_float((hash >> 9u) | 0x3f800000u) - 1.0f;
+}
+
+__device__ inline auto uniform_f32(u32 seed) -> f32
+{
+    return hash_to_float(pcg_hash(seed));
+}
+
+template <usize Rank>
+__global__ auto uniform_tensor_kernel(DeviceTensorViewf<Rank> tensor, u32 seed) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= tensor.element_count())
+    {
+        return;
+    }
+    tensor[i] = uniform_f32((u32)i ^ seed);
+}
+
+template <usize Rank>
+auto uniform_tensor(DeviceTensorViewf<Rank> tensor, u32 seed) -> KernelJob<Void>
+{
+    const usize n = tensor.element_count();
+    const usize threads = 256;
+    uniform_tensor_kernel<Rank><<<(n + threads - 1) / threads, threads>>>(tensor, seed);
+    return KernelJob<Void>{Void{}, 0};
 }
 
 template <usize Rank>
@@ -761,22 +814,6 @@ __global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f
     -> void;
 
 __global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out) -> void;
-
-template <typename T>
-struct KernelJob
-{
-    auto wait() -> Result<T, DeviceError>
-    {
-        const auto err = cudaStreamSynchronize(stream);
-        if (is_error(err))
-        {
-            return error(DeviceError(err));
-        }
-        return ok(value);
-    }
-    T value;
-    cudaStream_t stream;
-};
 
 struct AdamParameters
 {
