@@ -1669,10 +1669,6 @@ __global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorV
 // - Softmax Backward
 // - Softmax Layer
 //
-// - Softmax Forward
-// - Softmax Backward
-// - Softmax Layer
-//
 // - CategoricalCrossEntropy Forward
 // - CategoricalCrossEntropy Backward
 // - CategoricalCrossEntropy Layer
@@ -1681,5 +1677,4 @@ __global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorV
 // - Pick device?
 // - Sequential model
 // - Non-sequential builder api
-// - horizontal/vertical line
 // - unet
