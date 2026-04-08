@@ -761,6 +761,16 @@ __global__ auto conv_weight_gradients(DeviceTensorConstView4f inputs, DeviceTens
 // upstream: [N, out_H, out_W, C_out], d_biases: [C_out], 1D grid over C_out
 __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTensorView1f d_biases) -> void;
 
+// inputs: [N, H, W, C], out: [N, out_H, out_W, C], argmax: [N, out_H, out_W, C]
+// grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
+__global__ auto maxpool_forward(DeviceTensorConstView4f inputs, DeviceTensorView4f out, DeviceTensorView<u32, 4> argmax,
+                                usize pool_h, usize pool_w, usize stride) -> void;
+
+// upstream: [N, out_H, out_W, C], argmax: [N, out_H, out_W, C], d_inputs: [N, H, W, C]
+// grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
+__global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorView<const u32, 4> argmax,
+                                 DeviceTensorView4f d_inputs) -> void;
+
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
     return 1.0f / (1.0f + std::exp(-x));
@@ -1039,10 +1049,9 @@ struct Flatten2DLayer
         return DeviceTensorConstView2f(inputs.data, {batch, features});
     }
 
-    inline auto backward(DeviceTensorConstViewf<Rank> upstream_gradient) const -> DeviceTensorConstViewf<Rank>
+    inline auto backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf<Rank>
     {
-        panic_if(element_count(to_extents<Rank>(upstream_gradient.extents)) != element_count(extents),
-                 "INVALID EXTENTS");
+        panic_if(element_count(to_extents<2>(upstream_gradient.extents)) != element_count(extents), "INVALID EXTENTS");
         return DeviceTensorConstViewf<Rank>(upstream_gradient.data, extents);
     }
 
@@ -1176,6 +1185,73 @@ struct Conv2DLayer
 
     usize stride;
     usize padding;
+
+    cudaStream_t stream;
+};
+
+struct MaxPool2DLayer
+{
+    static auto with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
+                             usize pool_w, usize stride) -> Result<MaxPool2DLayer, DeviceError>
+    {
+        const usize out_H = (input_height - pool_h) / stride + 1;
+        const usize out_W = (input_width - pool_w) / stride + 1;
+
+        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
+        auto argmax = unwrap_or_return((DeviceOwningTensor<u32, 4>::empty({batch_size, out_H, out_W, channels})));
+        auto d_inputs =
+            unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, channels}));
+
+        cudaStream_t stream;
+        return_on_cuda_error(cudaStreamCreate(&stream));
+        return ok(MaxPool2DLayer{
+            .outputs = std::move(outputs),
+            .argmax = std::move(argmax),
+            .d_inputs = std::move(d_inputs),
+            .pool_h = pool_h,
+            .pool_w = pool_w,
+            .stride = stride,
+            .stream = stream,
+        });
+    }
+
+    auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
+    {
+        const usize N = outputs.extent<0>();
+        const usize H_out = outputs.extent<1>();
+        const usize W_out = outputs.extent<2>();
+        const usize C = outputs.extent<3>();
+
+        dim3 block(16, 16, 1);
+        dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
+
+        maxpool_forward<<<grid, block, 0, stream>>>(inputs, outputs.view(), argmax.view(), pool_h, pool_w, stride);
+        return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
+    }
+
+    auto backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
+    {
+        const usize H_out = upstream.extents[1];
+        const usize W_out = upstream.extents[2];
+        const usize N = d_inputs.extent<0>();
+        const usize C = d_inputs.extent<3>();
+
+        cudaMemsetAsync(d_inputs.data(), 0, d_inputs.byte_count(), stream);
+
+        dim3 block(16, 16, 1);
+        dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
+
+        maxpool_backward<<<grid, block, 0, stream>>>(upstream, argmax.const_view(), d_inputs.view());
+        return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
+    }
+
+    DeviceOwningTensor4f outputs;
+    DeviceOwningTensor<u32, 4> argmax;
+    DeviceOwningTensor4f d_inputs;
+
+    usize pool_h;
+    usize pool_w;
+    usize stride;
 
     cudaStream_t stream;
 };
@@ -1518,14 +1594,80 @@ __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTens
     d_biases[oc] = sum;
 }
 
+__global__ auto maxpool_forward(DeviceTensorConstView4f inputs, DeviceTensorView4f out, DeviceTensorView<u32, 4> argmax,
+                                usize pool_h, usize pool_w, usize stride) -> void
+{
+    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize c = blockIdx.z % out.extents[3];
+    const usize n = blockIdx.z / out.extents[3];
+
+    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    {
+        return;
+    }
+
+    const usize H_in = inputs.extents[1];
+    const usize W_in = inputs.extents[2];
+
+    f32 max_val = -INFINITY;
+    u32 max_idx = 0;
+
+    for (usize kh = 0; kh < pool_h; ++kh)
+    {
+        const usize ih = oh * stride + kh;
+        if (ih >= H_in)
+        {
+            continue;
+        }
+        for (usize kw = 0; kw < pool_w; ++kw)
+        {
+            const usize iw = ow * stride + kw;
+            if (iw >= W_in)
+            {
+                continue;
+            }
+            const f32 val = inputs(n, ih, iw, c);
+            if (val > max_val)
+            {
+                max_val = val;
+                max_idx = (u32)(ih * W_in + iw);
+            }
+        }
+    }
+    out(n, oh, ow, c) = max_val;
+    argmax(n, oh, ow, c) = max_idx;
+}
+
+__global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorView<const u32, 4> argmax,
+                                 DeviceTensorView4f d_inputs) -> void
+{
+    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize c = blockIdx.z % upstream.extents[3];
+    const usize n = blockIdx.z / upstream.extents[3];
+
+    if (ow >= upstream.extents[2] || oh >= upstream.extents[1] || n >= upstream.extents[0])
+    {
+        return;
+    }
+
+    const usize W_in = d_inputs.extents[2];
+    const u32 idx = argmax(n, oh, ow, c);
+    const usize ih = idx / W_in;
+    const usize iw = idx % W_in;
+
+    atomicAdd(&d_inputs(n, ih, iw, c), upstream(n, oh, ow, c));
+}
+
 }; // namespace vika
 #endif
 
 // TODO (ecrt):
 //
-// - Maxpool Forward
-// - Maxpool Backward
-// - Maxpool Layer
+// - Softmax Forward
+// - Softmax Backward
+// - Softmax Layer
 //
 // - Softmax Forward
 // - Softmax Backward
@@ -1539,5 +1681,5 @@ __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTens
 // - Pick device?
 // - Sequential model
 // - Non-sequential builder api
-// - mnist
+// - horizontal/vertical line
 // - unet
