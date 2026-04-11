@@ -34,15 +34,15 @@ int main()
         },
         {batch_size, 1});
 
-    const auto inputs = upload<f32, 2>(cpu_inputs).unwrap();
-    const auto targets = upload<f32, 2>(cpu_targets).unwrap();
+    const auto inputs = upload(cpu_inputs).unwrap();
+    const auto targets = upload(cpu_targets).unwrap();
 
     // Layers
     auto dense1 = DenseLayer::randomized(batch_size, 2, hidden_size, 42u).unwrap();
     auto sigmoid1 = SigmoidLayer::with_extents({batch_size, hidden_size}).unwrap();
     auto dense2 = DenseLayer::randomized(batch_size, hidden_size, 1, 43u).unwrap();
     auto sigmoid2 = SigmoidLayer::with_extents({batch_size, 1}).unwrap();
-    auto loss_fn = MSELoss<2>::with_extents({batch_size, 1}).unwrap();
+    auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
 
     const AdamParameters adam{
         .learning_rate = 0.01f,

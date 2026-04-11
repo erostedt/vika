@@ -1,5 +1,4 @@
 #include <cstdio>
-#include <iostream>
 
 #define VIKA_IMPLEMENTATION
 #include "vika.cuh"
@@ -40,8 +39,8 @@ int main()
         cpu_targets(N_HORIZ + c, 0) = 1.0f;
     }
 
-    const auto inputs = upload<f32, 4>(cpu_inputs).unwrap();
-    const auto targets = upload<f32, 2>(cpu_targets).unwrap();
+    const auto inputs = upload(cpu_inputs).unwrap();
+    const auto targets = upload(cpu_targets).unwrap();
 
     // Architecture:
     //   Conv2D(3x3, 8 filters, stride=1, padding=0): [N, 8, 8, 1] -> [N, 6, 6, 8]
@@ -61,12 +60,12 @@ int main()
 
     auto conv = Conv2DLayer::randomized(batch_size, IMG_H, IMG_W, 3, 3, 1, CONV_FILTERS, 1, 0, 1u).unwrap();
     auto pool = MaxPool2DLayer::with_extents(batch_size, CONV_OUT_H, CONV_OUT_W, CONV_FILTERS, 2, 2, 2).unwrap();
-    auto flatten = Flatten2DLayer<4>::with_extents({batch_size, POOL_OUT_H, POOL_OUT_W, CONV_FILTERS});
+    auto flatten = Flatten2DLayer::with_extents({batch_size, POOL_OUT_H, POOL_OUT_W, CONV_FILTERS});
     auto dense1 = DenseLayer::randomized(batch_size, FLAT_SIZE, HIDDEN, 2u).unwrap();
     auto sigmoid1 = SigmoidLayer::with_extents({batch_size, HIDDEN}).unwrap();
     auto dense2 = DenseLayer::randomized(batch_size, HIDDEN, 1, 3u).unwrap();
     auto sigmoid2 = SigmoidLayer::with_extents({batch_size, 1}).unwrap();
-    auto loss_fn = MSELoss<2>::with_extents({batch_size, 1}).unwrap();
+    auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
 
     const AdamParameters adam{
         .learning_rate = 0.01f,

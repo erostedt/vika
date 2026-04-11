@@ -473,17 +473,6 @@ class DeviceError
     cudaError_t _code;
 };
 
-template <usize Rank>
-inline auto to_extents(const usize data[Rank]) -> std::array<usize, Rank>
-{
-    std::array<usize, Rank> extents{};
-    for (usize i = 0; i < Rank; ++i)
-    {
-        extents[i] = data[i];
-    }
-    return extents;
-}
-
 inline auto to_extents(const usize *data, usize rank) -> Extents
 {
     panic_if(rank >= Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
@@ -495,15 +484,14 @@ inline auto to_extents(const usize *data, usize rank) -> Extents
     return extents;
 }
 
-template <usize Rank>
-inline auto element_count(const std::array<usize, Rank> &extents) -> usize
+inline auto element_count(const Extents &extents) -> usize
 {
     using namespace std;
     return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
 }
 
-template <typename T, usize Rank>
-inline auto byte_count(const std::array<usize, Rank> &extents) -> usize
+template <typename T>
+inline auto byte_count(const Extents &extents) -> usize
 {
     return element_count(extents) * sizeof(T);
 }
@@ -671,14 +659,13 @@ struct DeviceDeleter
     }
 };
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 struct DeviceTensorView;
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 class DeviceOwningTensor
 {
-    using Self = DeviceOwningTensor<T, Rank>;
-    using Extents = std::array<usize, Rank>;
+    using Self = DeviceOwningTensor<T>;
 
   public:
     static auto empty(const Extents &extents) -> Result<Self, DeviceError>
@@ -690,20 +677,6 @@ class DeviceOwningTensor
             return error(DeviceError(err));
         }
         return ok(Self(ptr, extents));
-    }
-
-    static auto empty(const vika::Extents &extents) -> Result<Self, DeviceError>
-    {
-        Extents _extents{};
-        std::copy(extents.cbegin(), extents.cend(), _extents.begin());
-
-        T *ptr = nullptr;
-        const auto err = cudaMalloc(&ptr, vika::byte_count<T>(_extents));
-        if (err)
-        {
-            return error(DeviceError(err));
-        }
-        return ok(Self(ptr, _extents));
     }
 
     static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, DeviceError>
@@ -723,7 +696,6 @@ class DeviceOwningTensor
         return tensor;
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 1>>
     static auto from(const std::vector<T> &data) -> Result<Self, DeviceError>
     {
         return from(data, {data.size()});
@@ -751,7 +723,7 @@ class DeviceOwningTensor
 
     auto element_count() const -> usize
     {
-        return vika::element_count<Rank>(_extents);
+        return vika::element_count(_extents);
     }
 
     auto byte_count() const -> usize
@@ -759,10 +731,9 @@ class DeviceOwningTensor
         return vika::byte_count<T>(_extents);
     }
 
-    template <usize Dimension, usize R = Rank, typename = std::enable_if_t<(Dimension < Rank)>>
-    auto extent() const -> usize
+    auto extent(usize dimension) const -> usize
     {
-        return _extents[Dimension];
+        return _extents.at(dimension);
     }
 
     auto extents() const -> const Extents &
@@ -780,14 +751,14 @@ class DeviceOwningTensor
         return _data.get();
     }
 
-    auto view() -> DeviceTensorView<T, Rank>
+    auto view() -> DeviceTensorView<T>
     {
-        return DeviceTensorView<T, Rank>(_data.get(), _extents);
+        return DeviceTensorView<T>(_data.get(), _extents, _extents.size());
     }
 
-    auto const_view() const -> DeviceTensorView<const T, Rank>
+    auto const_view() const -> DeviceTensorView<const T>
     {
-        return DeviceTensorView<const T, Rank>(_data.get(), _extents);
+        return DeviceTensorView<const T>(_data.get(), _extents, _extents.size());
     }
 
   private:
@@ -800,11 +771,10 @@ class DeviceOwningTensor
     Extents _extents;
 };
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T> &dst) -> Result<Void, DeviceError>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto copy(DeviceOwningTensor<T> src, HostTensor<T> &dst) -> Result<Void, DeviceError>
 {
-    // TODO: CHECK ME
-    // panic_if(src.extents() != dst.extents(), "element_mismatch");
+    panic_if(src.extents() != dst.extents(), "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
@@ -813,12 +783,11 @@ auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T> &dst) -> Result<Void, D
     return ok(Void{});
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T> &dst) -> Result<Void, DeviceError>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Void, DeviceError>
 {
-    const auto extents = to_extents<Rank>(src.extents);
-    // TODO: CHECK ME
-    // panic_if(dst.extents() != extents, "element_mismatch");
+    const auto extents = to_extents(src.extents, src.rank);
+    panic_if(dst.extents() != extents, "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
@@ -827,11 +796,10 @@ auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T> &dst) -> Res
     return ok(Void{});
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const HostTensor<T> &src, DeviceOwningTensor<T, Rank> &dst) -> Result<Void, DeviceError>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, DeviceError>
 {
-    // TODO: CHECK ME
-    // panic_if(src.extents() != dst.extents(), "element_mismatch");
+    panic_if(src.extents() != dst.extents(), "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
     if (is_error(err))
     {
@@ -840,10 +808,10 @@ auto copy(const HostTensor<T> &src, DeviceOwningTensor<T, Rank> &dst) -> Result<
     return ok(Void{});
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T, Rank>, DeviceError>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, DeviceError>
 {
-    auto dst = DeviceOwningTensor<T, Rank>::empty(src.extents());
+    auto dst = DeviceOwningTensor<T>::empty(src.extents());
     if (dst.is_error())
     {
         return error(dst.unwrap_error());
@@ -857,10 +825,10 @@ auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T, Rank>, Dev
     return dst;
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T>, DeviceError>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, DeviceError>
 {
-    auto dst = HostTensor<T>::empty(to_extents(src.extents, Rank));
+    auto dst = HostTensor<T>::empty(to_extents(src.extents, src.rank));
     const auto err = copy(src, dst);
     if (err.is_error())
     {
@@ -869,29 +837,33 @@ auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T
     return ok(dst);
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T>, DeviceError>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto download(const DeviceOwningTensor<T> &src) -> Result<HostTensor<T>, DeviceError>
 {
     return download(src.const_view());
 }
 
-template <typename T, usize Rank, typename>
+template <typename T, typename>
 struct DeviceTensorView
 {
-    DeviceTensorView(T *data_, const std::array<usize, Rank> &extents_) : data(data_)
+    DeviceTensorView(T *data_, const Extents &extents_, usize rank_) : data(data_)
     {
+        panic_if(rank_ >= VIKA_MAX_RANK, "Rank %zu larger or equal to VIKA_MAX_RANK %d", rank_, VIKA_MAX_RANK);
         std::copy(std::begin(extents_), std::end(extents_), extents);
-        std::exclusive_scan(std::rbegin(extents_), std::rend(extents_), std::rbegin(strides), 1, std::multiplies<>{});
+        std::exclusive_scan(std::rbegin(extents_), std::rend(extents_), std::make_reverse_iterator(strides + rank_),
+                            usize{1}, std::multiplies<usize>{});
+        rank = rank_;
     }
 
     T *data = nullptr;
-    usize extents[Rank] = {};
-    usize strides[Rank] = {};
+    usize extents[VIKA_MAX_RANK] = {};
+    usize strides[VIKA_MAX_RANK] = {};
+    usize rank = 0;
 
     __host__ __device__ inline usize element_count() const
     {
         usize count = 1;
-        for (usize i = 0; i < Rank; ++i)
+        for (usize i = 0; i < rank; ++i)
         {
             count *= extents[i];
         }
@@ -913,76 +885,68 @@ struct DeviceTensorView
         return data[i];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 1>>
     __host__ __device__ inline T &operator()(usize x)
     {
         return data[x];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 1>>
     __host__ __device__ inline const T &operator()(usize x) const
     {
         return data[x];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 2>>
     __host__ __device__ inline T &operator()(usize x, usize y)
     {
         return data[x * strides[0] + y * strides[1]];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 2>>
     __host__ __device__ inline const T &operator()(usize x, usize y) const
     {
         return data[x * strides[0] + y * strides[1]];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 3>>
     __host__ __device__ inline T &operator()(usize x, usize y, usize z)
     {
         return data[x * strides[0] + y * strides[1] + z * strides[2]];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 3>>
     __host__ __device__ inline const T &operator()(usize x, usize y, usize z) const
     {
 
         return data[x * strides[0] + y * strides[1] + z * strides[2]];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 4>>
     __host__ __device__ inline T &operator()(usize x, usize y, usize z, usize w)
     {
         return data[x * strides[0] + y * strides[1] + z * strides[2] + w * strides[3]];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 4>>
     __host__ __device__ inline const T &operator()(usize x, usize y, usize z, usize w) const
     {
         return data[x * strides[0] + y * strides[1] + z * strides[2] + w * strides[3]];
     }
 };
 
-template <usize Rank>
-using DeviceOwningTensorf = DeviceOwningTensor<f32, Rank>;
-using DeviceOwningTensor1f = DeviceOwningTensorf<1>;
-using DeviceOwningTensor2f = DeviceOwningTensorf<2>;
-using DeviceOwningTensor3f = DeviceOwningTensorf<3>;
-using DeviceOwningTensor4f = DeviceOwningTensorf<4>;
+using DeviceOwningTensorf = DeviceOwningTensor<f32>;
+using DeviceOwningTensor1f = DeviceOwningTensorf;
+using DeviceOwningTensor2f = DeviceOwningTensorf;
+using DeviceOwningTensor3f = DeviceOwningTensorf;
+using DeviceOwningTensor4f = DeviceOwningTensorf;
+using DeviceOwningTensor4u = DeviceOwningTensor<u32>;
 
-template <usize Rank>
-using DeviceTensorViewf = DeviceTensorView<f32, Rank>;
-using DeviceTensorView1f = DeviceTensorViewf<1>;
-using DeviceTensorView2f = DeviceTensorViewf<2>;
-using DeviceTensorView3f = DeviceTensorViewf<3>;
-using DeviceTensorView4f = DeviceTensorViewf<4>;
+using DeviceTensorViewf = DeviceTensorView<f32>;
+using DeviceTensorView1f = DeviceTensorViewf;
+using DeviceTensorView2f = DeviceTensorViewf;
+using DeviceTensorView3f = DeviceTensorViewf;
+using DeviceTensorView4f = DeviceTensorViewf;
+using DeviceTensorView4u = DeviceTensorView<u32>;
 
-template <usize Rank>
-using DeviceTensorConstViewf = DeviceTensorView<const f32, Rank>;
-using DeviceTensorConstView1f = DeviceTensorConstViewf<1>;
-using DeviceTensorConstView2f = DeviceTensorConstViewf<2>;
-using DeviceTensorConstView3f = DeviceTensorConstViewf<3>;
-using DeviceTensorConstView4f = DeviceTensorConstViewf<4>;
+using DeviceTensorConstViewf = DeviceTensorView<const f32>;
+using DeviceTensorConstView1f = DeviceTensorConstViewf;
+using DeviceTensorConstView2f = DeviceTensorConstViewf;
+using DeviceTensorConstView3f = DeviceTensorConstViewf;
+using DeviceTensorConstView4f = DeviceTensorConstViewf;
+using DeviceTensorConstView4u = DeviceTensorView<const u32>;
 
 inline auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f
 {
@@ -1008,6 +972,14 @@ struct KernelJob
     cudaStream_t stream;
 };
 
+struct AdamParameters
+{
+    f32 learning_rate = 1e-1f;
+    f32 beta1 = 0.9f;
+    f32 beta2 = 0.999f;
+    f32 epsilon = 1e-8f;
+};
+
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
 // filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
@@ -1031,13 +1003,37 @@ __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTens
 
 // inputs: [N, H, W, C], out: [N, out_H, out_W, C], argmax: [N, out_H, out_W, C]
 // grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
-__global__ auto maxpool_forward(DeviceTensorConstView4f inputs, DeviceTensorView4f out, DeviceTensorView<u32, 4> argmax,
+__global__ auto maxpool_forward(DeviceTensorConstView4f inputs, DeviceTensorView4f out, DeviceTensorView4u argmax,
                                 usize pool_h, usize pool_w, usize stride) -> void;
 
 // upstream: [N, out_H, out_W, C], argmax: [N, out_H, out_W, C], d_inputs: [N, H, W, C]
 // grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
-__global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorView<const u32, 4> argmax,
+__global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorConstView4u argmax,
                                  DeviceTensorView4f d_inputs) -> void;
+
+__global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void;
+__global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 limit) -> void;
+__global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out) -> void;
+__global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream_gradient,
+                                 DeviceTensorViewf out) -> void;
+
+__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf d_weights,
+                            DeviceTensorViewf weights, DeviceTensorViewf m_weights, DeviceTensorViewf v_weights)
+    -> void;
+
+__global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out)
+    -> void;
+
+__global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out) -> void;
+
+__global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorView1f out)
+    -> void;
+__global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                                    DeviceTensorViewf out) -> void;
+
+__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf d_weights,
+                            DeviceTensorViewf weights, DeviceTensorViewf m_weights, DeviceTensorViewf v_weights)
+    -> void;
 
 __host__ __device__ inline auto sigmoid(f32 x) -> f32
 {
@@ -1061,99 +1057,35 @@ __device__ inline auto uniform_f32(u32 seed) -> f32
     return hash_to_float(pcg_hash(seed));
 }
 
-template <usize Rank>
-__global__ auto uniform_tensor_kernel(DeviceTensorViewf<Rank> tensor, u32 seed) -> void
-{
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= tensor.element_count())
-    {
-        return;
-    }
-    tensor[i] = uniform_f32((u32)i ^ seed);
-}
-
-template <usize Rank>
-auto uniform_tensor(DeviceTensorViewf<Rank> tensor, u32 seed) -> KernelJob<Void>
+inline auto uniform_tensor(DeviceTensorViewf tensor, u32 seed) -> KernelJob<Void>
 {
     const usize n = tensor.element_count();
     const usize threads = 256;
-    uniform_tensor_kernel<Rank><<<(n + threads - 1) / threads, threads>>>(tensor, seed);
+    uniform_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed);
     return KernelJob<Void>{Void{}, 0};
 }
 
-template <usize Rank>
-__global__ auto xavier_tensor_kernel(DeviceTensorViewf<Rank> tensor, u32 seed, f32 limit) -> void
-{
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= tensor.element_count())
-    {
-        return;
-    }
-    tensor[i] = (uniform_f32((u32)i ^ seed) * 2.0f - 1.0f) * limit;
-}
-
-template <usize Rank>
-auto xavier_tensor(DeviceTensorViewf<Rank> tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>
+inline auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>
 {
     const f32 limit = std::sqrt(6.0f / (f32)(fan_in + fan_out));
     const usize n = tensor.element_count();
     const usize threads = 256;
-    xavier_tensor_kernel<Rank><<<(n + threads - 1) / threads, threads>>>(tensor, seed, limit);
+    xavier_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed, limit);
     return KernelJob<Void>{Void{}, 0};
 }
-
-template <usize Rank>
-__global__ auto sigmoid_forward(DeviceTensorConstViewf<Rank> a, DeviceTensorViewf<Rank> out) -> void
-{
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < a.element_count())
-    {
-        out[i] = sigmoid(a[i]);
-    }
-}
-
-template <usize Rank>
-__global__ auto sigmoid_backward(DeviceTensorConstViewf<Rank> a, DeviceTensorConstViewf<Rank> upstream_gradient,
-                                 DeviceTensorViewf<Rank> out) -> void
-{
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < a.element_count())
-    {
-
-        out[i] = a[i] * (1.0 - a[i]) * upstream_gradient[i];
-    }
-}
-
-__global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out)
-    -> void;
-
-__global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out) -> void;
-
-struct AdamParameters
-{
-    f32 learning_rate = 1e-1f;
-    f32 beta1 = 0.9f;
-    f32 beta2 = 0.999f;
-    f32 epsilon = 1e-8f;
-};
-
-template <usize Rank>
-__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf<Rank> d_weights,
-                            DeviceTensorViewf<Rank> weights, DeviceTensorViewf<Rank> m_weights,
-                            DeviceTensorViewf<Rank> v_weights) -> void;
 
 struct DenseLayer
 {
     auto static with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
         -> Result<DenseLayer, DeviceError>
     {
-        const auto feature_count = weights.extent<0>();
-        const auto neuron_count = weights.extent<1>();
+        const auto feature_count = weights.extent(0);
+        const auto neuron_count = weights.extent(1);
 
-        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{batch_size, neuron_count}));
+        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
 
-        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{batch_size, feature_count}));
-        auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{batch_size, neuron_count}));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
+        auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
         auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
 
@@ -1183,18 +1115,18 @@ struct DenseLayer
     static auto randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
         -> Result<DenseLayer, DeviceError>
     {
-        auto weights = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{input_features, neuron_count}));
+        auto weights = unwrap_or_return(DeviceOwningTensor2f::empty({input_features, neuron_count}));
         auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
 
-        unwrap_or_return(xavier_tensor<2>(weights.view(), seed, input_features, neuron_count).wait());
+        unwrap_or_return(xavier_tensor(weights.view(), seed, input_features, neuron_count).wait());
 
         return with_weights(batch_size, std::move(weights), std::move(biases));
     }
 
     auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
     {
-        const u32 M = outputs.extent<0>();
-        const u32 N = outputs.extent<1>();
+        const u32 M = outputs.extent(0);
+        const u32 N = outputs.extent(1);
         dim3 block(16, 16);
         dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
         matmul_kernel<<<grid, block, 0, stream>>>(inputs, weights.const_view(), outputs.view());
@@ -1204,8 +1136,8 @@ struct DenseLayer
 
     auto backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
     {
-        const u32 M = d_inputs.extent<0>();
-        const u32 N = d_inputs.extent<1>();
+        const u32 M = d_inputs.extent(0);
+        const u32 N = d_inputs.extent(1);
         dim3 block(16, 16);
         dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
         matmul_kernel<<<grid, block, 0, stream>>>(upstream_gradient, transposed(weights.const_view()), d_inputs.view());
@@ -1215,8 +1147,8 @@ struct DenseLayer
     auto weight_gradients(const DeviceTensorConstView2f &inputs, const DeviceTensorConstView2f &upstream_gradient)
         -> KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>
     {
-        const u32 M = d_inputs.extent<0>();
-        const u32 N = d_inputs.extent<1>();
+        const u32 M = d_inputs.extent(0);
+        const u32 N = d_inputs.extent(1);
         dim3 block(16, 16);
         dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
         // NOTE: Run in separate streams?
@@ -1237,10 +1169,10 @@ struct DenseLayer
         usize threads = 256;
         usize weight_blocks = (weight_count + threads - 1) / threads;
         usize bias_blocks = (bias_count + threads - 1) / threads;
-        adam_update<2><<<weight_blocks, threads, 0, stream>>>(parameters, (f32)t, d_weights, weights.view(),
-                                                              m_weights.view(), v_weights.view());
-        adam_update<1><<<bias_blocks, threads, 0, stream>>>(parameters, (f32)t, d_biases, biases.view(),
-                                                            m_biases.view(), v_biases.view());
+        adam_update<<<weight_blocks, threads, 0, stream>>>(parameters, (f32)t, d_weights, weights.view(),
+                                                           m_weights.view(), v_weights.view());
+        adam_update<<<bias_blocks, threads, 0, stream>>>(parameters, (f32)t, d_biases, biases.view(), m_biases.view(),
+                                                         v_biases.view());
         return KernelJob<Void>{Void{}, stream};
     }
 
@@ -1262,7 +1194,7 @@ struct DenseLayer
 
 struct SigmoidLayer
 {
-    static auto with_extents(const std::array<usize, 2> &extents) -> Result<SigmoidLayer, DeviceError>
+    static auto with_extents(const Extents &extents) -> Result<SigmoidLayer, DeviceError>
     {
         auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
         auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
@@ -1272,24 +1204,24 @@ struct SigmoidLayer
         return ok(SigmoidLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = stream});
     }
 
-    auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
+    auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>
     {
-        panic_if(to_extents<2>(inputs.extents) != outputs.extents(), "MISMATCH");
+        panic_if(to_extents(inputs.extents, inputs.rank) != outputs.extents(), "MISMATCH");
         usize threads = 256;
         usize blocks = (inputs.element_count() + threads - 1) / threads;
 
-        sigmoid_forward<2><<<blocks, threads, 0, stream>>>(inputs, outputs.view());
+        sigmoid_forward<<<blocks, threads, 0, stream>>>(inputs, outputs.view());
         return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
     }
 
-    auto backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
+    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
     {
-        panic_if(to_extents<2>(upstream_gradient.extents) != d_inputs.extents(), "MISMATCH");
+        panic_if(to_extents(upstream_gradient.extents, upstream_gradient.rank) != d_inputs.extents(), "MISMATCH");
         panic_if(d_inputs.extents() != outputs.extents(), "MISMATCH");
         usize threads = 256;
         usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
 
-        sigmoid_backward<2><<<blocks, threads, 0, stream>>>(outputs.const_view(), upstream_gradient, d_inputs.view());
+        sigmoid_backward<<<blocks, threads, 0, stream>>>(outputs.const_view(), upstream_gradient, d_inputs.view());
         return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
     }
 
@@ -1299,31 +1231,32 @@ struct SigmoidLayer
     cudaStream_t stream;
 };
 
-template <usize Rank, typename = std::enable_if_t<(Rank >= 2)>>
 struct Flatten2DLayer
 {
-    static auto with_extents(const std::array<usize, Rank> &extents) -> Flatten2DLayer<Rank>
+    // TODO: CHECK RANK SIZE
+    static auto with_extents(const Extents &extents) -> Flatten2DLayer
     {
         return {extents};
     }
 
-    inline auto forward(DeviceTensorConstViewf<Rank> inputs) const -> DeviceTensorConstView2f
+    inline auto forward(DeviceTensorConstViewf inputs) const -> DeviceTensorConstView2f
     {
-        panic_if(to_extents<Rank>(inputs.extents) != extents, "INVALID EXTENTS");
+        panic_if(to_extents(inputs.extents, inputs.rank) != extents, "INVALID EXTENTS");
 
         const auto batch = inputs.extents[0];
         const usize features =
-            std::accumulate(inputs.extents + 1, inputs.extents + Rank, 1ul, std::multiplies<usize>{});
-        return DeviceTensorConstView2f(inputs.data, {batch, features});
+            std::accumulate(inputs.extents + 1, inputs.extents + extents.size(), 1ul, std::multiplies<usize>{});
+        return DeviceTensorConstView2f(inputs.data, {batch, features}, 2);
     }
 
-    inline auto backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf<Rank>
+    inline auto backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf
     {
-        panic_if(element_count(to_extents<2>(upstream_gradient.extents)) != element_count(extents), "INVALID EXTENTS");
-        return DeviceTensorConstViewf<Rank>(upstream_gradient.data, extents);
+        panic_if(element_count(to_extents(upstream_gradient.extents, upstream_gradient.rank)) != element_count(extents),
+                 "INVALID EXTENTS");
+        return DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size());
     }
 
-    std::array<usize, Rank> extents;
+    Extents extents;
 };
 
 struct Conv2DLayer
@@ -1333,17 +1266,16 @@ struct Conv2DLayer
                              DeviceOwningTensor1f biases, usize stride, usize padding)
         -> Result<Conv2DLayer, DeviceError>
     {
-        const usize kH = filters.extent<0>();
-        const usize kW = filters.extent<1>();
-        const usize C_out = filters.extent<3>();
+        const usize kH = filters.extent(0);
+        const usize kW = filters.extent(1);
+        const usize C_out = filters.extent(3);
 
-        const usize C_in = filters.extent<2>();
+        const usize C_in = filters.extent(2);
         const usize out_H = (input_height + 2 * padding - kH) / stride + 1;
         const usize out_W = (input_width + 2 * padding - kW) / stride + 1;
 
-        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, out_H, out_W, C_out}));
-        auto d_inputs =
-            unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, input_height, input_width, C_in}));
+        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
         auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
         auto m_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
@@ -1373,10 +1305,10 @@ struct Conv2DLayer
     static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
                            usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>
     {
-        auto filters = unwrap_or_return(DeviceOwningTensor4f::empty(std::array{kH, kW, C_in, C_out}));
+        auto filters = unwrap_or_return(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
         auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
 
-        unwrap_or_return(xavier_tensor<4>(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
+        unwrap_or_return(xavier_tensor(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
 
         return with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride,
                             padding);
@@ -1384,10 +1316,10 @@ struct Conv2DLayer
 
     auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
     {
-        const usize N = outputs.extent<0>();
-        const usize H_out = outputs.extent<1>();
-        const usize W_out = outputs.extent<2>();
-        const usize C_out = outputs.extent<3>();
+        const usize N = outputs.extent(0);
+        const usize H_out = outputs.extent(1);
+        const usize W_out = outputs.extent(2);
+        const usize C_out = outputs.extent(3);
 
         dim3 block(16, 16, 1);
         dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C_out);
@@ -1399,10 +1331,10 @@ struct Conv2DLayer
 
     auto backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
     {
-        const usize N = d_inputs.extent<0>();
-        const usize H_in = d_inputs.extent<1>();
-        const usize W_in = d_inputs.extent<2>();
-        const usize C_in = d_inputs.extent<3>();
+        const usize N = d_inputs.extent(0);
+        const usize H_in = d_inputs.extent(1);
+        const usize W_in = d_inputs.extent(2);
+        const usize C_in = d_inputs.extent(3);
 
         dim3 block(16, 16, 1);
         dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, N * C_in);
@@ -1433,9 +1365,9 @@ struct Conv2DLayer
         const usize bias_count = biases.element_count();
         const usize threads = 256;
 
-        adam_update<4><<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
+        adam_update<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
             parameters, (f32)t, d_filters_, filters.view(), m_filters.view(), v_filters.view());
-        adam_update<1><<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
+        adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
             parameters, (f32)t, d_biases_, biases.view(), m_biases.view(), v_biases.view());
 
         return KernelJob<Void>{Void{}, stream};
@@ -1466,11 +1398,10 @@ struct MaxPool2DLayer
         const usize out_H = (input_height - pool_h) / stride + 1;
         const usize out_W = (input_width - pool_w) / stride + 1;
 
-        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, out_H, out_W, channels}));
-        auto argmax =
-            unwrap_or_return((DeviceOwningTensor<u32, 4>::empty(std::array{batch_size, out_H, out_W, channels})));
+        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
+        auto argmax = unwrap_or_return((DeviceOwningTensor4u::empty({batch_size, out_H, out_W, channels})));
         auto d_inputs =
-            unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, input_height, input_width, channels}));
+            unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, channels}));
 
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
@@ -1487,10 +1418,10 @@ struct MaxPool2DLayer
 
     auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
     {
-        const usize N = outputs.extent<0>();
-        const usize H_out = outputs.extent<1>();
-        const usize W_out = outputs.extent<2>();
-        const usize C = outputs.extent<3>();
+        const usize N = outputs.extent(0);
+        const usize H_out = outputs.extent(1);
+        const usize W_out = outputs.extent(2);
+        const usize C = outputs.extent(3);
 
         dim3 block(16, 16, 1);
         dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
@@ -1503,8 +1434,8 @@ struct MaxPool2DLayer
     {
         const usize H_out = upstream.extents[1];
         const usize W_out = upstream.extents[2];
-        const usize N = d_inputs.extent<0>();
-        const usize C = d_inputs.extent<3>();
+        const usize N = d_inputs.extent(0);
+        const usize C = d_inputs.extent(3);
 
         cudaMemsetAsync(d_inputs.data(), 0, d_inputs.byte_count(), stream);
 
@@ -1516,7 +1447,7 @@ struct MaxPool2DLayer
     }
 
     DeviceOwningTensor4f outputs;
-    DeviceOwningTensor<u32, 4> argmax;
+    DeviceOwningTensor4u argmax;
     DeviceOwningTensor4f d_inputs;
 
     usize pool_h;
@@ -1526,10 +1457,96 @@ struct MaxPool2DLayer
     cudaStream_t stream;
 };
 
-template <usize Rank>
-__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf<Rank> d_weights,
-                            DeviceTensorViewf<Rank> weights, DeviceTensorViewf<Rank> m_weights,
-                            DeviceTensorViewf<Rank> v_weights) -> void
+struct MSELoss
+{
+    static auto with_extents(const Extents &extents) -> Result<MSELoss, DeviceError>
+    {
+        auto loss = unwrap_or_return(DeviceOwningTensor1f::empty({1}));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensorf::empty(extents));
+
+        cudaStream_t stream;
+        return_on_cuda_error(cudaStreamCreate(&stream));
+        return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = stream});
+    }
+
+    auto forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+        -> KernelJob<DeviceTensorConstView1f>
+    {
+        cudaMemsetAsync(loss.data(), 0, sizeof(f32), stream);
+
+        const usize n = predictions.element_count();
+        const usize threads = 256;
+        mse_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, loss.view());
+        return KernelJob<DeviceTensorConstView1f>{loss.const_view(), stream};
+    }
+
+    auto backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+        -> KernelJob<DeviceTensorConstViewf>
+    {
+        const usize n = predictions.element_count();
+        const usize threads = 256;
+        mse_gradient_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
+        return KernelJob<DeviceTensorConstViewf>{d_inputs.const_view(), stream};
+    }
+
+    DeviceOwningTensor1f loss;
+    DeviceOwningTensorf d_inputs;
+
+    cudaStream_t stream;
+};
+
+}; // namespace vika
+
+#ifdef VIKA_IMPLEMENTATION
+
+namespace vika
+{
+
+__global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= tensor.element_count())
+    {
+        return;
+    }
+    tensor[i] = uniform_f32((u32)i ^ seed);
+}
+
+__global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 limit) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= tensor.element_count())
+    {
+        return;
+    }
+    tensor[i] = (uniform_f32((u32)i ^ seed) * 2.0f - 1.0f) * limit;
+}
+
+__global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorView1f out)
+    -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= predictions.element_count())
+    {
+        return;
+    }
+    const f32 diff = predictions[i] - targets[i];
+    atomicAdd(&out[0], diff * diff / (f32)predictions.element_count());
+}
+
+__global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                                    DeviceTensorViewf out) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= predictions.element_count())
+    {
+        return;
+    }
+    out[i] = 2.0f * (predictions[i] - targets[i]) / (f32)predictions.element_count();
+}
+
+__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf d_weights,
+                            DeviceTensorViewf weights, DeviceTensorViewf m_weights, DeviceTensorViewf v_weights) -> void
 {
     usize i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= weights.element_count())
@@ -1561,77 +1578,25 @@ __global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensor
     weights[i] -= parameters.learning_rate * m_hat / (std::sqrt(v_hat) + parameters.epsilon);
 }
 
-template <usize Rank>
-__global__ auto mse_kernel(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets,
-                           DeviceTensorViewf<1> out) -> void
+__global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out) -> void
 {
     const usize i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= predictions.element_count())
+    if (i < a.element_count())
     {
-        return;
+        out[i] = sigmoid(a[i]);
     }
-    const f32 diff = predictions[i] - targets[i];
-    atomicAdd(&out[0], diff * diff / (f32)predictions.element_count());
 }
 
-template <usize Rank>
-__global__ auto mse_gradient_kernel(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets,
-                                    DeviceTensorViewf<Rank> out) -> void
+__global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream_gradient,
+                                 DeviceTensorViewf out) -> void
 {
     const usize i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= predictions.element_count())
+    if (i < a.element_count())
     {
-        return;
+
+        out[i] = a[i] * (1.0 - a[i]) * upstream_gradient[i];
     }
-    out[i] = 2.0f * (predictions[i] - targets[i]) / (f32)predictions.element_count();
 }
-
-template <usize Rank>
-struct MSELoss
-{
-    static auto with_extents(const std::array<usize, Rank> &extents) -> Result<MSELoss, DeviceError>
-    {
-        auto loss = unwrap_or_return(DeviceOwningTensor1f::empty(std::array<usize, 1>{1}));
-        auto d_inputs = unwrap_or_return(DeviceOwningTensorf<Rank>::empty(extents));
-
-        cudaStream_t stream;
-        return_on_cuda_error(cudaStreamCreate(&stream));
-        return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = stream});
-    }
-
-    auto forward(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets)
-        -> KernelJob<DeviceTensorConstView1f>
-    {
-        cudaMemsetAsync(loss.data(), 0, sizeof(f32), stream);
-
-        const usize n = predictions.element_count();
-        const usize threads = 256;
-        mse_kernel<Rank><<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, loss.view());
-        return KernelJob<DeviceTensorConstView1f>{loss.const_view(), stream};
-    }
-
-    auto backward(DeviceTensorConstViewf<Rank> predictions, DeviceTensorConstViewf<Rank> targets)
-        -> KernelJob<DeviceTensorConstViewf<Rank>>
-    {
-        const usize n = predictions.element_count();
-        const usize threads = 256;
-        mse_gradient_kernel<Rank>
-            <<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
-        return KernelJob<DeviceTensorConstViewf<Rank>>{d_inputs.const_view(), stream};
-    }
-
-    DeviceOwningTensor1f loss;
-    DeviceOwningTensorf<Rank> d_inputs;
-
-    cudaStream_t stream;
-};
-
-}; // namespace vika
-
-#ifdef VIKA_IMPLEMENTATION
-
-namespace vika
-{
 
 __global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out) -> void
 {
@@ -1864,7 +1829,7 @@ __global__ auto conv_bias_gradients(DeviceTensorConstView4f upstream, DeviceTens
     d_biases[oc] = sum;
 }
 
-__global__ auto maxpool_forward(DeviceTensorConstView4f inputs, DeviceTensorView4f out, DeviceTensorView<u32, 4> argmax,
+__global__ auto maxpool_forward(DeviceTensorConstView4f inputs, DeviceTensorView4f out, DeviceTensorView4u argmax,
                                 usize pool_h, usize pool_w, usize stride) -> void
 {
     const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1909,7 +1874,7 @@ __global__ auto maxpool_forward(DeviceTensorConstView4f inputs, DeviceTensorView
     argmax(n, oh, ow, c) = max_idx;
 }
 
-__global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorView<const u32, 4> argmax,
+__global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorConstView4u argmax,
                                  DeviceTensorView4f d_inputs) -> void
 {
     const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1947,10 +1912,6 @@ __global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorV
 // - Upsampling Backward
 // - Upsampling Layer
 //
-// - Topological sort
-//
-// - Dynamic indexing (remove Rank template)
-// - Use StackVector for extents?
 // - Pick device?
 // - Sequential model
 // - Non-sequential builder api

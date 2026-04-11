@@ -27,7 +27,7 @@ UTEST(conv, forward_valid_stride1_multi_channel)
             }
         }
     }
-    const auto inputs = upload<f32, 4>(cpu_inputs).unwrap();
+    const auto inputs = upload(cpu_inputs).unwrap();
 
     constexpr usize kernel_height = 3;
     constexpr usize kernel_width = 3;
@@ -87,7 +87,7 @@ UTEST(conv, backward_valid_stride1)
             }
         }
     }
-    const auto inputs = upload<f32, 4>(cpu_inputs).unwrap();
+    const auto inputs = upload(cpu_inputs).unwrap();
 
     constexpr usize kernel_height = 3;
     constexpr usize kernel_width = 3;
@@ -117,7 +117,7 @@ UTEST(conv, backward_valid_stride1)
         }
     }
 
-    const auto upstream = upload<f32, 4>(cpu_upstream).unwrap();
+    const auto upstream = upload(cpu_upstream).unwrap();
 
     const auto d_inputs = download(layer.backward(upstream.const_view()).wait().unwrap()).unwrap();
     const auto [gpu_d_weights, gpu_d_biases] =
