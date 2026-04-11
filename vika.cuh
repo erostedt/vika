@@ -441,54 +441,22 @@ auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Nod
     return error(std::string("Cycle detected"));
 }
 
-inline auto is_error(cudaError_t err) -> bool
-{
-    return err != cudaSuccess;
-}
+auto is_error(cudaError_t err) -> bool;
 
 class DeviceError
 {
   public:
-    DeviceError(cudaError_t err) : _code(err)
-    {
-        panic_if(!is_error(err), "%s %s", "Not an error type: ", cudaGetErrorName(_code));
-    }
-
-    auto name() -> std::string
-    {
-        return cudaGetErrorName(_code);
-    }
-
-    auto string() -> std::string
-    {
-        return cudaGetErrorString(_code);
-    }
-
-    [[noreturn]] auto crash() -> void
-    {
-        panic("Crashed due to: [%s] %s", cudaGetErrorName(_code), cudaGetErrorString(_code));
-    }
+    DeviceError(cudaError_t err);
+    auto name() -> std::string;
+    auto string() -> std::string;
+    [[noreturn]] auto crash() -> void;
 
   private:
     cudaError_t _code;
 };
 
-inline auto to_extents(const usize *data, usize rank) -> Extents
-{
-    panic_if(rank >= Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
-    Extents extents{};
-    for (usize i = 0; i < rank; ++i)
-    {
-        extents.push_back(data[i]);
-    }
-    return extents;
-}
-
-inline auto element_count(const Extents &extents) -> usize
-{
-    using namespace std;
-    return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
-}
+auto to_extents(const usize *data, usize rank) -> Extents;
+auto element_count(const Extents &extents) -> usize;
 
 template <typename T>
 inline auto byte_count(const Extents &extents) -> usize
@@ -948,13 +916,7 @@ using DeviceTensorConstView3f = DeviceTensorConstViewf;
 using DeviceTensorConstView4f = DeviceTensorConstViewf;
 using DeviceTensorConstView4u = DeviceTensorView<const u32>;
 
-inline auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f
-{
-    auto transposed_view = view;
-    std::swap(transposed_view.strides[0], transposed_view.strides[1]);
-    std::swap(transposed_view.extents[0], transposed_view.extents[1]);
-    return transposed_view;
-}
+auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f;
 
 template <typename T>
 struct KernelJob
@@ -1031,150 +993,28 @@ __global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConst
 __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void;
 
-__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf d_weights,
-                            DeviceTensorViewf weights, DeviceTensorViewf m_weights, DeviceTensorViewf v_weights)
-    -> void;
+__host__ __device__ auto sigmoid(f32 x) -> f32;
 
-__host__ __device__ inline auto sigmoid(f32 x) -> f32
-{
-    return 1.0f / (1.0f + std::exp(-x));
-}
-
-__device__ inline auto pcg_hash(u32 input) -> u32
-{
-    u32 state = input * 747796405u + 2891336453u;
-    u32 word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-__device__ inline auto hash_to_float(u32 hash) -> f32
-{
-    return __uint_as_float((hash >> 9u) | 0x3f800000u) - 1.0f;
-}
-
-__device__ inline auto uniform_f32(u32 seed) -> f32
-{
-    return hash_to_float(pcg_hash(seed));
-}
-
-inline auto uniform_tensor(DeviceTensorViewf tensor, u32 seed) -> KernelJob<Void>
-{
-    const usize n = tensor.element_count();
-    const usize threads = 256;
-    uniform_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed);
-    return KernelJob<Void>{Void{}, 0};
-}
-
-inline auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>
-{
-    const f32 limit = std::sqrt(6.0f / (f32)(fan_in + fan_out));
-    const usize n = tensor.element_count();
-    const usize threads = 256;
-    xavier_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed, limit);
-    return KernelJob<Void>{Void{}, 0};
-}
+auto uniform_tensor(DeviceTensorViewf tensor, u32 seed) -> KernelJob<Void>;
+auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>;
 
 struct DenseLayer
 {
-    auto static with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
-        -> Result<DenseLayer, DeviceError>
-    {
-        const auto feature_count = weights.extent(0);
-        const auto neuron_count = weights.extent(1);
-
-        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
-
-        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
-        auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
-        auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
-        auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
-
-        auto m_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
-        auto v_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
-
-        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
-        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
-
-        cudaStream_t stream;
-        return_on_cuda_error(cudaStreamCreate(&stream));
-        return ok<DenseLayer>({
-            .outputs = std::move(outputs),
-            .weights = std::move(weights),
-            .biases = std::move(biases),
-            .d_inputs = std::move(d_inputs),
-            .d_weights = std::move(d_weights),
-            .d_biases = std::move(d_biases),
-            .m_weights = std::move(m_weights),
-            .v_weights = std::move(v_weights),
-            .m_biases = std::move(m_biases),
-            .v_biases = std::move(v_biases),
-            .stream = stream,
-        });
-    }
+    static auto with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
+        -> Result<DenseLayer, DeviceError>;
 
     static auto randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
-        -> Result<DenseLayer, DeviceError>
-    {
-        auto weights = unwrap_or_return(DeviceOwningTensor2f::empty({input_features, neuron_count}));
-        auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
+        -> Result<DenseLayer, DeviceError>;
 
-        unwrap_or_return(xavier_tensor(weights.view(), seed, input_features, neuron_count).wait());
+    auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>;
 
-        return with_weights(batch_size, std::move(weights), std::move(biases));
-    }
-
-    auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
-    {
-        const u32 M = outputs.extent(0);
-        const u32 N = outputs.extent(1);
-        dim3 block(16, 16);
-        dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-        matmul_kernel<<<grid, block, 0, stream>>>(inputs, weights.const_view(), outputs.view());
-        add_bias<<<grid, block, 0, stream>>>(inputs, biases.const_view(), outputs.view());
-        return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
-    }
-
-    auto backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
-    {
-        const u32 M = d_inputs.extent(0);
-        const u32 N = d_inputs.extent(1);
-        dim3 block(16, 16);
-        dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-        matmul_kernel<<<grid, block, 0, stream>>>(upstream_gradient, transposed(weights.const_view()), d_inputs.view());
-        return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
-    }
+    auto backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>;
 
     auto weight_gradients(const DeviceTensorConstView2f &inputs, const DeviceTensorConstView2f &upstream_gradient)
-        -> KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>
-    {
-        const u32 M = d_inputs.extent(0);
-        const u32 N = d_inputs.extent(1);
-        dim3 block(16, 16);
-        dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-        // NOTE: Run in separate streams?
-        matmul_kernel<<<grid, block, 0, stream>>>(transposed(inputs), upstream_gradient, d_weights.view());
-
-        const auto block_dim = dim3(256);
-        const auto grid_dim = dim3((upstream_gradient.extents[1] + block_dim.x - 1) / block_dim.x);
-        sum_rows<<<block_dim, grid_dim, 0, stream>>>(transposed(upstream_gradient), d_biases.view());
-        return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>{
-            std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
-    }
+        -> KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>;
 
     auto update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases, const AdamParameters &parameters,
-                usize t) -> KernelJob<Void>
-    {
-        const auto weight_count = d_weights.element_count();
-        const auto bias_count = d_biases.element_count();
-        usize threads = 256;
-        usize weight_blocks = (weight_count + threads - 1) / threads;
-        usize bias_blocks = (bias_count + threads - 1) / threads;
-        adam_update<<<weight_blocks, threads, 0, stream>>>(parameters, (f32)t, d_weights, weights.view(),
-                                                           m_weights.view(), v_weights.view());
-        adam_update<<<bias_blocks, threads, 0, stream>>>(parameters, (f32)t, d_biases, biases.view(), m_biases.view(),
-                                                         v_biases.view());
-        return KernelJob<Void>{Void{}, stream};
-    }
+                usize t) -> KernelJob<Void>;
 
     DeviceOwningTensor2f outputs;
     DeviceOwningTensor2f weights;
@@ -1194,36 +1034,11 @@ struct DenseLayer
 
 struct SigmoidLayer
 {
-    static auto with_extents(const Extents &extents) -> Result<SigmoidLayer, DeviceError>
-    {
-        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
-        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
+    static auto with_extents(const Extents &extents) -> Result<SigmoidLayer, DeviceError>;
 
-        cudaStream_t stream;
-        return_on_cuda_error(cudaStreamCreate(&stream));
-        return ok(SigmoidLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = stream});
-    }
+    auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>;
 
-    auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>
-    {
-        panic_if(to_extents(inputs.extents, inputs.rank) != outputs.extents(), "MISMATCH");
-        usize threads = 256;
-        usize blocks = (inputs.element_count() + threads - 1) / threads;
-
-        sigmoid_forward<<<blocks, threads, 0, stream>>>(inputs, outputs.view());
-        return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
-    }
-
-    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
-    {
-        panic_if(to_extents(upstream_gradient.extents, upstream_gradient.rank) != d_inputs.extents(), "MISMATCH");
-        panic_if(d_inputs.extents() != outputs.extents(), "MISMATCH");
-        usize threads = 256;
-        usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
-
-        sigmoid_backward<<<blocks, threads, 0, stream>>>(outputs.const_view(), upstream_gradient, d_inputs.view());
-        return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
-    }
+    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>;
 
     DeviceOwningTensor2f outputs;
     DeviceOwningTensor2f d_inputs;
@@ -1234,27 +1049,11 @@ struct SigmoidLayer
 struct Flatten2DLayer
 {
     // TODO: CHECK RANK SIZE
-    static auto with_extents(const Extents &extents) -> Flatten2DLayer
-    {
-        return {extents};
-    }
+    static auto with_extents(const Extents &extents) -> Flatten2DLayer;
 
-    inline auto forward(DeviceTensorConstViewf inputs) const -> DeviceTensorConstView2f
-    {
-        panic_if(to_extents(inputs.extents, inputs.rank) != extents, "INVALID EXTENTS");
+    auto forward(DeviceTensorConstViewf inputs) const -> DeviceTensorConstView2f;
 
-        const auto batch = inputs.extents[0];
-        const usize features =
-            std::accumulate(inputs.extents + 1, inputs.extents + extents.size(), 1ul, std::multiplies<usize>{});
-        return DeviceTensorConstView2f(inputs.data, {batch, features}, 2);
-    }
-
-    inline auto backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf
-    {
-        panic_if(element_count(to_extents(upstream_gradient.extents, upstream_gradient.rank)) != element_count(extents),
-                 "INVALID EXTENTS");
-        return DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size());
-    }
+    auto backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf;
 
     Extents extents;
 };
@@ -1264,114 +1063,20 @@ struct Conv2DLayer
     // filters: [kH, kW, C_in, C_out]
     static auto with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
                              DeviceOwningTensor1f biases, usize stride, usize padding)
-        -> Result<Conv2DLayer, DeviceError>
-    {
-        const usize kH = filters.extent(0);
-        const usize kW = filters.extent(1);
-        const usize C_out = filters.extent(3);
-
-        const usize C_in = filters.extent(2);
-        const usize out_H = (input_height + 2 * padding - kH) / stride + 1;
-        const usize out_W = (input_width + 2 * padding - kW) / stride + 1;
-
-        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
-        auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
-        auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
-        auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
-        auto m_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
-        auto v_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
-        auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
-        auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
-
-        cudaStream_t stream;
-        return_on_cuda_error(cudaStreamCreate(&stream));
-        return ok(Conv2DLayer{
-            .outputs = std::move(outputs),
-            .d_inputs = std::move(d_inputs),
-            .filters = std::move(filters),
-            .biases = std::move(biases),
-            .d_filters = std::move(d_filters),
-            .d_biases = std::move(d_biases),
-            .m_filters = std::move(m_filters),
-            .v_filters = std::move(v_filters),
-            .m_biases = std::move(m_biases),
-            .v_biases = std::move(v_biases),
-            .stride = stride,
-            .padding = padding,
-            .stream = stream,
-        });
-    }
+        -> Result<Conv2DLayer, DeviceError>;
 
     static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
-                           usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>
-    {
-        auto filters = unwrap_or_return(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
-        auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
+                           usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>;
 
-        unwrap_or_return(xavier_tensor(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
+    auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>;
 
-        return with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride,
-                            padding);
-    }
-
-    auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
-    {
-        const usize N = outputs.extent(0);
-        const usize H_out = outputs.extent(1);
-        const usize W_out = outputs.extent(2);
-        const usize C_out = outputs.extent(3);
-
-        dim3 block(16, 16, 1);
-        dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C_out);
-
-        conv_forward<<<grid, block, 0, stream>>>(inputs, filters.const_view(), biases.const_view(), outputs.view(),
-                                                 stride, padding);
-        return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
-    }
-
-    auto backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
-    {
-        const usize N = d_inputs.extent(0);
-        const usize H_in = d_inputs.extent(1);
-        const usize W_in = d_inputs.extent(2);
-        const usize C_in = d_inputs.extent(3);
-
-        dim3 block(16, 16, 1);
-        dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, N * C_in);
-
-        conv_backward<<<grid, block, 0, stream>>>(upstream, filters.const_view(), d_inputs.view(), stride, padding);
-        return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
-    }
+    auto backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>;
 
     auto weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
-        -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>
-    {
-        const usize filter_count = d_filters.element_count();
-        const usize C_out = d_biases.element_count();
-        const usize threads = 256;
-
-        conv_weight_gradients<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
-            inputs, upstream, d_filters.view(), stride, padding);
-        conv_bias_gradients<<<(C_out + threads - 1) / threads, threads, 0, stream>>>(upstream, d_biases.view());
-
-        return KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>{
-            std::make_tuple(d_filters.const_view(), d_biases.const_view()), stream};
-    }
+        -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>;
 
     auto update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_,
-                const AdamParameters &parameters, usize t) -> KernelJob<Void>
-    {
-        const usize filter_count = filters.element_count();
-        const usize bias_count = biases.element_count();
-        const usize threads = 256;
-
-        adam_update<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
-            parameters, (f32)t, d_filters_, filters.view(), m_filters.view(), v_filters.view());
-        adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
-            parameters, (f32)t, d_biases_, biases.view(), m_biases.view(), v_biases.view());
-
-        return KernelJob<Void>{Void{}, stream};
-    }
+                const AdamParameters &parameters, usize t) -> KernelJob<Void>;
 
     DeviceOwningTensor4f outputs;
     DeviceOwningTensor4f d_inputs;
@@ -1393,58 +1098,11 @@ struct Conv2DLayer
 struct MaxPool2DLayer
 {
     static auto with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
-                             usize pool_w, usize stride) -> Result<MaxPool2DLayer, DeviceError>
-    {
-        const usize out_H = (input_height - pool_h) / stride + 1;
-        const usize out_W = (input_width - pool_w) / stride + 1;
+                             usize pool_w, usize stride) -> Result<MaxPool2DLayer, DeviceError>;
 
-        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
-        auto argmax = unwrap_or_return((DeviceOwningTensor4u::empty({batch_size, out_H, out_W, channels})));
-        auto d_inputs =
-            unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, channels}));
+    auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>;
 
-        cudaStream_t stream;
-        return_on_cuda_error(cudaStreamCreate(&stream));
-        return ok(MaxPool2DLayer{
-            .outputs = std::move(outputs),
-            .argmax = std::move(argmax),
-            .d_inputs = std::move(d_inputs),
-            .pool_h = pool_h,
-            .pool_w = pool_w,
-            .stride = stride,
-            .stream = stream,
-        });
-    }
-
-    auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
-    {
-        const usize N = outputs.extent(0);
-        const usize H_out = outputs.extent(1);
-        const usize W_out = outputs.extent(2);
-        const usize C = outputs.extent(3);
-
-        dim3 block(16, 16, 1);
-        dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
-
-        maxpool_forward<<<grid, block, 0, stream>>>(inputs, outputs.view(), argmax.view(), pool_h, pool_w, stride);
-        return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
-    }
-
-    auto backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
-    {
-        const usize H_out = upstream.extents[1];
-        const usize W_out = upstream.extents[2];
-        const usize N = d_inputs.extent(0);
-        const usize C = d_inputs.extent(3);
-
-        cudaMemsetAsync(d_inputs.data(), 0, d_inputs.byte_count(), stream);
-
-        dim3 block(16, 16, 1);
-        dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
-
-        maxpool_backward<<<grid, block, 0, stream>>>(upstream, argmax.const_view(), d_inputs.view());
-        return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
-    }
+    auto backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>;
 
     DeviceOwningTensor4f outputs;
     DeviceOwningTensor4u argmax;
@@ -1459,35 +1117,13 @@ struct MaxPool2DLayer
 
 struct MSELoss
 {
-    static auto with_extents(const Extents &extents) -> Result<MSELoss, DeviceError>
-    {
-        auto loss = unwrap_or_return(DeviceOwningTensor1f::empty({1}));
-        auto d_inputs = unwrap_or_return(DeviceOwningTensorf::empty(extents));
-
-        cudaStream_t stream;
-        return_on_cuda_error(cudaStreamCreate(&stream));
-        return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = stream});
-    }
+    static auto with_extents(const Extents &extents) -> Result<MSELoss, DeviceError>;
 
     auto forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
-        -> KernelJob<DeviceTensorConstView1f>
-    {
-        cudaMemsetAsync(loss.data(), 0, sizeof(f32), stream);
-
-        const usize n = predictions.element_count();
-        const usize threads = 256;
-        mse_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, loss.view());
-        return KernelJob<DeviceTensorConstView1f>{loss.const_view(), stream};
-    }
+        -> KernelJob<DeviceTensorConstView1f>;
 
     auto backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
-        -> KernelJob<DeviceTensorConstViewf>
-    {
-        const usize n = predictions.element_count();
-        const usize threads = 256;
-        mse_gradient_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
-        return KernelJob<DeviceTensorConstViewf>{d_inputs.const_view(), stream};
-    }
+        -> KernelJob<DeviceTensorConstViewf>;
 
     DeviceOwningTensor1f loss;
     DeviceOwningTensorf d_inputs;
@@ -1501,6 +1137,442 @@ struct MSELoss
 
 namespace vika
 {
+
+auto is_error(cudaError_t err) -> bool
+{
+    return err != cudaSuccess;
+}
+
+DeviceError::DeviceError(cudaError_t err) : _code(err)
+{
+    panic_if(!is_error(err), "%s %s", "Not an error type: ", cudaGetErrorName(_code));
+}
+
+auto DeviceError::name() -> std::string
+{
+    return cudaGetErrorName(_code);
+}
+
+auto DeviceError::string() -> std::string
+{
+    return cudaGetErrorString(_code);
+}
+
+auto DeviceError::crash() -> void
+{
+    panic("Crashed due to: [%s] %s", cudaGetErrorName(_code), cudaGetErrorString(_code));
+}
+
+auto to_extents(const usize *data, usize rank) -> Extents
+{
+    panic_if(rank >= Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
+    Extents extents{};
+    for (usize i = 0; i < rank; ++i)
+    {
+        extents.push_back(data[i]);
+    }
+    return extents;
+}
+
+auto element_count(const Extents &extents) -> usize
+{
+    using namespace std;
+    return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
+}
+
+auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f
+{
+    auto transposed_view = view;
+    std::swap(transposed_view.strides[0], transposed_view.strides[1]);
+    std::swap(transposed_view.extents[0], transposed_view.extents[1]);
+    return transposed_view;
+}
+
+__host__ __device__ auto sigmoid(f32 x) -> f32
+{
+    return 1.0f / (1.0f + std::exp(-x));
+}
+
+__device__ inline auto pcg_hash(u32 input) -> u32
+{
+    u32 state = input * 747796405u + 2891336453u;
+    u32 word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+__device__ inline auto hash_to_float(u32 hash) -> f32
+{
+    return __uint_as_float((hash >> 9u) | 0x3f800000u) - 1.0f;
+}
+
+__device__ inline auto uniform_f32(u32 seed) -> f32
+{
+    return hash_to_float(pcg_hash(seed));
+}
+
+auto uniform_tensor(DeviceTensorViewf tensor, u32 seed) -> KernelJob<Void>
+{
+    const usize n = tensor.element_count();
+    const usize threads = 256;
+    uniform_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed);
+    return KernelJob<Void>{Void{}, 0};
+}
+
+auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>
+{
+    const f32 limit = std::sqrt(6.0f / (f32)(fan_in + fan_out));
+    const usize n = tensor.element_count();
+    const usize threads = 256;
+    xavier_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed, limit);
+    return KernelJob<Void>{Void{}, 0};
+}
+
+auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
+    -> Result<DenseLayer, DeviceError>
+{
+    const auto feature_count = weights.extent(0);
+    const auto neuron_count = weights.extent(1);
+
+    auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+
+    auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
+    auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+    auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
+    auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+
+    auto m_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
+    auto v_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
+
+    auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
+    auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
+
+    cudaStream_t stream;
+    return_on_cuda_error(cudaStreamCreate(&stream));
+    return ok<DenseLayer>({
+        .outputs = std::move(outputs),
+        .weights = std::move(weights),
+        .biases = std::move(biases),
+        .d_inputs = std::move(d_inputs),
+        .d_weights = std::move(d_weights),
+        .d_biases = std::move(d_biases),
+        .m_weights = std::move(m_weights),
+        .v_weights = std::move(v_weights),
+        .m_biases = std::move(m_biases),
+        .v_biases = std::move(v_biases),
+        .stream = stream,
+    });
+}
+
+auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
+    -> Result<DenseLayer, DeviceError>
+{
+    auto weights = unwrap_or_return(DeviceOwningTensor2f::empty({input_features, neuron_count}));
+    auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
+
+    unwrap_or_return(xavier_tensor(weights.view(), seed, input_features, neuron_count).wait());
+
+    return with_weights(batch_size, std::move(weights), std::move(biases));
+}
+
+auto DenseLayer::forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
+{
+    const u32 M = outputs.extent(0);
+    const u32 N = outputs.extent(1);
+    dim3 block(16, 16);
+    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    matmul_kernel<<<grid, block, 0, stream>>>(inputs, weights.const_view(), outputs.view());
+    add_bias<<<grid, block, 0, stream>>>(inputs, biases.const_view(), outputs.view());
+    return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
+}
+
+auto DenseLayer::backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
+{
+    const u32 M = d_inputs.extent(0);
+    const u32 N = d_inputs.extent(1);
+    dim3 block(16, 16);
+    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    matmul_kernel<<<grid, block, 0, stream>>>(upstream_gradient, transposed(weights.const_view()), d_inputs.view());
+    return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
+}
+
+auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
+                                  const DeviceTensorConstView2f &upstream_gradient)
+    -> KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>
+{
+    const u32 M = d_inputs.extent(0);
+    const u32 N = d_inputs.extent(1);
+    dim3 block(16, 16);
+    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    // NOTE: Run in separate streams?
+    matmul_kernel<<<grid, block, 0, stream>>>(transposed(inputs), upstream_gradient, d_weights.view());
+
+    const auto block_dim = dim3(256);
+    const auto grid_dim = dim3((upstream_gradient.extents[1] + block_dim.x - 1) / block_dim.x);
+    sum_rows<<<block_dim, grid_dim, 0, stream>>>(transposed(upstream_gradient), d_biases.view());
+    return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>{
+        std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
+}
+
+auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases,
+                        const AdamParameters &parameters, usize t) -> KernelJob<Void>
+{
+    const auto weight_count = d_weights.element_count();
+    const auto bias_count = d_biases.element_count();
+    usize threads = 256;
+    usize weight_blocks = (weight_count + threads - 1) / threads;
+    usize bias_blocks = (bias_count + threads - 1) / threads;
+    adam_update<<<weight_blocks, threads, 0, stream>>>(parameters, (f32)t, d_weights, weights.view(), m_weights.view(),
+                                                       v_weights.view());
+    adam_update<<<bias_blocks, threads, 0, stream>>>(parameters, (f32)t, d_biases, biases.view(), m_biases.view(),
+                                                     v_biases.view());
+    return KernelJob<Void>{Void{}, stream};
+}
+
+auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, DeviceError>
+{
+    auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
+    auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
+
+    cudaStream_t stream;
+    return_on_cuda_error(cudaStreamCreate(&stream));
+    return ok(SigmoidLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = stream});
+}
+
+auto SigmoidLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>
+{
+    panic_if(to_extents(inputs.extents, inputs.rank) != outputs.extents(), "MISMATCH");
+    usize threads = 256;
+    usize blocks = (inputs.element_count() + threads - 1) / threads;
+
+    sigmoid_forward<<<blocks, threads, 0, stream>>>(inputs, outputs.view());
+    return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
+}
+
+auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
+{
+    panic_if(to_extents(upstream_gradient.extents, upstream_gradient.rank) != d_inputs.extents(), "MISMATCH");
+    panic_if(d_inputs.extents() != outputs.extents(), "MISMATCH");
+    usize threads = 256;
+    usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
+
+    sigmoid_backward<<<blocks, threads, 0, stream>>>(outputs.const_view(), upstream_gradient, d_inputs.view());
+    return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
+}
+
+auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
+{
+    return {extents};
+}
+
+auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> DeviceTensorConstView2f
+{
+    panic_if(to_extents(inputs.extents, inputs.rank) != extents, "INVALID EXTENTS");
+
+    const auto batch = inputs.extents[0];
+    const usize features =
+        std::accumulate(inputs.extents + 1, inputs.extents + extents.size(), 1ul, std::multiplies<usize>{});
+    return DeviceTensorConstView2f(inputs.data, {batch, features}, 2);
+}
+
+auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf
+{
+    panic_if(element_count(to_extents(upstream_gradient.extents, upstream_gradient.rank)) != element_count(extents),
+             "INVALID EXTENTS");
+    return DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size());
+}
+
+auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
+                               DeviceOwningTensor1f biases, usize stride, usize padding)
+    -> Result<Conv2DLayer, DeviceError>
+{
+    const usize kH = filters.extent(0);
+    const usize kW = filters.extent(1);
+    const usize C_out = filters.extent(3);
+
+    const usize C_in = filters.extent(2);
+    const usize out_H = (input_height + 2 * padding - kH) / stride + 1;
+    const usize out_W = (input_width + 2 * padding - kW) / stride + 1;
+
+    auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
+    auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
+    auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
+    auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+    auto m_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
+    auto v_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
+    auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
+    auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
+
+    cudaStream_t stream;
+    return_on_cuda_error(cudaStreamCreate(&stream));
+    return ok(Conv2DLayer{
+        .outputs = std::move(outputs),
+        .d_inputs = std::move(d_inputs),
+        .filters = std::move(filters),
+        .biases = std::move(biases),
+        .d_filters = std::move(d_filters),
+        .d_biases = std::move(d_biases),
+        .m_filters = std::move(m_filters),
+        .v_filters = std::move(v_filters),
+        .m_biases = std::move(m_biases),
+        .v_biases = std::move(v_biases),
+        .stride = stride,
+        .padding = padding,
+        .stream = stream,
+    });
+}
+
+auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
+                             usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>
+{
+    auto filters = unwrap_or_return(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
+    auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
+
+    unwrap_or_return(xavier_tensor(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
+
+    return with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride, padding);
+}
+
+auto Conv2DLayer::forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
+{
+    const usize N = outputs.extent(0);
+    const usize H_out = outputs.extent(1);
+    const usize W_out = outputs.extent(2);
+    const usize C_out = outputs.extent(3);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C_out);
+
+    conv_forward<<<grid, block, 0, stream>>>(inputs, filters.const_view(), biases.const_view(), outputs.view(), stride,
+                                             padding);
+    return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
+}
+
+auto Conv2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
+{
+    const usize N = d_inputs.extent(0);
+    const usize H_in = d_inputs.extent(1);
+    const usize W_in = d_inputs.extent(2);
+    const usize C_in = d_inputs.extent(3);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, N * C_in);
+
+    conv_backward<<<grid, block, 0, stream>>>(upstream, filters.const_view(), d_inputs.view(), stride, padding);
+    return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
+}
+
+auto Conv2DLayer::weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
+    -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>
+{
+    const usize filter_count = d_filters.element_count();
+    const usize C_out = d_biases.element_count();
+    const usize threads = 256;
+
+    conv_weight_gradients<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
+        inputs, upstream, d_filters.view(), stride, padding);
+    conv_bias_gradients<<<(C_out + threads - 1) / threads, threads, 0, stream>>>(upstream, d_biases.view());
+
+    return KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>{
+        std::make_tuple(d_filters.const_view(), d_biases.const_view()), stream};
+}
+
+auto Conv2DLayer::update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_,
+                         const AdamParameters &parameters, usize t) -> KernelJob<Void>
+{
+    const usize filter_count = filters.element_count();
+    const usize bias_count = biases.element_count();
+    const usize threads = 256;
+
+    adam_update<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
+        parameters, (f32)t, d_filters_, filters.view(), m_filters.view(), v_filters.view());
+    adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
+        parameters, (f32)t, d_biases_, biases.view(), m_biases.view(), v_biases.view());
+
+    return KernelJob<Void>{Void{}, stream};
+}
+
+auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
+                                  usize pool_w, usize stride) -> Result<MaxPool2DLayer, DeviceError>
+{
+    const usize out_H = (input_height - pool_h) / stride + 1;
+    const usize out_W = (input_width - pool_w) / stride + 1;
+
+    auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
+    auto argmax = unwrap_or_return((DeviceOwningTensor4u::empty({batch_size, out_H, out_W, channels})));
+    auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, channels}));
+
+    cudaStream_t stream;
+    return_on_cuda_error(cudaStreamCreate(&stream));
+    return ok(MaxPool2DLayer{
+        .outputs = std::move(outputs),
+        .argmax = std::move(argmax),
+        .d_inputs = std::move(d_inputs),
+        .pool_h = pool_h,
+        .pool_w = pool_w,
+        .stride = stride,
+        .stream = stream,
+    });
+}
+
+auto MaxPool2DLayer::forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
+{
+    const usize N = outputs.extent(0);
+    const usize H_out = outputs.extent(1);
+    const usize W_out = outputs.extent(2);
+    const usize C = outputs.extent(3);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
+
+    maxpool_forward<<<grid, block, 0, stream>>>(inputs, outputs.view(), argmax.view(), pool_h, pool_w, stride);
+    return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
+}
+
+auto MaxPool2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
+{
+    const usize H_out = upstream.extents[1];
+    const usize W_out = upstream.extents[2];
+    const usize N = d_inputs.extent(0);
+    const usize C = d_inputs.extent(3);
+
+    cudaMemsetAsync(d_inputs.data(), 0, d_inputs.byte_count(), stream);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
+
+    maxpool_backward<<<grid, block, 0, stream>>>(upstream, argmax.const_view(), d_inputs.view());
+    return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
+}
+
+auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, DeviceError>
+{
+    auto loss = unwrap_or_return(DeviceOwningTensor1f::empty({1}));
+    auto d_inputs = unwrap_or_return(DeviceOwningTensorf::empty(extents));
+
+    cudaStream_t stream;
+    return_on_cuda_error(cudaStreamCreate(&stream));
+    return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = stream});
+}
+
+auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+    -> KernelJob<DeviceTensorConstView1f>
+{
+    cudaMemsetAsync(loss.data(), 0, sizeof(f32), stream);
+
+    const usize n = predictions.element_count();
+    const usize threads = 256;
+    mse_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, loss.view());
+    return KernelJob<DeviceTensorConstView1f>{loss.const_view(), stream};
+}
+
+auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+    -> KernelJob<DeviceTensorConstViewf>
+{
+    const usize n = predictions.element_count();
+    const usize threads = 256;
+    mse_gradient_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
+    return KernelJob<DeviceTensorConstViewf>{d_inputs.const_view(), stream};
+}
 
 __global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void
 {
