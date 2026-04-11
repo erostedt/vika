@@ -16,8 +16,8 @@ UTEST(dense, layer_forward)
     const auto out = download(outputs).unwrap();
     const std::vector<f32> expected = {59.0f, 66.0f, 140.0f, 156.0f};
 
-    EXPECT_EQ(out.rows(), 2u);
-    EXPECT_EQ(out.cols(), 2u);
+    EXPECT_EQ(out.extent(0), 2u);
+    EXPECT_EQ(out.extent(1), 2u);
     ASSERT_TRUE(are_close(out, expected, 1e-5f));
 }
 
@@ -34,8 +34,8 @@ UTEST(dense, layer_backward)
     const auto out = download(d_inputs).unwrap();
     const std::vector<f32> expected = {17.0f, 23.0f, 29.0f, 39.0f, 53.0f, 67.0f};
 
-    EXPECT_EQ(out.rows(), 2u);
-    EXPECT_EQ(out.cols(), 3u);
+    EXPECT_EQ(out.extent(0), 2u);
+    EXPECT_EQ(out.extent(1), 3u);
     ASSERT_TRUE(are_close(out, expected, 1e-5f));
 }
 
@@ -59,8 +59,8 @@ UTEST(dense, layer_weight_gradients)
     const std::vector<f32> expected_d_weights = {13.0f, 18.0f, 17.0f, 24.0f, 21.0f, 30.0f};
     const std::vector<f32> expected_d_biases = {4.0f, 6.0f};
 
-    EXPECT_EQ(d_weights_cpu.rows(), 3u);
-    EXPECT_EQ(d_weights_cpu.cols(), 2u);
+    EXPECT_EQ(d_weights_cpu.extent(0), 3u);
+    EXPECT_EQ(d_weights_cpu.extent(1), 2u);
     EXPECT_EQ(d_biases.element_count(), 2);
     ASSERT_TRUE(are_close(d_weights_cpu, expected_d_weights, 1e-5f));
     ASSERT_TRUE(are_close(d_biases_cpu, expected_d_biases, 1e-5f));

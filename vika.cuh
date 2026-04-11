@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -66,6 +67,8 @@ namespace vika
 template <typename T, usize Capacity>
 class FixedVector
 {
+    using Self = FixedVector<T, Capacity>;
+
   public:
     FixedVector() : m_size(0)
     {
@@ -233,18 +236,28 @@ class FixedVector
         return std::reverse_iterator<const T *>(begin());
     }
 
+    auto operator==(const Self &other) const -> bool
+    {
+        return std::equal(cbegin(), cend(), other.cbegin(), other.cend());
+    }
+
+    auto operator!=(const Self &other) const -> bool
+    {
+        return !(*this == other);
+    }
+
   private:
     T m_data[Capacity];
     usize m_size;
 
     auto check_bounds(usize idx) const -> void
     {
-        panic_if(idx >= m_size, "Panicked: FixedVector::at index %zu out of bounds (size=%zu)\n", idx, m_size);
+        panic_if(idx >= m_size, "FixedVector::at index %zu out of bounds (size=%zu)\n", idx, m_size);
     }
 
     auto check_not_full() const -> void
     {
-        panic_if(m_size >= Capacity, "Panicked: FixedVector is at capacity (%zu)\n", Capacity);
+        panic_if(m_size >= Capacity, "FixedVector is at capacity (%zu)\n", Capacity);
     }
 };
 
@@ -471,10 +484,15 @@ inline auto to_extents(const usize data[Rank]) -> std::array<usize, Rank>
     return extents;
 }
 
-template <usize Rank>
-inline auto extents_equal(const usize e1[Rank], const usize e2[Rank]) -> bool
+inline auto to_extents(const usize *data, usize rank) -> Extents
 {
-    return std::equal(e1, e1 + Rank, e2, e2 + Rank);
+    panic_if(rank >= Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
+    Extents extents{};
+    for (usize i = 0; i < rank; ++i)
+    {
+        extents.push_back(data[i]);
+    }
+    return extents;
 }
 
 template <usize Rank>
@@ -490,11 +508,10 @@ inline auto byte_count(const std::array<usize, Rank> &extents) -> usize
     return element_count(extents) * sizeof(T);
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 class HostTensor
 {
-    using Extents = std::array<usize, Rank>;
-    using Self = HostTensor<T, Rank>;
+    using Self = HostTensor<T>;
     using iterator = typename std::vector<T>::iterator;
     using const_iterator = typename std::vector<T>::const_iterator;
 
@@ -509,19 +526,16 @@ class HostTensor
         return _data[i];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 2>>
     auto operator()(usize r, usize c) -> T &
     {
-        return _data[r * cols() + c];
+        return _data[r * _extents[1] + c];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 2>>
     auto operator()(usize r, usize c) const -> const T &
     {
-        return _data[r * cols() + c];
+        return _data[r * _extents[1] + c];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 4>>
     auto operator()(usize n, usize h, usize w, usize c) -> T &
     {
         const auto height = _extents[1];
@@ -530,7 +544,6 @@ class HostTensor
         return _data[((n * height + h) * width + w) * channels + c];
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 4>>
     auto operator()(usize n, usize h, usize w, usize c) const -> const T &
     {
         const auto height = _extents[1];
@@ -544,10 +557,9 @@ class HostTensor
         return _extents;
     }
 
-    template <usize Dimension, typename = std::enable_if_t<(Dimension < Rank)>>
-    auto extent() const -> usize
+    auto extent(usize dimension) const -> usize
     {
-        return _extents[Dimension];
+        return _extents.at(dimension);
     }
 
     auto data() -> T *
@@ -569,18 +581,6 @@ class HostTensor
     auto size() const -> usize
     {
         return std::size(_data);
-    }
-
-    template <usize R = Rank, typename = std::enable_if_t<R == 2>>
-    auto rows() const -> usize
-    {
-        return _extents[0];
-    }
-
-    template <usize R = Rank, typename = std::enable_if_t<R == 2>>
-    auto cols() const -> usize
-    {
-        return _extents[1];
     }
 
     auto begin() -> iterator
@@ -605,22 +605,21 @@ class HostTensor
 
     static auto zero(const Extents &extents) -> Self
     {
-        return HostTensor(std::vector<T>(HostTensor<T, Rank>::size(extents), T{}), extents);
+        return HostTensor(std::vector<T>(Self::size(extents), T{}), extents);
     }
 
     static auto empty(const Extents &extents) -> Self
     {
-        return HostTensor(std::vector<T>(HostTensor<T, Rank>::size(extents)), extents);
+        return HostTensor(std::vector<T>(Self::size(extents)), extents);
     }
 
-    template <usize R = Rank, typename = std::enable_if_t<R == 1>>
     static auto zero(usize element_count) -> Self
     {
         return Self::zero(Extents{element_count});
     }
 
     template <typename OtherType>
-    static auto zero_like(const HostTensor<OtherType, Rank> &tensor) -> Self
+    static auto zero_like(const HostTensor<OtherType> &tensor) -> Self
     {
         return Self::zero(tensor.extents());
     }
@@ -632,17 +631,19 @@ class HostTensor
 
     static auto copy_from(std::vector<T> data, const Extents &extents) -> Self
     {
-        assert(std::size(data) == Self::size(extents));
+        panic_if(std::size(data) != Self::size(extents), "Size mismatch");
         return HostTensor(std::move(data), extents);
     }
 
   private:
-    template <typename OtherT, usize OtherRank, typename>
+    template <typename OtherT, typename>
     friend class HostTensor;
 
     HostTensor(std::vector<T> &&data, const Extents &extents) : _data(std::move(data)), _extents(extents)
     {
-        assert(size(extents) > 0);
+        panic_if(_extents.empty(), "Empty extents!");
+        panic_if(size(_extents) == 0, "Extent was 0");
+        panic_if(_data.size() != size(_extents), "data/extents size mismatch");
     }
 
   private:
@@ -650,15 +651,15 @@ class HostTensor
     const Extents _extents{};
 };
 
-template <usize Rank>
-using HostTensorf = HostTensor<f32, Rank>;
-using HostTensor1f = HostTensorf<1>;
-using HostTensor2f = HostTensorf<2>;
-using HostTensor3f = HostTensorf<3>;
-using HostTensor4f = HostTensorf<4>;
-using HostTensor4u = HostTensor<u32, 4>;
+using HostTensorf = HostTensor<f32>;
+using HostTensor1f = HostTensorf;
+using HostTensor2f = HostTensorf;
+using HostTensor3f = HostTensorf;
+using HostTensor4f = HostTensorf;
+using HostTensoru = HostTensor<u32>;
+using HostTensor4u = HostTensor<u32>;
 using Vectorf = HostTensor1f;
-using Vectoru = HostTensor<u32, 1>;
+using Vectoru = HostTensor<u32>;
 using Matrixf = HostTensor2f;
 
 template <typename T>
@@ -689,6 +690,20 @@ class DeviceOwningTensor
             return error(DeviceError(err));
         }
         return ok(Self(ptr, extents));
+    }
+
+    static auto empty(const vika::Extents &extents) -> Result<Self, DeviceError>
+    {
+        Extents _extents{};
+        std::copy(extents.cbegin(), extents.cend(), _extents.begin());
+
+        T *ptr = nullptr;
+        const auto err = cudaMalloc(&ptr, vika::byte_count<T>(_extents));
+        if (err)
+        {
+            return error(DeviceError(err));
+        }
+        return ok(Self(ptr, _extents));
     }
 
     static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, DeviceError>
@@ -786,9 +801,10 @@ class DeviceOwningTensor
 };
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T, Rank> &dst) -> Result<Void, DeviceError>
+auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T> &dst) -> Result<Void, DeviceError>
 {
-    panic_if(src.extents() != dst.extents(), "element_mismatch");
+    // TODO: CHECK ME
+    // panic_if(src.extents() != dst.extents(), "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
@@ -798,10 +814,11 @@ auto copy(DeviceOwningTensor<T, Rank> src, HostTensor<T, Rank> &dst) -> Result<V
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T, Rank> &dst) -> Result<Void, DeviceError>
+auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T> &dst) -> Result<Void, DeviceError>
 {
     const auto extents = to_extents<Rank>(src.extents);
-    panic_if(dst.extents() != extents, "element_mismatch");
+    // TODO: CHECK ME
+    // panic_if(dst.extents() != extents, "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
@@ -811,9 +828,10 @@ auto copy(const DeviceTensorView<const T, Rank> &src, HostTensor<T, Rank> &dst) 
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> Result<Void, DeviceError>
+auto copy(const HostTensor<T> &src, DeviceOwningTensor<T, Rank> &dst) -> Result<Void, DeviceError>
 {
-    panic_if(src.extents() != dst.extents(), "element_mismatch");
+    // TODO: CHECK ME
+    // panic_if(src.extents() != dst.extents(), "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
     if (is_error(err))
     {
@@ -823,7 +841,7 @@ auto copy(const HostTensor<T, Rank> &src, DeviceOwningTensor<T, Rank> &dst) -> R
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank>, DeviceError>
+auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T, Rank>, DeviceError>
 {
     auto dst = DeviceOwningTensor<T, Rank>::empty(src.extents());
     if (dst.is_error())
@@ -840,9 +858,9 @@ auto upload(const HostTensor<T, Rank> &src) -> Result<DeviceOwningTensor<T, Rank
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T, Rank>, DeviceError>
+auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T>, DeviceError>
 {
-    auto dst = HostTensor<T, Rank>::empty(to_extents<Rank>(src.extents));
+    auto dst = HostTensor<T>::empty(to_extents(src.extents, Rank));
     const auto err = copy(src, dst);
     if (err.is_error())
     {
@@ -852,7 +870,7 @@ auto download(const DeviceTensorView<const T, Rank> &src) -> Result<HostTensor<T
 }
 
 template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T, Rank>, DeviceError>
+auto download(const DeviceOwningTensor<T, Rank> &src) -> Result<HostTensor<T>, DeviceError>
 {
     return download(src.const_view());
 }
@@ -1132,10 +1150,10 @@ struct DenseLayer
         const auto feature_count = weights.extent<0>();
         const auto neuron_count = weights.extent<1>();
 
-        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+        auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{batch_size, neuron_count}));
 
-        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
-        auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+        auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{batch_size, feature_count}));
+        auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{batch_size, neuron_count}));
         auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
 
@@ -1165,7 +1183,7 @@ struct DenseLayer
     static auto randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
         -> Result<DenseLayer, DeviceError>
     {
-        auto weights = unwrap_or_return(DeviceOwningTensor2f::empty({input_features, neuron_count}));
+        auto weights = unwrap_or_return(DeviceOwningTensor2f::empty(std::array{input_features, neuron_count}));
         auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
 
         unwrap_or_return(xavier_tensor<2>(weights.view(), seed, input_features, neuron_count).wait());
@@ -1323,8 +1341,9 @@ struct Conv2DLayer
         const usize out_H = (input_height + 2 * padding - kH) / stride + 1;
         const usize out_W = (input_width + 2 * padding - kW) / stride + 1;
 
-        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
-        auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
+        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, out_H, out_W, C_out}));
+        auto d_inputs =
+            unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, input_height, input_width, C_in}));
         auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
         auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
         auto m_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
@@ -1354,7 +1373,7 @@ struct Conv2DLayer
     static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
                            usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>
     {
-        auto filters = unwrap_or_return(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
+        auto filters = unwrap_or_return(DeviceOwningTensor4f::empty(std::array{kH, kW, C_in, C_out}));
         auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
 
         unwrap_or_return(xavier_tensor<4>(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
@@ -1447,10 +1466,11 @@ struct MaxPool2DLayer
         const usize out_H = (input_height - pool_h) / stride + 1;
         const usize out_W = (input_width - pool_w) / stride + 1;
 
-        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
-        auto argmax = unwrap_or_return((DeviceOwningTensor<u32, 4>::empty({batch_size, out_H, out_W, channels})));
+        auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, out_H, out_W, channels}));
+        auto argmax =
+            unwrap_or_return((DeviceOwningTensor<u32, 4>::empty(std::array{batch_size, out_H, out_W, channels})));
         auto d_inputs =
-            unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, channels}));
+            unwrap_or_return(DeviceOwningTensor4f::empty(std::array{batch_size, input_height, input_width, channels}));
 
         cudaStream_t stream;
         return_on_cuda_error(cudaStreamCreate(&stream));
@@ -1571,7 +1591,7 @@ struct MSELoss
 {
     static auto with_extents(const std::array<usize, Rank> &extents) -> Result<MSELoss, DeviceError>
     {
-        auto loss = unwrap_or_return(DeviceOwningTensor1f::empty({1}));
+        auto loss = unwrap_or_return(DeviceOwningTensor1f::empty(std::array<usize, 1>{1}));
         auto d_inputs = unwrap_or_return(DeviceOwningTensorf<Rank>::empty(extents));
 
         cudaStream_t stream;

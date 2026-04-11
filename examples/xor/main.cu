@@ -34,8 +34,8 @@ int main()
         },
         {batch_size, 1});
 
-    const auto inputs = upload(cpu_inputs).unwrap();
-    const auto targets = upload(cpu_targets).unwrap();
+    const auto inputs = upload<f32, 2>(cpu_inputs).unwrap();
+    const auto targets = upload<f32, 2>(cpu_targets).unwrap();
 
     // Layers
     auto dense1 = DenseLayer::randomized(batch_size, 2, hidden_size, 42u).unwrap();

@@ -7,7 +7,7 @@ UTEST(tensor, zero_1d)
 {
     const auto t = HostTensor1f::zero(4);
     EXPECT_EQ(t.size(), 4u);
-    EXPECT_EQ(t.extent<0>(), 4u);
+    EXPECT_EQ(t.extent(0), 4u);
     for (usize i = 0; i < t.size(); ++i)
     {
         EXPECT_EQ(t[i], 0.0f);
@@ -17,8 +17,8 @@ UTEST(tensor, zero_1d)
 UTEST(tensor, zero_2d)
 {
     const auto t = HostTensor2f::zero({2, 3});
-    EXPECT_EQ(t.rows(), 2u);
-    EXPECT_EQ(t.cols(), 3u);
+    EXPECT_EQ(t.extent(0), 2u);
+    EXPECT_EQ(t.extent(1), 3u);
     EXPECT_EQ(t.size(), 6u);
     for (usize i = 0; i < t.size(); ++i)
     {

@@ -3,8 +3,8 @@
 
 #include "vika.cuh"
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-inline auto are_equal(const vika::HostTensor<T, Rank> &actual, const vika::HostTensor<T, Rank> &expected) -> bool
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+inline auto are_equal(const vika::HostTensor<T> &actual, const vika::HostTensor<T> &expected) -> bool
 {
     if (actual.extents() != expected.extents())
     {
@@ -13,8 +13,8 @@ inline auto are_equal(const vika::HostTensor<T, Rank> &actual, const vika::HostT
     return std::equal(actual.begin(), actual.end(), expected.begin());
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-inline auto are_close(const vika::HostTensor<T, Rank> &actual, const vika::HostTensor<T, Rank> &expected, T tol) -> bool
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+inline auto are_close(const vika::HostTensor<T> &actual, const vika::HostTensor<T> &expected, T tol) -> bool
 {
     if (actual.extents() != expected.extents())
     {
@@ -30,8 +30,8 @@ inline auto are_close(const vika::HostTensor<T, Rank> &actual, const vika::HostT
     return true;
 }
 
-template <typename T, usize Rank, typename = std::enable_if_t<(std::is_arithmetic_v<T> && Rank > 0)>>
-inline auto are_close(const vika::HostTensor<T, Rank> &actual, const std::vector<T> &expected, T tol) -> bool
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+inline auto are_close(const vika::HostTensor<T> &actual, const std::vector<T> &expected, T tol) -> bool
 {
     if (actual.size() != expected.size())
     {

@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <iostream>
 
 #define VIKA_IMPLEMENTATION
 #include "vika.cuh"
@@ -39,8 +40,8 @@ int main()
         cpu_targets(N_HORIZ + c, 0) = 1.0f;
     }
 
-    const auto inputs = upload(cpu_inputs).unwrap();
-    const auto targets = upload(cpu_targets).unwrap();
+    const auto inputs = upload<f32, 4>(cpu_inputs).unwrap();
+    const auto targets = upload<f32, 2>(cpu_targets).unwrap();
 
     // Architecture:
     //   Conv2D(3x3, 8 filters, stride=1, padding=0): [N, 8, 8, 1] -> [N, 6, 6, 8]
@@ -51,10 +52,10 @@ int main()
     //   Dense(16 -> 1)
     //   Sigmoid
     constexpr usize CONV_FILTERS = 8;
-    constexpr usize CONV_OUT_H = IMG_H - 3 + 1; // 6
-    constexpr usize CONV_OUT_W = IMG_W - 3 + 1; // 6
-    constexpr usize POOL_OUT_H = (CONV_OUT_H - 2) / 2 + 1; // 3
-    constexpr usize POOL_OUT_W = (CONV_OUT_W - 2) / 2 + 1; // 3
+    constexpr usize CONV_OUT_H = IMG_H - 3 + 1;                         // 6
+    constexpr usize CONV_OUT_W = IMG_W - 3 + 1;                         // 6
+    constexpr usize POOL_OUT_H = (CONV_OUT_H - 2) / 2 + 1;              // 3
+    constexpr usize POOL_OUT_W = (CONV_OUT_W - 2) / 2 + 1;              // 3
     constexpr usize FLAT_SIZE = POOL_OUT_H * POOL_OUT_W * CONV_FILTERS; // 72
     constexpr usize HIDDEN = 16;
 
