@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <queue>
@@ -20,6 +21,8 @@ using i32 = int32_t;
 using u32 = uint32_t;
 using f32 = float;
 using usize = size_t;
+
+#define VIKA_MAX_RANK 6
 
 #define panic(fmt, ...)                                                                                                \
     do                                                                                                                 \
@@ -59,6 +62,193 @@ using usize = size_t;
 
 namespace vika
 {
+
+template <typename T, usize Capacity>
+class FixedVector
+{
+  public:
+    FixedVector() : m_size(0)
+    {
+    }
+
+    FixedVector(std::initializer_list<T> init) : m_size(0)
+    {
+        for (const auto &v : init)
+        {
+            push_back(v);
+        }
+    }
+
+    auto operator[](usize idx) -> T &
+    {
+        return m_data[idx];
+    }
+
+    auto operator[](usize idx) const -> const T &
+    {
+        return m_data[idx];
+    }
+
+    auto at(usize idx) -> T &
+    {
+        check_bounds(idx);
+        return m_data[idx];
+    }
+
+    auto at(usize idx) const -> const T &
+    {
+        check_bounds(idx);
+        return m_data[idx];
+    }
+
+    auto front() -> T &
+    {
+        return m_data[0];
+    }
+
+    auto front() const -> const T &
+    {
+        return m_data[0];
+    }
+
+    auto back() -> T &
+    {
+        return m_data[m_size - 1];
+    }
+
+    auto back() const -> const T &
+    {
+        return m_data[m_size - 1];
+    }
+
+    auto data() -> T *
+    {
+        return m_data;
+    }
+
+    auto data() const -> const T *
+    {
+        return m_data;
+    }
+
+    auto size() const -> usize
+    {
+        return m_size;
+    }
+
+    static constexpr auto capacity() -> usize
+    {
+        return Capacity;
+    }
+
+    auto empty() const -> bool
+    {
+        return m_size == 0;
+    }
+
+    auto full() const -> bool
+    {
+        return m_size == Capacity;
+    }
+
+    auto push_back(const T &value) -> void
+    {
+        check_not_full();
+        m_data[m_size++] = value;
+    }
+
+    auto push_back(T &&value) -> void
+    {
+        check_not_full();
+        m_data[m_size++] = std::move(value);
+    }
+
+    template <typename... Args>
+    auto emplace_back(Args &&...args) -> T &
+    {
+        check_not_full();
+        T *slot = &m_data[m_size++];
+        new (slot) T(std::forward<Args>(args)...);
+        return *slot;
+    }
+
+    auto pop_back() -> void
+    {
+        panic_if(m_size == 0, "Panicked: FixedVector::pop_back on empty vector\n");
+        --m_size;
+    }
+
+    auto clear() -> void
+    {
+        m_size = 0;
+    }
+
+    auto begin() -> T *
+    {
+        return m_data;
+    }
+
+    auto end() -> T *
+    {
+        return m_data + m_size;
+    }
+
+    auto begin() const -> const T *
+    {
+        return m_data;
+    }
+
+    auto end() const -> const T *
+    {
+        return m_data + m_size;
+    }
+
+    auto cbegin() const -> const T *
+    {
+        return m_data;
+    }
+
+    auto cend() const -> const T *
+    {
+        return m_data + m_size;
+    }
+
+    auto rbegin() -> std::reverse_iterator<T *>
+    {
+        return std::reverse_iterator<T *>(end());
+    }
+
+    auto rend() -> std::reverse_iterator<T *>
+    {
+        return std::reverse_iterator<T *>(begin());
+    }
+
+    auto rbegin() const -> std::reverse_iterator<const T *>
+    {
+        return std::reverse_iterator<const T *>(end());
+    }
+
+    auto rend() const -> std::reverse_iterator<const T *>
+    {
+        return std::reverse_iterator<const T *>(begin());
+    }
+
+  private:
+    T m_data[Capacity];
+    usize m_size;
+
+    auto check_bounds(usize idx) const -> void
+    {
+        panic_if(idx >= m_size, "Panicked: FixedVector::at index %zu out of bounds (size=%zu)\n", idx, m_size);
+    }
+
+    auto check_not_full() const -> void
+    {
+        panic_if(m_size >= Capacity, "Panicked: FixedVector is at capacity (%zu)\n", Capacity);
+    }
+};
+
+using Extents = FixedVector<usize, VIKA_MAX_RANK>;
 
 template <typename Node>
 using AdjecencyGraph = std::unordered_map<Node, std::vector<Node>>;
@@ -1740,6 +1930,7 @@ __global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorV
 // - Topological sort
 //
 // - Dynamic indexing (remove Rank template)
+// - Use StackVector for extents?
 // - Pick device?
 // - Sequential model
 // - Non-sequential builder api
