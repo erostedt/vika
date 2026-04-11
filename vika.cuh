@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <memory>
 #include <numeric>
+#include <queue>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -58,6 +59,9 @@ using usize = size_t;
 
 namespace vika
 {
+
+template <typename Node>
+using AdjecencyGraph = std::unordered_map<Node, std::vector<Node>>;
 
 struct Void
 {
@@ -177,6 +181,62 @@ class Result
 
     std::variant<T, E> storage;
 };
+
+template <typename Node>
+auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Node>, std::string>
+{
+    std::unordered_map<Node, i32> indegree{};
+
+    for (const auto &[u, neighbors] : adj)
+    {
+        if (!indegree.count(u))
+        {
+            indegree[u] = 0;
+        }
+        for (const Node &v : neighbors)
+        {
+            ++indegree[v];
+        }
+    }
+
+    std::queue<Node> q{};
+    for (const auto &[node, deg] : indegree)
+    {
+        if (deg == 0)
+        {
+            q.push(node);
+        }
+    }
+
+    std::vector<Node> order;
+    order.reserve(indegree.size());
+    while (!q.empty())
+    {
+        Node u = std::move(q.front());
+        q.pop();
+        order.push_back(u);
+        const auto it = adj.find(u);
+        if (it == adj.end())
+        {
+            continue;
+        }
+
+        for (const Node &v : it->second)
+        {
+            --indegree[v];
+            if (indegree[v] == 0)
+            {
+                q.push(v);
+            }
+        }
+    }
+
+    if (order.size() == indegree.size())
+    {
+        return ok(order);
+    }
+    return error(std::string("Cycle detected"));
+}
 
 inline auto is_error(cudaError_t err) -> bool
 {
@@ -1672,6 +1732,12 @@ __global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorV
 // - CategoricalCrossEntropy Forward
 // - CategoricalCrossEntropy Backward
 // - CategoricalCrossEntropy Layer
+//
+// - Upsampling Forward
+// - Upsampling Backward
+// - Upsampling Layer
+//
+// - Topological sort
 //
 // - Dynamic indexing (remove Rank template)
 // - Pick device?
