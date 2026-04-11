@@ -64,6 +64,10 @@ using usize = size_t;
 namespace vika
 {
 
+// =============================================================================
+// Generic Utilities
+// =============================================================================
+
 template <typename T, usize Capacity>
 class FixedVector
 {
@@ -441,6 +445,10 @@ auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Nod
     return error(std::string("Cycle detected"));
 }
 
+// =============================================================================
+// CUDA Error Handling
+// =============================================================================
+
 auto is_error(cudaError_t err) -> bool;
 
 class DeviceError
@@ -455,6 +463,10 @@ class DeviceError
     cudaError_t _code;
 };
 
+// =============================================================================
+// Tensor Helpers
+// =============================================================================
+
 auto to_extents(const usize *data, usize rank) -> Extents;
 auto element_count(const Extents &extents) -> usize;
 
@@ -463,6 +475,10 @@ inline auto byte_count(const Extents &extents) -> usize
 {
     return element_count(extents) * sizeof(T);
 }
+
+// =============================================================================
+// Host Tensors
+// =============================================================================
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 class HostTensor
@@ -617,6 +633,10 @@ using HostTensor4u = HostTensor<u32>;
 using Vectorf = HostTensor1f;
 using Vectoru = HostTensor<u32>;
 using Matrixf = HostTensor2f;
+
+// =============================================================================
+// Device Tensors
+// =============================================================================
 
 template <typename T>
 struct DeviceDeleter
@@ -918,6 +938,10 @@ using DeviceTensorConstView4u = DeviceTensorView<const u32>;
 
 auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f;
 
+// =============================================================================
+// Kernel Infrastructure
+// =============================================================================
+
 template <typename T>
 struct KernelJob
 {
@@ -997,6 +1021,10 @@ __host__ __device__ auto sigmoid(f32 x) -> f32;
 
 auto uniform_tensor(DeviceTensorViewf tensor, u32 seed) -> KernelJob<Void>;
 auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>;
+
+// =============================================================================
+// Layers
+// =============================================================================
 
 struct DenseLayer
 {
@@ -1138,6 +1166,10 @@ struct MSELoss
 namespace vika
 {
 
+// =============================================================================
+// CUDA Error Handling
+// =============================================================================
+
 auto is_error(cudaError_t err) -> bool
 {
     return err != cudaSuccess;
@@ -1163,6 +1195,10 @@ auto DeviceError::crash() -> void
     panic("Crashed due to: [%s] %s", cudaGetErrorName(_code), cudaGetErrorString(_code));
 }
 
+// =============================================================================
+// Tensor Helpers
+// =============================================================================
+
 auto to_extents(const usize *data, usize rank) -> Extents
 {
     panic_if(rank >= Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
@@ -1180,6 +1216,10 @@ auto element_count(const Extents &extents) -> usize
     return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
 }
 
+// =============================================================================
+// Device Tensors
+// =============================================================================
+
 auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f
 {
     auto transposed_view = view;
@@ -1187,6 +1227,10 @@ auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f
     std::swap(transposed_view.extents[0], transposed_view.extents[1]);
     return transposed_view;
 }
+
+// =============================================================================
+// Kernel Infrastructure
+// =============================================================================
 
 __host__ __device__ auto sigmoid(f32 x) -> f32
 {
@@ -1226,6 +1270,10 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
     xavier_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed, limit);
     return KernelJob<Void>{Void{}, 0};
 }
+
+// =============================================================================
+// Layers
+// =============================================================================
 
 auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
     -> Result<DenseLayer, DeviceError>
@@ -1573,6 +1621,10 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
     mse_gradient_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
     return KernelJob<DeviceTensorConstViewf>{d_inputs.const_view(), stream};
 }
+
+// =============================================================================
+// Kernels
+// =============================================================================
 
 __global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void
 {
@@ -1971,7 +2023,6 @@ __global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorC
 #endif
 
 // TODO (ecrt):
-//
 // - Softmax Forward
 // - Softmax Backward
 // - Softmax Layer
