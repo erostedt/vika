@@ -1189,13 +1189,13 @@ struct DenseSpec
 
 struct Conv2DSpec
 {
-    usize kH, kW, C_out, stride, padding;
+    usize kernel_height, kernel_width, channels_out, stride, padding;
     u32 seed;
 };
 
 struct MaxPool2DSpec
 {
-    usize pool_h, pool_w, stride;
+    usize pool_height, pool_width, stride;
 };
 
 using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, MaxPool2DSpec, FlattenSpec>;
@@ -1213,6 +1213,12 @@ struct ComputationGraph
     std::vector<Node> nodes;
 
     auto input(Extents spatial_extents) -> NodeId;
+    auto dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, std::string>;
+    auto sigmoid(NodeId input) -> Result<NodeId, std::string>;
+    auto flatten(NodeId input) -> Result<NodeId, std::string>;
+    auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride, usize padding,
+                u32 seed) -> Result<NodeId, std::string>;
+    auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, std::string>;
 };
 
 }; // namespace vika
@@ -1697,6 +1703,149 @@ auto ComputationGraph::input(Extents spatial_extents) -> NodeId
         .inputs = {},
     });
     return id;
+}
+
+auto ComputationGraph::dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, std::string>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(std::string("dense: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    if (in_extents.size() != 2)
+    {
+        return error(std::string("dense: input must be rank 2 [N, features]"));
+    }
+
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = DenseSpec{output_features, seed},
+        .output_extents = {in_extents[0], output_features},
+        .inputs = {input},
+    });
+    return ok(id);
+}
+
+auto ComputationGraph::sigmoid(NodeId input) -> Result<NodeId, std::string>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(std::string("sigmoid: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = SigmoidSpec{},
+        .output_extents = in_extents,
+        .inputs = {input},
+    });
+    return ok(id);
+}
+
+auto ComputationGraph::flatten(NodeId input) -> Result<NodeId, std::string>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(std::string("flatten: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    if (in_extents.size() < 2)
+    {
+        return error(std::string("flatten: input must be at least rank 2"));
+    }
+
+    usize features = 1;
+    for (usize i = 1; i < in_extents.size(); ++i)
+    {
+        features *= in_extents[i];
+    }
+
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = FlattenSpec{},
+        .output_extents = {in_extents[0], features},
+        .inputs = {input},
+    });
+    return ok(id);
+}
+
+auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride,
+                              usize padding, u32 seed) -> Result<NodeId, std::string>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(std::string("conv2d: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    if (in_extents.size() != 4)
+    {
+        return error(std::string("conv2d: input must be rank 4 [N, H, W, C]"));
+    }
+
+    const auto H = in_extents[1];
+    const auto W = in_extents[2];
+
+    if (H + 2 * padding < kernel_height)
+    {
+        return error(std::string("conv2d: kernel height exceeds padded input height"));
+    }
+    if (W + 2 * padding < kernel_width)
+    {
+        return error(std::string("conv2d: kernel width exceeds padded input width"));
+    }
+
+    const auto out_H = (H + 2 * padding - kernel_height) / stride + 1;
+    const auto out_W = (W + 2 * padding - kernel_width) / stride + 1;
+
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = Conv2DSpec{kernel_height, kernel_width, channels_out, stride, padding, seed},
+        .output_extents = {in_extents[0], out_H, out_W, channels_out},
+        .inputs = {input},
+    });
+    return ok(id);
+}
+
+auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride)
+    -> Result<NodeId, std::string>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(std::string("maxpool2d: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    if (in_extents.size() != 4)
+    {
+        return error(std::string("maxpool2d: input must be rank 4 [N, H, W, C]"));
+    }
+
+    const auto H = in_extents[1];
+    const auto W = in_extents[2];
+
+    if (H < pool_height)
+    {
+        return error(std::string("maxpool2d: pool height exceeds input height"));
+    }
+    if (W < pool_width)
+    {
+        return error(std::string("maxpool2d: pool width exceeds input width"));
+    }
+
+    const auto out_H = (H - pool_height) / stride + 1;
+    const auto out_W = (W - pool_width) / stride + 1;
+
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = MaxPool2DSpec{pool_height, pool_width, stride},
+        .output_extents = {in_extents[0], out_H, out_W, in_extents[3]},
+        .inputs = {input},
+    });
+    return ok(id);
 }
 
 // =============================================================================
