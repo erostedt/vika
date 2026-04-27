@@ -1080,7 +1080,7 @@ struct Flatten2DLayer
     // TODO: CHECK RANK SIZE
     static auto with_extents(const Extents &extents) -> Flatten2DLayer;
 
-    auto forward(DeviceTensorConstViewf inputs) const -> DeviceTensorConstView2f;
+    auto forward(DeviceTensorConstViewf inputs) const -> KernelJob<DeviceTensorConstView2f>;
 
     auto backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf;
 
@@ -1207,13 +1207,23 @@ struct Node
     std::vector<NodeId> inputs;
 };
 
+struct InputLayer
+{
+    auto forward(DeviceTensorConstViewf input) const -> KernelJob<DeviceTensorConstViewf>;
+};
+
+using Layer = std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer>;
+
 struct Model
 {
     usize batch_size;
-    std::vector<Node> nodes;
+    std::vector<Layer> layers;
+    std::vector<std::vector<NodeId>> layer_inputs;
     std::vector<NodeId> execution_order;
     NodeId input_node;
     NodeId output_node;
+
+    auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, DeviceError>;
 };
 
 struct ComputationGraph
@@ -1230,6 +1240,8 @@ struct ComputationGraph
     auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, std::string>;
     auto compile(NodeId output) -> Result<Model, std::string>;
 };
+
+auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, std::string>;
 
 }; // namespace vika
 
@@ -1484,14 +1496,19 @@ auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
     return {extents};
 }
 
-auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> DeviceTensorConstView2f
+auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> KernelJob<DeviceTensorConstView2f>
 {
     panic_if(to_extents(inputs.extents, inputs.rank) != extents, "INVALID EXTENTS");
 
     const auto batch = inputs.extents[0];
     const usize features =
         std::accumulate(inputs.extents + 1, inputs.extents + extents.size(), 1ul, std::multiplies<usize>{});
-    return DeviceTensorConstView2f(inputs.data, {batch, features}, 2);
+    return KernelJob<DeviceTensorConstView2f>{DeviceTensorConstView2f(inputs.data, {batch, features}, 2), 0};
+}
+
+auto InputLayer::forward(DeviceTensorConstViewf input) const -> KernelJob<DeviceTensorConstViewf>
+{
+    return KernelJob<DeviceTensorConstViewf>{input, 0};
 }
 
 auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf
@@ -1858,6 +1875,67 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     return ok(id);
 }
 
+auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, std::string>
+{
+    return std::visit(
+        [&](const auto &s) -> Result<Layer, std::string> {
+            using T = std::decay_t<decltype(s)>;
+            if constexpr (std::is_same_v<T, InputSpec>)
+            {
+                return ok(Layer{InputLayer{}});
+            }
+            else if constexpr (std::is_same_v<T, DenseSpec>)
+            {
+                auto result = DenseLayer::randomized(batch_size, pred_extents[1], s.output_features, s.seed);
+                if (result.is_error())
+                {
+                    return error(result.unwrap_error().string());
+                }
+                return ok(Layer{std::move(result.unwrap())});
+            }
+            else if constexpr (std::is_same_v<T, SigmoidSpec>)
+            {
+                auto result = SigmoidLayer::with_extents(pred_extents);
+                if (result.is_error())
+                {
+                    return error(result.unwrap_error().string());
+                }
+                return ok(Layer{std::move(result.unwrap())});
+            }
+            else if constexpr (std::is_same_v<T, FlattenSpec>)
+            {
+                return ok(Layer{Flatten2DLayer::with_extents(pred_extents)});
+            }
+            else if constexpr (std::is_same_v<T, Conv2DSpec>)
+            {
+                auto result = Conv2DLayer::randomized(batch_size, pred_extents[1], pred_extents[2], s.kernel_height,
+                                                      s.kernel_width, pred_extents[3], s.channels_out, s.stride,
+                                                      s.padding, s.seed);
+                if (result.is_error())
+                {
+                    return error(result.unwrap_error().string());
+                }
+                return ok(Layer{std::move(result.unwrap())});
+            }
+            else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
+            {
+                auto result = MaxPool2DLayer::with_extents(batch_size, pred_extents[1], pred_extents[2],
+                                                           pred_extents[3], s.pool_height, s.pool_width, s.stride);
+                if (result.is_error())
+                {
+                    return error(result.unwrap_error().string());
+                }
+                return ok(Layer{std::move(result.unwrap())});
+            }
+            else
+            {
+                static_assert(sizeof(T) == 0, "unhandled LayerSpec type in make_layer");
+                return error(std::string("unreachable"));
+            }
+        },
+        spec);
+}
+
 auto ComputationGraph::compile(NodeId output) -> Result<Model, std::string>
 {
     if (output.value >= nodes.size())
@@ -1899,20 +1977,74 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, std::string>
         return error(sort_result.unwrap_error());
     }
 
+    const auto &topo_order = sort_result.unwrap();
+
+    std::vector<Layer> layers;
+    std::vector<std::vector<NodeId>> layer_inputs_result;
+    layers.reserve(nodes.size());
+    layer_inputs_result.reserve(nodes.size());
+
+    for (const auto idx : topo_order)
+    {
+        const auto &node = nodes[idx];
+        layer_inputs_result.push_back(node.inputs);
+
+        const Extents pred_extents = node.inputs.empty() ? Extents{} : nodes[node.inputs[0].value].output_extents;
+
+        auto layer_result = make_layer(node.spec, batch_size, pred_extents);
+        if (layer_result.is_error())
+        {
+            return error(layer_result.unwrap_error());
+        }
+        layers.push_back(std::move(layer_result.unwrap()));
+    }
+
     std::vector<NodeId> execution_order{};
     execution_order.reserve(nodes.size());
-    for (const auto idx : sort_result.unwrap())
+    for (const auto idx : topo_order)
     {
         execution_order.push_back(NodeId{idx});
     }
 
     return ok(Model{
         .batch_size = batch_size,
-        .nodes = std::move(nodes),
+        .layers = std::move(layers),
+        .layer_inputs = std::move(layer_inputs_result),
         .execution_order = std::move(execution_order),
         .input_node = input_node,
         .output_node = output,
     });
+}
+
+auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, DeviceError>
+{
+    std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> jobs{};
+    jobs.reserve(layers.size());
+
+    for (const auto node_id : execution_order)
+    {
+        const auto &preds = layer_inputs[node_id.value];
+        panic_if(preds.size() > 1, "forward: multi-input nodes not yet supported");
+
+        const auto pred_output = preds.empty() ? input : [&]() -> DeviceTensorConstViewf {
+            auto result = jobs.at(preds[0].value).wait();
+            panic_if(result.is_error(), "forward: predecessor stream sync failed");
+            return result.unwrap();
+        }();
+
+        auto job = std::visit(
+            [&pred_output](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.forward(pred_output); },
+            layers[node_id.value]);
+
+        jobs.emplace(node_id.value, std::move(job));
+    }
+
+    auto result = jobs.at(output_node.value).wait();
+    if (result.is_error())
+    {
+        return error(result.unwrap_error());
+    }
+    return ok(result.unwrap());
 }
 
 // =============================================================================

@@ -81,7 +81,7 @@ int main()
         // Forward
         const auto conv_out = conv.forward(inputs.const_view()).wait().unwrap();
         const auto pool_out = pool.forward(conv_out).wait().unwrap();
-        const auto flat_out = flatten.forward(pool_out);
+        const auto flat_out = flatten.forward(pool_out).wait().unwrap();
         const auto d1_out = dense1.forward(flat_out).wait().unwrap();
         const auto act1 = sigmoid1.forward(d1_out).wait().unwrap();
         const auto d2_out = dense2.forward(act1).wait().unwrap();
@@ -117,7 +117,7 @@ int main()
     // Final predictions
     const auto conv_out = conv.forward(inputs.const_view()).wait().unwrap();
     const auto pool_out = pool.forward(conv_out).wait().unwrap();
-    const auto flat_out = flatten.forward(pool_out);
+    const auto flat_out = flatten.forward(pool_out).wait().unwrap();
     const auto d1_out = dense1.forward(flat_out).wait().unwrap();
     const auto act1 = sigmoid1.forward(d1_out).wait().unwrap();
     const auto d2_out = dense2.forward(act1).wait().unwrap();
