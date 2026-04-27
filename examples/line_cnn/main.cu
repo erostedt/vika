@@ -98,7 +98,7 @@ int main()
         const auto d_d1_out = sigmoid1.backward(d_act1).wait().unwrap();
         const auto d_flat = dense1.backward(d_d1_out).wait().unwrap();
         const auto [dw1, db1] = dense1.weight_gradients(flat_out, d_d1_out).wait().unwrap();
-        const auto d_pool = flatten.backward(d_flat);
+        const auto d_pool = flatten.backward(d_flat).wait().unwrap();
         const auto d_conv = pool.backward(d_pool).wait().unwrap();
         const auto [df, dbias] = conv.weight_gradients(inputs.const_view(), d_conv).wait().unwrap();
 

@@ -163,3 +163,43 @@ UTEST(model, forward_output_shape)
     EXPECT_EQ(out.extents[0], batch_size);
     EXPECT_EQ(out.extents[1], 1u);
 }
+
+UTEST(model, xor_trains_to_convergence)
+{
+    using namespace vika;
+
+    constexpr usize batch_size = 4;
+
+    const auto cpu_inputs = HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2});
+    const auto cpu_targets = HostTensor2f::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1});
+    const auto gpu_inputs = upload(cpu_inputs).unwrap();
+    const auto gpu_targets = upload(cpu_targets).unwrap();
+
+    ComputationGraph graph{batch_size};
+    auto x = graph.input({2});
+    x = graph.dense(x, 8, 42).unwrap();
+    x = graph.sigmoid(x).unwrap();
+    x = graph.dense(x, 1, 43).unwrap();
+    x = graph.sigmoid(x).unwrap();
+
+    auto model = graph.compile(x).unwrap();
+    auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
+
+    const AdamParameters adam{.learning_rate = 0.01f, .beta1 = 0.9f, .beta2 = 0.999f, .epsilon = 1e-8f};
+
+    for (usize t = 1; t <= 10000; ++t)
+    {
+        const auto out = model.forward(gpu_inputs.const_view()).unwrap();
+        const auto loss_grad = loss_fn.backward(out, gpu_targets.const_view()).wait().unwrap();
+        model.backward(loss_grad).unwrap();
+        model.step(adam, t).unwrap();
+    }
+
+    const auto out = model.forward(gpu_inputs.const_view()).unwrap();
+    const auto preds = download(out).unwrap();
+
+    EXPECT_TRUE(preds(0, 0) < 0.1f);
+    EXPECT_TRUE(preds(1, 0) > 0.9f);
+    EXPECT_TRUE(preds(2, 0) > 0.9f);
+    EXPECT_TRUE(preds(3, 0) < 0.1f);
+}

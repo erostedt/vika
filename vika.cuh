@@ -1082,7 +1082,7 @@ struct Flatten2DLayer
 
     auto forward(DeviceTensorConstViewf inputs) const -> KernelJob<DeviceTensorConstView2f>;
 
-    auto backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf;
+    auto backward(DeviceTensorConstView2f upstream_gradient) const -> KernelJob<DeviceTensorConstViewf>;
 
     Extents extents;
 };
@@ -1210,9 +1210,22 @@ struct Node
 struct InputLayer
 {
     auto forward(DeviceTensorConstViewf input) const -> KernelJob<DeviceTensorConstViewf>;
+    auto backward(DeviceTensorConstViewf upstream) const -> KernelJob<DeviceTensorConstViewf>;
 };
 
-using Layer = std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer>;
+using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer>;
+
+struct Layer
+{
+    LayerKind kind;
+    bool is_frozen = false;
+
+    static auto trainable(LayerKind kind) -> Layer { return {std::move(kind), false}; }
+    static auto frozen(LayerKind kind) -> Layer { return {std::move(kind), true}; }
+
+    auto freeze() -> void { is_frozen = true; }
+    auto unfreeze() -> void { is_frozen = false; }
+};
 
 struct Model
 {
@@ -1223,7 +1236,12 @@ struct Model
     NodeId input_node;
     NodeId output_node;
 
+    std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> forward_jobs;
+    std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> backward_jobs;
+
     auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, DeviceError>;
+    auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, DeviceError>;
+    auto step(const AdamParameters &params, usize t) -> Result<Void, DeviceError>;
 };
 
 struct ComputationGraph
@@ -1242,6 +1260,10 @@ struct ComputationGraph
 };
 
 auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, std::string>;
+
+auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
+                  const AdamParameters &params, usize t) -> Result<Void, DeviceError>;
+
 
 }; // namespace vika
 
@@ -1511,11 +1533,16 @@ auto InputLayer::forward(DeviceTensorConstViewf input) const -> KernelJob<Device
     return KernelJob<DeviceTensorConstViewf>{input, 0};
 }
 
-auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -> DeviceTensorConstViewf
+auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> KernelJob<DeviceTensorConstViewf>
+{
+    return KernelJob<DeviceTensorConstViewf>{upstream, 0};
+}
+
+auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -> KernelJob<DeviceTensorConstViewf>
 {
     panic_if(element_count(to_extents(upstream_gradient.extents, upstream_gradient.rank)) != element_count(extents),
              "INVALID EXTENTS");
-    return DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size());
+    return KernelJob<DeviceTensorConstViewf>{DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size()), 0};
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
@@ -1882,7 +1909,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
             using T = std::decay_t<decltype(s)>;
             if constexpr (std::is_same_v<T, InputSpec>)
             {
-                return ok(Layer{InputLayer{}});
+                return ok(Layer::trainable(LayerKind{InputLayer{}}));
             }
             else if constexpr (std::is_same_v<T, DenseSpec>)
             {
@@ -1891,7 +1918,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 {
                     return error(result.unwrap_error().string());
                 }
-                return ok(Layer{std::move(result.unwrap())});
+                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
             else if constexpr (std::is_same_v<T, SigmoidSpec>)
             {
@@ -1900,11 +1927,11 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 {
                     return error(result.unwrap_error().string());
                 }
-                return ok(Layer{std::move(result.unwrap())});
+                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
             else if constexpr (std::is_same_v<T, FlattenSpec>)
             {
-                return ok(Layer{Flatten2DLayer::with_extents(pred_extents)});
+                return ok(Layer::trainable(LayerKind{Flatten2DLayer::with_extents(pred_extents)}));
             }
             else if constexpr (std::is_same_v<T, Conv2DSpec>)
             {
@@ -1915,7 +1942,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 {
                     return error(result.unwrap_error().string());
                 }
-                return ok(Layer{std::move(result.unwrap())});
+                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
             else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
             {
@@ -1925,7 +1952,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 {
                     return error(result.unwrap_error().string());
                 }
-                return ok(Layer{std::move(result.unwrap())});
+                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
             else
             {
@@ -2018,8 +2045,8 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, std::string>
 
 auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, DeviceError>
 {
-    std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> jobs{};
-    jobs.reserve(layers.size());
+    forward_jobs.clear();
+    forward_jobs.reserve(layers.size());
 
     for (const auto node_id : execution_order)
     {
@@ -2027,24 +2054,104 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         panic_if(preds.size() > 1, "forward: multi-input nodes not yet supported");
 
         const auto pred_output = preds.empty() ? input : [&]() -> DeviceTensorConstViewf {
-            auto result = jobs.at(preds[0].value).wait();
+            auto result = forward_jobs.at(preds[0].value).wait();
             panic_if(result.is_error(), "forward: predecessor stream sync failed");
             return result.unwrap();
         }();
 
         auto job = std::visit(
             [&pred_output](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.forward(pred_output); },
-            layers[node_id.value]);
+            layers[node_id.value].kind);
 
-        jobs.emplace(node_id.value, std::move(job));
+        forward_jobs.emplace(node_id.value, std::move(job));
     }
 
-    auto result = jobs.at(output_node.value).wait();
+    auto result = forward_jobs.at(output_node.value).wait();
     if (result.is_error())
     {
         return error(result.unwrap_error());
     }
     return ok(result.unwrap());
+}
+
+auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, DeviceError>
+{
+    backward_jobs.clear();
+    backward_jobs.reserve(layers.size());
+    backward_jobs.emplace(output_node.value, KernelJob<DeviceTensorConstViewf>{loss_grad, 0});
+
+    for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it)
+    {
+        const auto node_id = *it;
+        const auto &preds = layer_inputs[node_id.value];
+        if (preds.empty())
+        {
+            continue;
+        }
+
+        auto upstream_result = backward_jobs.at(node_id.value).wait();
+        if (upstream_result.is_error())
+        {
+            return error(upstream_result.unwrap_error());
+        }
+        const auto upstream = upstream_result.unwrap();
+
+        auto d_input_job = std::visit(
+            [&upstream](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.backward(upstream); },
+            layers[node_id.value].kind);
+
+        panic_if(preds.size() > 1, "backward: multi-input nodes not yet supported");
+        backward_jobs.emplace(preds[0].value, std::move(d_input_job));
+    }
+
+    return ok(Void{});
+}
+
+auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
+                  const AdamParameters &params, usize t) -> Result<Void, DeviceError>
+{
+    return std::visit(
+        [&](auto &l) -> Result<Void, DeviceError> {
+            using T = std::decay_t<decltype(l)>;
+            if constexpr (std::is_same_v<T, DenseLayer>)
+            {
+                auto wg_result = l.weight_gradients(forward_input, upstream).wait();
+                if (wg_result.is_error()) { return error(wg_result.unwrap_error()); }
+                auto [d_w, d_b] = wg_result.unwrap();
+                auto up_result = l.update(d_w, d_b, params, t).wait();
+                if (up_result.is_error()) { return error(up_result.unwrap_error()); }
+            }
+            else if constexpr (std::is_same_v<T, Conv2DLayer>)
+            {
+                auto wg_result = l.weight_gradients(forward_input, upstream).wait();
+                if (wg_result.is_error()) { return error(wg_result.unwrap_error()); }
+                auto [d_f, d_b] = wg_result.unwrap();
+                auto up_result = l.update(d_f, d_b, params, t).wait();
+                if (up_result.is_error()) { return error(up_result.unwrap_error()); }
+            }
+            return ok(Void{});
+        },
+        kind);
+}
+
+auto Model::step(const AdamParameters &params, usize t) -> Result<Void, DeviceError>
+{
+    for (const auto node_id : execution_order)
+    {
+        auto &layer = layers[node_id.value];
+        if (layer.is_frozen) { continue; }
+
+        const auto &preds = layer_inputs[node_id.value];
+        if (preds.empty()) { continue; }
+
+        const auto forward_input = forward_jobs.at(preds[0].value).value;
+        const auto upstream = backward_jobs.at(node_id.value).value;
+
+        auto result = update_layer(layer.kind, forward_input, upstream, params, t);
+        if (result.is_error()) { return error(result.unwrap_error()); }
+    }
+
+    return ok(Void{});
 }
 
 // =============================================================================
