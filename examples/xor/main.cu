@@ -26,7 +26,7 @@ int main()
     auto model = graph.compile(x).unwrap();
     auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
 
-    const AdamParameters adam{.learning_rate = 0.01f, .beta1 = 0.9f, .beta2 = 0.999f, .epsilon = 1e-8f};
+    auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
 
     for (usize t = 1; t <= epochs; ++t)
     {
@@ -34,7 +34,7 @@ int main()
         const auto loss_view = loss_fn.forward(out, targets.const_view()).wait().unwrap();
         const auto loss_grad = loss_fn.backward(out, targets.const_view()).wait().unwrap();
         model.backward(loss_grad).unwrap();
-        model.step(adam, t).unwrap();
+        model.step(optimizer, t).unwrap();
 
         if (t % 1000 == 0)
         {

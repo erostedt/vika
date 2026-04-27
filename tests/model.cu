@@ -185,14 +185,15 @@ UTEST(model, xor_trains_to_convergence)
     auto model = graph.compile(x).unwrap();
     auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
 
-    const AdamParameters adam{.learning_rate = 0.01f, .beta1 = 0.9f, .beta2 = 0.999f, .epsilon = 1e-8f};
+    const AdamParameters adam_params{.learning_rate = 0.01f, .beta1 = 0.9f, .beta2 = 0.999f, .epsilon = 1e-8f};
+    auto optimizer = AdamOptimizer::from_model(model, adam_params).unwrap();
 
     for (usize t = 1; t <= 10000; ++t)
     {
         const auto out = model.forward(gpu_inputs.const_view()).unwrap();
         const auto loss_grad = loss_fn.backward(out, gpu_targets.const_view()).wait().unwrap();
         model.backward(loss_grad).unwrap();
-        model.step(adam, t).unwrap();
+        model.step(optimizer, t).unwrap();
     }
 
     const auto out = model.forward(gpu_inputs.const_view()).unwrap();

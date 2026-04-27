@@ -14,6 +14,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -967,6 +968,17 @@ struct AdamParameters
     f32 epsilon = 1e-8f;
 };
 
+struct AdamState
+{
+    DeviceOwningTensorf m_weights;
+    DeviceOwningTensorf v_weights;
+    DeviceOwningTensorf m_biases;
+    DeviceOwningTensorf v_biases;
+
+    static auto create(const DeviceOwningTensorf &weights, const DeviceOwningTensorf &biases)
+        -> Result<AdamState, DeviceError>;
+};
+
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
 
 // filters: [kH, kW, C_in, C_out], inputs: [N, H, W, C_in], out: [N, out_H, out_W, C_out]
@@ -1042,8 +1054,8 @@ struct DenseLayer
     auto weight_gradients(const DeviceTensorConstView2f &inputs, const DeviceTensorConstView2f &upstream_gradient)
         -> KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>;
 
-    auto update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases, const AdamParameters &parameters,
-                usize t) -> KernelJob<Void>;
+    auto update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases, AdamState &state,
+                const AdamParameters &params, usize t) -> KernelJob<Void>;
 
     DeviceOwningTensor2f outputs;
     DeviceOwningTensor2f weights;
@@ -1052,11 +1064,6 @@ struct DenseLayer
     DeviceOwningTensor2f d_inputs;
     DeviceOwningTensor2f d_weights;
     DeviceOwningTensor1f d_biases;
-
-    DeviceOwningTensor2f m_weights;
-    DeviceOwningTensor2f v_weights;
-    DeviceOwningTensor1f m_biases;
-    DeviceOwningTensor1f v_biases;
 
     cudaStream_t stream;
 };
@@ -1105,7 +1112,7 @@ struct Conv2DLayer
         -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>;
 
     auto update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_,
-                const AdamParameters &parameters, usize t) -> KernelJob<Void>;
+                AdamState &state, const AdamParameters &params, usize t) -> KernelJob<Void>;
 
     DeviceOwningTensor4f outputs;
     DeviceOwningTensor4f d_inputs;
@@ -1113,10 +1120,6 @@ struct Conv2DLayer
     DeviceOwningTensor1f biases;
     DeviceOwningTensor4f d_filters;
     DeviceOwningTensor1f d_biases;
-    DeviceOwningTensor4f m_filters;
-    DeviceOwningTensor4f v_filters;
-    DeviceOwningTensor1f m_biases;
-    DeviceOwningTensor1f v_biases;
 
     usize stride;
     usize padding;
@@ -1227,6 +1230,8 @@ struct Layer
     auto unfreeze() -> void { is_frozen = false; }
 };
 
+struct AdamOptimizer;
+
 struct Model
 {
     usize batch_size;
@@ -1241,7 +1246,15 @@ struct Model
 
     auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, DeviceError>;
     auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, DeviceError>;
-    auto step(const AdamParameters &params, usize t) -> Result<Void, DeviceError>;
+    auto step(AdamOptimizer &optimizer, usize t) -> Result<Void, DeviceError>;
+};
+
+struct AdamOptimizer
+{
+    AdamParameters params;
+    std::unordered_map<usize, AdamState> states;
+
+    static auto from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, DeviceError>;
 };
 
 struct ComputationGraph
@@ -1262,7 +1275,7 @@ struct ComputationGraph
 auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, std::string>;
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
-                  const AdamParameters &params, usize t) -> Result<Void, DeviceError>;
+                  AdamState &state, const AdamParameters &params, usize t) -> Result<Void, DeviceError>;
 
 
 }; // namespace vika
@@ -1394,12 +1407,6 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, De
     auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
     auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
 
-    auto m_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
-    auto v_weights = unwrap_or_return(DeviceOwningTensor2f::zero_like(weights));
-
-    auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
-    auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
-
     cudaStream_t stream;
     return_on_cuda_error(cudaStreamCreate(&stream));
     return ok<DenseLayer>({
@@ -1409,10 +1416,6 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, De
         .d_inputs = std::move(d_inputs),
         .d_weights = std::move(d_weights),
         .d_biases = std::move(d_biases),
-        .m_weights = std::move(m_weights),
-        .v_weights = std::move(v_weights),
-        .m_biases = std::move(m_biases),
-        .v_biases = std::move(v_biases),
         .stream = stream,
     });
 }
@@ -1467,18 +1470,16 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
         std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
 }
 
-auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases,
-                        const AdamParameters &parameters, usize t) -> KernelJob<Void>
+auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases, AdamState &state,
+                        const AdamParameters &params, usize t) -> KernelJob<Void>
 {
+    const usize threads = 256;
     const auto weight_count = d_weights.element_count();
     const auto bias_count = d_biases.element_count();
-    usize threads = 256;
-    usize weight_blocks = (weight_count + threads - 1) / threads;
-    usize bias_blocks = (bias_count + threads - 1) / threads;
-    adam_update<<<weight_blocks, threads, 0, stream>>>(parameters, (f32)t, d_weights, weights.view(), m_weights.view(),
-                                                       v_weights.view());
-    adam_update<<<bias_blocks, threads, 0, stream>>>(parameters, (f32)t, d_biases, biases.view(), m_biases.view(),
-                                                     v_biases.view());
+    adam_update<<<(weight_count + threads - 1) / threads, threads, 0, stream>>>(
+        params, (f32)t, d_weights, weights.view(), state.m_weights.view(), state.v_weights.view());
+    adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
+        params, (f32)t, d_biases, biases.view(), state.m_biases.view(), state.v_biases.view());
     return KernelJob<Void>{Void{}, stream};
 }
 
@@ -1561,10 +1562,6 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
     auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
     auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
-    auto m_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
-    auto v_filters = unwrap_or_return(DeviceOwningTensor4f::zero_like(filters));
-    auto m_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
-    auto v_biases = unwrap_or_return(DeviceOwningTensor1f::zero_like(biases));
 
     cudaStream_t stream;
     return_on_cuda_error(cudaStreamCreate(&stream));
@@ -1575,10 +1572,6 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
         .biases = std::move(biases),
         .d_filters = std::move(d_filters),
         .d_biases = std::move(d_biases),
-        .m_filters = std::move(m_filters),
-        .v_filters = std::move(v_filters),
-        .m_biases = std::move(m_biases),
-        .v_biases = std::move(v_biases),
         .stride = stride,
         .padding = padding,
         .stream = stream,
@@ -1641,16 +1634,16 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstView4f &inputs, const 
 }
 
 auto Conv2DLayer::update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_,
-                         const AdamParameters &parameters, usize t) -> KernelJob<Void>
+                         AdamState &state, const AdamParameters &params, usize t) -> KernelJob<Void>
 {
+    const usize threads = 256;
     const usize filter_count = filters.element_count();
     const usize bias_count = biases.element_count();
-    const usize threads = 256;
 
     adam_update<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
-        parameters, (f32)t, d_filters_, filters.view(), m_filters.view(), v_filters.view());
+        params, (f32)t, d_filters_, filters.view(), state.m_weights.view(), state.v_weights.view());
     adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
-        parameters, (f32)t, d_biases_, biases.view(), m_biases.view(), v_biases.view());
+        params, (f32)t, d_biases_, biases.view(), state.m_biases.view(), state.v_biases.view());
 
     return KernelJob<Void>{Void{}, stream};
 }
@@ -2108,7 +2101,7 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, DeviceErr
 }
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
-                  const AdamParameters &params, usize t) -> Result<Void, DeviceError>
+                  AdamState &state, const AdamParameters &params, usize t) -> Result<Void, DeviceError>
 {
     return std::visit(
         [&](auto &l) -> Result<Void, DeviceError> {
@@ -2118,7 +2111,7 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
                 auto wg_result = l.weight_gradients(forward_input, upstream).wait();
                 if (wg_result.is_error()) { return error(wg_result.unwrap_error()); }
                 auto [d_w, d_b] = wg_result.unwrap();
-                auto up_result = l.update(d_w, d_b, params, t).wait();
+                auto up_result = l.update(d_w, d_b, state, params, t).wait();
                 if (up_result.is_error()) { return error(up_result.unwrap_error()); }
             }
             else if constexpr (std::is_same_v<T, Conv2DLayer>)
@@ -2126,7 +2119,7 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
                 auto wg_result = l.weight_gradients(forward_input, upstream).wait();
                 if (wg_result.is_error()) { return error(wg_result.unwrap_error()); }
                 auto [d_f, d_b] = wg_result.unwrap();
-                auto up_result = l.update(d_f, d_b, params, t).wait();
+                auto up_result = l.update(d_f, d_b, state, params, t).wait();
                 if (up_result.is_error()) { return error(up_result.unwrap_error()); }
             }
             return ok(Void{});
@@ -2134,7 +2127,50 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
         kind);
 }
 
-auto Model::step(const AdamParameters &params, usize t) -> Result<Void, DeviceError>
+auto AdamState::create(const DeviceOwningTensorf &weights, const DeviceOwningTensorf &biases)
+    -> Result<AdamState, DeviceError>
+{
+    auto m_w = unwrap_or_return(DeviceOwningTensorf::zero_like(weights));
+    auto v_w = unwrap_or_return(DeviceOwningTensorf::zero_like(weights));
+    auto m_b = unwrap_or_return(DeviceOwningTensorf::zero_like(biases));
+    auto v_b = unwrap_or_return(DeviceOwningTensorf::zero_like(biases));
+    return ok(AdamState{std::move(m_w), std::move(v_w), std::move(m_b), std::move(v_b)});
+}
+
+auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, DeviceError>
+{
+    AdamOptimizer optimizer{params, {}};
+
+    for (const auto node_id : model.execution_order)
+    {
+        const auto &layer = model.layers[node_id.value];
+        auto maybe_state = std::visit(
+            [](const auto &l) -> std::optional<Result<AdamState, DeviceError>> {
+                using T = std::decay_t<decltype(l)>;
+                if constexpr (std::is_same_v<T, DenseLayer>)
+                {
+                    return AdamState::create(l.weights, l.biases);
+                }
+                else if constexpr (std::is_same_v<T, Conv2DLayer>)
+                {
+                    return AdamState::create(l.filters, l.biases);
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+            },
+            layer.kind);
+
+        if (!maybe_state.has_value()) { continue; }
+        if (maybe_state->is_error()) { return error(maybe_state->unwrap_error()); }
+        optimizer.states.emplace(node_id.value, std::move(maybe_state->unwrap()));
+    }
+
+    return ok(std::move(optimizer));
+}
+
+auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, DeviceError>
 {
     for (const auto node_id : execution_order)
     {
@@ -2144,10 +2180,13 @@ auto Model::step(const AdamParameters &params, usize t) -> Result<Void, DeviceEr
         const auto &preds = layer_inputs[node_id.value];
         if (preds.empty()) { continue; }
 
+        auto it = optimizer.states.find(node_id.value);
+        if (it == optimizer.states.end()) { continue; }
+
         const auto forward_input = forward_jobs.at(preds[0].value).value;
         const auto upstream = backward_jobs.at(node_id.value).value;
 
-        auto result = update_layer(layer.kind, forward_input, upstream, params, t);
+        auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
         if (result.is_error()) { return error(result.unwrap_error()); }
     }
 

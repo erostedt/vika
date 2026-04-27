@@ -119,16 +119,18 @@ UTEST(dense, layer_adam_update)
         {7.4925033e-06f, 1.0789205e-05f, 1.4685305e-05f},
     };
 
+    auto state = AdamState::create(layer.weights, layer.biases).unwrap();
+
     for (usize step = 1; step <= 3; ++step)
     {
-        layer.update(d_weights.const_view(), d_biases.const_view(), parameters, step).wait().unwrap();
+        layer.update(d_weights.const_view(), d_biases.const_view(), state, parameters, step).wait().unwrap();
 
         const auto host_weights = download(layer.weights).unwrap();
         const auto host_biases = download(layer.biases).unwrap();
-        const auto host_m_weights = download(layer.m_weights).unwrap();
-        const auto host_v_weights = download(layer.v_weights).unwrap();
-        const auto host_m_biases = download(layer.m_biases).unwrap();
-        const auto host_v_biases = download(layer.v_biases).unwrap();
+        const auto host_m_weights = download(state.m_weights).unwrap();
+        const auto host_v_weights = download(state.v_weights).unwrap();
+        const auto host_m_biases = download(state.m_biases).unwrap();
+        const auto host_v_biases = download(state.v_biases).unwrap();
 
         const auto index = step - 1;
         ASSERT_TRUE(are_close(host_weights, expected_weights[index], 1e-5f));
