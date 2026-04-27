@@ -1207,6 +1207,15 @@ struct Node
     std::vector<NodeId> inputs;
 };
 
+struct Model
+{
+    usize batch_size;
+    std::vector<Node> nodes;
+    std::vector<NodeId> execution_order;
+    NodeId input_node;
+    NodeId output_node;
+};
+
 struct ComputationGraph
 {
     usize batch_size;
@@ -1219,6 +1228,7 @@ struct ComputationGraph
     auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride, usize padding,
                 u32 seed) -> Result<NodeId, std::string>;
     auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, std::string>;
+    auto compile(NodeId output) -> Result<Model, std::string>;
 };
 
 }; // namespace vika
@@ -1846,6 +1856,63 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
         .inputs = {input},
     });
     return ok(id);
+}
+
+auto ComputationGraph::compile(NodeId output) -> Result<Model, std::string>
+{
+    if (output.value >= nodes.size())
+    {
+        return error(std::string("compile: invalid output NodeId"));
+    }
+
+    NodeId input_node{0};
+    usize input_count = 0;
+    for (usize i = 0; i < nodes.size(); ++i)
+    {
+        if (std::holds_alternative<InputSpec>(nodes[i].spec))
+        {
+            input_node = NodeId{i};
+            ++input_count;
+        }
+    }
+    if (input_count != 1)
+    {
+        return error(std::string("compile: graph must have exactly one input node"));
+    }
+
+    AdjecencyGraph<usize> adj{};
+    for (usize i = 0; i < nodes.size(); ++i)
+    {
+        if (adj.find(i) == adj.end())
+        {
+            adj[i] = {};
+        }
+        for (const auto &pred : nodes[i].inputs)
+        {
+            adj[pred.value].push_back(i);
+        }
+    }
+
+    auto sort_result = topological_sort(adj);
+    if (sort_result.is_error())
+    {
+        return error(sort_result.unwrap_error());
+    }
+
+    std::vector<NodeId> execution_order{};
+    execution_order.reserve(nodes.size());
+    for (const auto idx : sort_result.unwrap())
+    {
+        execution_order.push_back(NodeId{idx});
+    }
+
+    return ok(Model{
+        .batch_size = batch_size,
+        .nodes = std::move(nodes),
+        .execution_order = std::move(execution_order),
+        .input_node = input_node,
+        .output_node = output,
+    });
 }
 
 // =============================================================================
