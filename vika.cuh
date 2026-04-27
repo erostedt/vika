@@ -14,6 +14,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -1159,6 +1160,61 @@ struct MSELoss
     cudaStream_t stream;
 };
 
+// =============================================================================
+// Computation Graph
+// =============================================================================
+
+struct NodeId
+{
+    usize value;
+};
+
+struct InputSpec
+{
+};
+
+struct SigmoidSpec
+{
+};
+
+struct FlattenSpec
+{
+};
+
+struct DenseSpec
+{
+    usize output_features;
+    u32 seed;
+};
+
+struct Conv2DSpec
+{
+    usize kH, kW, C_out, stride, padding;
+    u32 seed;
+};
+
+struct MaxPool2DSpec
+{
+    usize pool_h, pool_w, stride;
+};
+
+using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, MaxPool2DSpec, FlattenSpec>;
+
+struct Node
+{
+    LayerSpec spec;
+    Extents output_extents;
+    std::vector<NodeId> inputs;
+};
+
+struct ComputationGraph
+{
+    usize batch_size;
+    std::vector<Node> nodes;
+
+    auto input(Extents spatial_extents) -> NodeId;
+};
+
 }; // namespace vika
 
 #ifdef VIKA_IMPLEMENTATION
@@ -1620,6 +1676,27 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
     const usize threads = 256;
     mse_gradient_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
     return KernelJob<DeviceTensorConstViewf>{d_inputs.const_view(), stream};
+}
+
+// =============================================================================
+// Computation Graph
+// =============================================================================
+
+auto ComputationGraph::input(Extents spatial_extents) -> NodeId
+{
+    Extents output_extents{};
+    output_extents.push_back(batch_size);
+    for (const auto dim : spatial_extents)
+    {
+        output_extents.push_back(dim);
+    }
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = InputSpec{},
+        .output_extents = output_extents,
+        .inputs = {},
+    });
+    return id;
 }
 
 // =============================================================================
