@@ -1128,8 +1128,8 @@ struct Conv2DLayer
     auto weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
         -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>;
 
-    auto update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_,
-                AdamState &state, const AdamParameters &params, usize t) -> KernelJob<Void>;
+    auto update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_, AdamState &state,
+                const AdamParameters &params, usize t) -> KernelJob<Void>;
 
     DeviceOwningTensor4f outputs;
     DeviceOwningTensor4f d_inputs;
@@ -1240,11 +1240,23 @@ struct Layer
     LayerKind kind;
     bool is_frozen = false;
 
-    static auto trainable(LayerKind kind) -> Layer { return {std::move(kind), false}; }
-    static auto frozen(LayerKind kind) -> Layer { return {std::move(kind), true}; }
+    static auto trainable(LayerKind kind) -> Layer
+    {
+        return {std::move(kind), false};
+    }
+    static auto frozen(LayerKind kind) -> Layer
+    {
+        return {std::move(kind), true};
+    }
 
-    auto freeze() -> void { is_frozen = true; }
-    auto unfreeze() -> void { is_frozen = false; }
+    auto freeze() -> void
+    {
+        is_frozen = true;
+    }
+    auto unfreeze() -> void
+    {
+        is_frozen = false;
+    }
 };
 
 struct AdamOptimizer;
@@ -1293,7 +1305,6 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
                   AdamState &state, const AdamParameters &params, usize t) -> Result<Void, DeviceError>;
-
 
 }; // namespace vika
 
@@ -1560,7 +1571,8 @@ auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -
 {
     panic_if(element_count(to_extents(upstream_gradient.extents, upstream_gradient.rank)) != element_count(extents),
              "INVALID EXTENTS");
-    return KernelJob<DeviceTensorConstViewf>{DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size()), 0};
+    return KernelJob<DeviceTensorConstViewf>{DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size()),
+                                             0};
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
@@ -2126,18 +2138,30 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
             if constexpr (std::is_same_v<T, DenseLayer>)
             {
                 auto wg_result = l.weight_gradients(forward_input, upstream).wait();
-                if (wg_result.is_error()) { return error(wg_result.unwrap_error()); }
+                if (wg_result.is_error())
+                {
+                    return error(wg_result.unwrap_error());
+                }
                 auto [d_w, d_b] = wg_result.unwrap();
                 auto up_result = l.update(d_w, d_b, state, params, t).wait();
-                if (up_result.is_error()) { return error(up_result.unwrap_error()); }
+                if (up_result.is_error())
+                {
+                    return error(up_result.unwrap_error());
+                }
             }
             else if constexpr (std::is_same_v<T, Conv2DLayer>)
             {
                 auto wg_result = l.weight_gradients(forward_input, upstream).wait();
-                if (wg_result.is_error()) { return error(wg_result.unwrap_error()); }
+                if (wg_result.is_error())
+                {
+                    return error(wg_result.unwrap_error());
+                }
                 auto [d_f, d_b] = wg_result.unwrap();
                 auto up_result = l.update(d_f, d_b, state, params, t).wait();
-                if (up_result.is_error()) { return error(up_result.unwrap_error()); }
+                if (up_result.is_error())
+                {
+                    return error(up_result.unwrap_error());
+                }
             }
             return ok(Void{});
         },
@@ -2179,8 +2203,14 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
             },
             layer.kind);
 
-        if (!maybe_state.has_value()) { continue; }
-        if (maybe_state->is_error()) { return error(maybe_state->unwrap_error()); }
+        if (!maybe_state.has_value())
+        {
+            continue;
+        }
+        if (maybe_state->is_error())
+        {
+            return error(maybe_state->unwrap_error());
+        }
         optimizer.states.emplace(node_id.value, std::move(maybe_state->unwrap()));
     }
 
@@ -2192,19 +2222,31 @@ auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, DeviceError>
     for (const auto node_id : execution_order)
     {
         auto &layer = layers[node_id.value];
-        if (layer.is_frozen) { continue; }
+        if (layer.is_frozen)
+        {
+            continue;
+        }
 
         const auto &preds = layer_inputs[node_id.value];
-        if (preds.empty()) { continue; }
+        if (preds.empty())
+        {
+            continue;
+        }
 
         auto it = optimizer.states.find(node_id.value);
-        if (it == optimizer.states.end()) { continue; }
+        if (it == optimizer.states.end())
+        {
+            continue;
+        }
 
         const auto forward_input = forward_jobs.at(preds[0].value).value;
         const auto upstream = backward_jobs.at(node_id.value).value;
 
         auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
-        if (result.is_error()) { return error(result.unwrap_error()); }
+        if (result.is_error())
+        {
+            return error(result.unwrap_error());
+        }
     }
 
     return ok(Void{});
