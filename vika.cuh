@@ -10,7 +10,6 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
-#include <optional>
 #include <queue>
 #include <string>
 #include <tuple>
@@ -1309,6 +1308,8 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
 }; // namespace vika
 
 #ifdef VIKA_IMPLEMENTATION
+
+#include <optional>
 
 namespace vika
 {
@@ -2665,7 +2666,25 @@ __global__ auto maxpool_backward(DeviceTensorConstView4f upstream, DeviceTensorC
 // - Upsampling Backward
 // - Upsampling Layer
 //
+// - Concatenate Forward
+// - Concatenate Backward
+// - Concatenate Layer
+//
+// - Add Forward
+// - Add Backward
+// - Add Layer
+//
+// - ConvTranspose Forward
+// - ConvTranspose Backward
+// - ConvTranspose Layer
+//
+// - Tiled matmul
+//
 // - Pick device?
 // - Sequential model
-// - Non-sequential builder api
+// - Multi-input
+// - Multi-output
 // - unet
+// - Save weights
+// - Load weights
+// - Bake in loss into model
