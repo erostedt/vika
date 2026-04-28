@@ -10,11 +10,11 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <string>
 #include <tuple>
 #include <type_traits>
-#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -959,6 +959,23 @@ struct KernelJob
     T value;
     cudaStream_t stream;
 };
+
+template <typename T>
+auto wait_on(std::vector<KernelJob<T>> &jobs) -> Result<std::vector<T>, DeviceError>
+{
+    std::vector<T> results;
+    results.reserve(jobs.size());
+    for (auto &job : jobs)
+    {
+        auto result = job.wait();
+        if (result.is_error())
+        {
+            return error(result.unwrap_error());
+        }
+        results.push_back(std::move(result.unwrap()));
+    }
+    return ok(std::move(results));
+}
 
 struct AdamParameters
 {
