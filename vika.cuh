@@ -837,7 +837,7 @@ struct DeviceTensorView
 {
     DeviceTensorView(T *data_, const Extents &extents_, usize rank_) : data(data_)
     {
-        panic_if(rank_ >= VIKA_MAX_RANK, "Rank %zu larger or equal to VIKA_MAX_RANK %d", rank_, VIKA_MAX_RANK);
+        panic_if(rank_ > VIKA_MAX_RANK, "Rank %zu larger than VIKA_MAX_RANK %d", rank_, VIKA_MAX_RANK);
         std::copy(std::begin(extents_), std::end(extents_), extents);
         std::exclusive_scan(std::rbegin(extents_), std::rend(extents_), std::make_reverse_iterator(strides + rank_),
                             usize{1}, std::multiplies<usize>{});
@@ -1348,7 +1348,7 @@ auto DeviceError::crash() -> void
 
 auto to_extents(const usize *data, usize rank) -> Extents
 {
-    panic_if(rank >= Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
+    panic_if(rank > Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
     Extents extents{};
     for (usize i = 0; i < rank; ++i)
     {
@@ -1934,7 +1934,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
             }
             else if constexpr (std::is_same_v<T, DenseSpec>)
             {
-                auto result = DenseLayer::randomized(batch_size, pred_extents[1], s.output_features, s.seed);
+                auto result = DenseLayer::randomized(batch_size, pred_extents.at(1), s.output_features, s.seed);
                 if (result.is_error())
                 {
                     return error(result.unwrap_error().string());
@@ -1956,9 +1956,9 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
             }
             else if constexpr (std::is_same_v<T, Conv2DSpec>)
             {
-                auto result = Conv2DLayer::randomized(batch_size, pred_extents[1], pred_extents[2], s.kernel_height,
-                                                      s.kernel_width, pred_extents[3], s.channels_out, s.stride,
-                                                      s.padding, s.seed);
+                auto result = Conv2DLayer::randomized(batch_size, pred_extents.at(1), pred_extents.at(2),
+                                                      s.kernel_height, s.kernel_width, pred_extents.at(3),
+                                                      s.channels_out, s.stride, s.padding, s.seed);
                 if (result.is_error())
                 {
                     return error(result.unwrap_error().string());
@@ -1967,8 +1967,8 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
             }
             else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
             {
-                auto result = MaxPool2DLayer::with_extents(batch_size, pred_extents[1], pred_extents[2],
-                                                           pred_extents[3], s.pool_height, s.pool_width, s.stride);
+                auto result = MaxPool2DLayer::with_extents(batch_size, pred_extents.at(1), pred_extents.at(2),
+                                                           pred_extents.at(3), s.pool_height, s.pool_width, s.stride);
                 if (result.is_error())
                 {
                     return error(result.unwrap_error().string());
