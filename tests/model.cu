@@ -107,7 +107,7 @@ UTEST(model, forward_matches_manual_xor)
     constexpr u32 seed1 = 42;
     constexpr u32 seed2 = 43;
 
-    const auto cpu_inputs = HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2});
+    const auto cpu_inputs = HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
 
     // graph API forward
@@ -170,8 +170,8 @@ UTEST(model, xor_trains_to_convergence)
 
     constexpr usize batch_size = 4;
 
-    const auto cpu_inputs = HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2});
-    const auto cpu_targets = HostTensor2f::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1});
+    const auto cpu_inputs = HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_targets = HostTensor2f::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1}).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
 

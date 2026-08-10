@@ -13,7 +13,7 @@ UTEST(conv, forward_valid_stride1_multi_channel)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    auto cpu_inputs = HostTensor4f::zero({batch, height, width, channels});
+    auto cpu_inputs = HostTensor4f::zero({batch, height, width, channels}).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize h = 0; h < height; ++h)
@@ -73,7 +73,7 @@ UTEST(conv, backward_valid_stride1)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    auto cpu_inputs = HostTensor4f::zero({batch, height, width, channels});
+    auto cpu_inputs = HostTensor4f::zero({batch, height, width, channels}).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize h = 0; h < height; ++h)
@@ -100,7 +100,7 @@ UTEST(conv, backward_valid_stride1)
 
     const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
 
-    auto cpu_upstream = HostTensor4f::zero({batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]});
+    auto cpu_upstream = HostTensor4f::zero({batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize out_h = 0; out_h < gpu_out.extents[1]; ++out_h)

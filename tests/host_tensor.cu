@@ -5,7 +5,7 @@
 using namespace vika;
 UTEST(tensor, zero_1d)
 {
-    const auto t = HostTensor1f::zero(4);
+    const auto t = HostTensor1f::zero(4).unwrap();
     EXPECT_EQ(t.size(), 4u);
     EXPECT_EQ(t.extent(0), 4u);
     for (usize i = 0; i < t.size(); ++i)
@@ -16,7 +16,7 @@ UTEST(tensor, zero_1d)
 
 UTEST(tensor, zero_2d)
 {
-    const auto t = HostTensor2f::zero({2, 3});
+    const auto t = HostTensor2f::zero({2, 3}).unwrap();
     EXPECT_EQ(t.extent(0), 2u);
     EXPECT_EQ(t.extent(1), 3u);
     EXPECT_EQ(t.size(), 6u);
@@ -34,8 +34,8 @@ UTEST(tensor, size_from_extents)
 
 UTEST(tensor, zero_like)
 {
-    const auto base = HostTensor2f::zero({3, 2});
-    const auto copy = HostTensor2f::zero_like(base);
+    const auto base = HostTensor2f::zero({3, 2}).unwrap();
+    const auto copy = HostTensor2f::zero_like(base).unwrap();
     EXPECT_TRUE(copy.extents() == base.extents());
     for (usize i = 0; i < copy.size(); ++i)
     {
@@ -45,7 +45,7 @@ UTEST(tensor, zero_like)
 
 UTEST(tensor, row_major_indexing)
 {
-    auto t = HostTensor2f::zero({2, 3});
+    auto t = HostTensor2f::zero({2, 3}).unwrap();
     t(0, 0) = 1.0f;
     t(0, 1) = 2.0f;
     t(0, 2) = 3.0f;

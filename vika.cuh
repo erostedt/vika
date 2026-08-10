@@ -401,62 +401,6 @@ class [[nodiscard]] Result
     std::variant<T, E> storage;
 };
 
-template <typename Node>
-auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Node>, std::string>
-{
-    std::unordered_map<Node, i32> indegree{};
-
-    for (const auto &[u, neighbors] : adj)
-    {
-        if (!indegree.count(u))
-        {
-            indegree[u] = 0;
-        }
-        for (const Node &v : neighbors)
-        {
-            ++indegree[v];
-        }
-    }
-
-    std::queue<Node> q{};
-    for (const auto &[node, deg] : indegree)
-    {
-        if (deg == 0)
-        {
-            q.push(node);
-        }
-    }
-
-    std::vector<Node> order;
-    order.reserve(indegree.size());
-    while (!q.empty())
-    {
-        Node u = std::move(q.front());
-        q.pop();
-        order.push_back(u);
-        const auto it = adj.find(u);
-        if (it == adj.end())
-        {
-            continue;
-        }
-
-        for (const Node &v : it->second)
-        {
-            --indegree[v];
-            if (indegree[v] == 0)
-            {
-                q.push(v);
-            }
-        }
-    }
-
-    if (order.size() == indegree.size())
-    {
-        return ok(order);
-    }
-    return error(std::string("Cycle detected"));
-}
-
 // =============================================================================
 // Error Handling
 // =============================================================================
@@ -526,11 +470,66 @@ class Error
 #define VIKA_UNSUPPORTED_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Unsupported, __VA_ARGS__)
 #define VIKA_DEVICE_ERROR(code) ::vika::Error::from_cuda((code), __FILE__, __LINE__)
 
+template <typename Node>
+auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Node>, Error>
+{
+    std::unordered_map<Node, i32> indegree{};
+
+    for (const auto &[u, neighbors] : adj)
+    {
+        if (!indegree.count(u))
+        {
+            indegree[u] = 0;
+        }
+        for (const Node &v : neighbors)
+        {
+            ++indegree[v];
+        }
+    }
+
+    std::queue<Node> q{};
+    for (const auto &[node, deg] : indegree)
+    {
+        if (deg == 0)
+        {
+            q.push(node);
+        }
+    }
+
+    std::vector<Node> order;
+    order.reserve(indegree.size());
+    while (!q.empty())
+    {
+        Node u = std::move(q.front());
+        q.pop();
+        order.push_back(u);
+        const auto it = adj.find(u);
+        if (it == adj.end())
+        {
+            continue;
+        }
+
+        for (const Node &v : it->second)
+        {
+            --indegree[v];
+            if (indegree[v] == 0)
+            {
+                q.push(v);
+            }
+        }
+    }
+
+    if (order.size() == indegree.size())
+    {
+        return ok(order);
+    }
+    return error(VIKA_GRAPH_ERROR("Cycle detected"));
+}
+
 // =============================================================================
 // Tensor Helpers
 // =============================================================================
 
-auto to_extents(const usize *data, usize rank) -> Extents;
 auto element_count(const Extents &extents) -> usize;
 
 template <typename T>
@@ -670,36 +669,62 @@ class HostTensor
         return std::cend(_data);
     }
 
-    static auto zero(const Extents &extents) -> Self
+    // Element count described by extents, rejecting the three ways extents can be
+    // unusable: empty, containing a zero, or overflowing usize when multiplied out.
+    // Every factory below funnels through this, so the private constructor can assume
+    // both the extents and the data length are sound.
+    static auto checked_size(const Extents &extents) -> Result<usize, Error>
     {
-        return HostTensor(std::vector<T>(Self::size(extents), T{}), extents);
+        if (extents.empty())
+        {
+            return error(VIKA_SHAPE_ERROR("host tensor extents are empty"));
+        }
+
+        const usize count = unwrap_or_return(checked_element_count(extents));
+        if (count == 0)
+        {
+            return error(VIKA_SHAPE_ERROR("host tensor extents contain a zero extent"));
+        }
+        return ok(count);
     }
 
-    static auto empty(const Extents &extents) -> Self
+    static auto zero(const Extents &extents) -> Result<Self, Error>
     {
-        return HostTensor(std::vector<T>(Self::size(extents)), extents);
+        const usize count = unwrap_or_return(Self::checked_size(extents));
+        return ok(HostTensor(std::vector<T>(count, T{}), extents));
     }
 
-    static auto zero(usize element_count) -> Self
+    static auto empty(const Extents &extents) -> Result<Self, Error>
+    {
+        const usize count = unwrap_or_return(Self::checked_size(extents));
+        return ok(HostTensor(std::vector<T>(count), extents));
+    }
+
+    static auto zero(usize element_count) -> Result<Self, Error>
     {
         return Self::zero(Extents{element_count});
     }
 
     template <typename OtherType>
-    static auto zero_like(const HostTensor<OtherType> &tensor) -> Self
+    static auto zero_like(const HostTensor<OtherType> &tensor) -> Result<Self, Error>
     {
         return Self::zero(tensor.extents());
     }
 
-    static auto from(std::initializer_list<T> data, const Extents &extents) -> Self
+    static auto from(std::initializer_list<T> data, const Extents &extents) -> Result<Self, Error>
     {
         return copy_from(data, extents);
     }
 
-    static auto copy_from(std::vector<T> data, const Extents &extents) -> Self
+    static auto copy_from(std::vector<T> data, const Extents &extents) -> Result<Self, Error>
     {
-        panic_if(std::size(data) != Self::size(extents), "Size mismatch");
-        return HostTensor(std::move(data), extents);
+        const usize count = unwrap_or_return(Self::checked_size(extents));
+        if (std::size(data) != count)
+        {
+            return error(VIKA_SHAPE_ERROR("host tensor data holds %zu elements but extents describe %zu",
+                                          std::size(data), count));
+        }
+        return ok(HostTensor(std::move(data), extents));
     }
 
   private:
@@ -838,12 +863,12 @@ class DeviceOwningTensor
 
     auto view() -> DeviceTensorView<T>
     {
-        return DeviceTensorView<T>(_data.get(), _extents, _extents.size());
+        return DeviceTensorView<T>(_data.get(), _extents);
     }
 
     auto const_view() const -> DeviceTensorView<const T>
     {
-        return DeviceTensorView<const T>(_data.get(), _extents, _extents.size());
+        return DeviceTensorView<const T>(_data.get(), _extents);
     }
 
   private:
@@ -859,7 +884,12 @@ class DeviceOwningTensor
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
-    panic_if(src.extents() != dst.extents(), "element_mismatch");
+    if (src.extents() != dst.extents())
+    {
+        return error(VIKA_SHAPE_ERROR("copy device -> host: source holds %zu elements, destination holds %zu",
+                                      src.element_count(), dst.size()));
+    }
+
     const auto err = cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
@@ -871,8 +901,12 @@ auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
-    const auto extents = to_extents(src.extents, src.rank);
-    panic_if(dst.extents() != extents, "element_mismatch");
+    if (dst.extents() != src.to_extents())
+    {
+        return error(VIKA_SHAPE_ERROR("copy view -> host: source holds %zu elements, destination holds %zu",
+                                      src.element_count(), dst.size()));
+    }
+
     const auto err = cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
@@ -884,7 +918,12 @@ auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Vo
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, Error>
 {
-    panic_if(src.extents() != dst.extents(), "element_mismatch");
+    if (src.extents() != dst.extents())
+    {
+        return error(VIKA_SHAPE_ERROR("copy host -> device: source holds %zu elements, destination holds %zu",
+                                      src.size(), dst.element_count()));
+    }
+
     const auto err = cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
     if (is_error(err))
     {
@@ -913,13 +952,13 @@ auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, Error>
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, Error>
 {
-    auto dst = HostTensor<T>::empty(to_extents(src.extents, src.rank));
+    auto dst = unwrap_or_return(HostTensor<T>::empty(src.to_extents()));
     const auto err = copy(src, dst);
     if (err.is_error())
     {
         return error(err.unwrap_error());
     }
-    return ok(dst);
+    return ok(std::move(dst));
 }
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
@@ -931,19 +970,31 @@ auto download(const DeviceOwningTensor<T> &src) -> Result<HostTensor<T>, Error>
 template <typename T, typename>
 struct DeviceTensorView
 {
-    DeviceTensorView(T *data_, const Extents &extents_, usize rank_) : data(data_)
+    // Rank is taken from extents_ rather than passed separately. Extents cannot hold more
+    // than VIKA_MAX_RANK entries, so an over-rank view is unrepresentable instead of being
+    // a runtime failure.
+    DeviceTensorView(T *data_, const Extents &extents_) : data(data_), rank(extents_.size())
     {
-        panic_if(rank_ > VIKA_MAX_RANK, "Rank %zu larger than VIKA_MAX_RANK %d", rank_, VIKA_MAX_RANK);
         std::copy(std::begin(extents_), std::end(extents_), extents);
-        std::exclusive_scan(std::rbegin(extents_), std::rend(extents_), std::make_reverse_iterator(strides + rank_),
+        std::exclusive_scan(std::rbegin(extents_), std::rend(extents_), std::make_reverse_iterator(strides + rank),
                             usize{1}, std::multiplies<usize>{});
-        rank = rank_;
     }
 
     T *data = nullptr;
     usize extents[VIKA_MAX_RANK] = {};
     usize strides[VIKA_MAX_RANK] = {};
     usize rank = 0;
+
+    // rank is bounded by construction, so this cannot overflow Extents.
+    auto to_extents() const -> Extents
+    {
+        Extents result{};
+        for (usize i = 0; i < rank; ++i)
+        {
+            result.push_back(extents[i]);
+        }
+        return result;
+    }
 
     __host__ __device__ inline usize element_count() const
     {
@@ -1407,16 +1458,16 @@ struct ComputationGraph
     std::vector<Node> nodes;
 
     auto input(Extents spatial_extents) -> NodeId;
-    auto dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, std::string>;
-    auto sigmoid(NodeId input) -> Result<NodeId, std::string>;
-    auto flatten(NodeId input) -> Result<NodeId, std::string>;
+    auto dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, Error>;
+    auto sigmoid(NodeId input) -> Result<NodeId, Error>;
+    auto flatten(NodeId input) -> Result<NodeId, Error>;
     auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride, usize padding,
-                u32 seed) -> Result<NodeId, std::string>;
-    auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, std::string>;
-    auto compile(NodeId output) -> Result<Model, std::string>;
+                u32 seed) -> Result<NodeId, Error>;
+    auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, Error>;
+    auto compile(NodeId output) -> Result<Model, Error>;
 };
 
-auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, std::string>;
+auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, Error>;
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
                   AdamState &state, const AdamParameters &params, usize t) -> Result<Void, Error>;
@@ -1495,17 +1546,6 @@ auto Error::crash() const -> void
 // =============================================================================
 // Tensor Helpers
 // =============================================================================
-
-auto to_extents(const usize *data, usize rank) -> Extents
-{
-    panic_if(rank > Extents::capacity(), "Rank %zu larger than VIKA_MAX_RANK %d", rank, VIKA_MAX_RANK);
-    Extents extents{};
-    for (usize i = 0; i < rank; ++i)
-    {
-        extents.push_back(data[i]);
-    }
-    return extents;
-}
 
 auto element_count(const Extents &extents) -> usize
 {
@@ -1696,7 +1736,7 @@ auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, 
 
 auto SigmoidLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>
 {
-    const auto input_extents = to_extents(inputs.extents, inputs.rank);
+    const auto input_extents = inputs.to_extents();
     if (input_extents != outputs.extents())
     {
         return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
@@ -1713,7 +1753,7 @@ auto SigmoidLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<De
 
 auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
 {
-    const auto upstream_extents = to_extents(upstream_gradient.extents, upstream_gradient.rank);
+    const auto upstream_extents = upstream_gradient.to_extents();
     if (upstream_extents != d_inputs.extents())
     {
         return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
@@ -1744,7 +1784,7 @@ auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
 
 auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> KernelJob<DeviceTensorConstView2f>
 {
-    const auto input_extents = to_extents(inputs.extents, inputs.rank);
+    const auto input_extents = inputs.to_extents();
     if (input_extents != extents)
     {
         return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
@@ -1755,7 +1795,7 @@ auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> KernelJob<D
     const auto batch = inputs.extents[0];
     const usize features =
         std::accumulate(inputs.extents + 1, inputs.extents + extents.size(), 1ul, std::multiplies<usize>{});
-    return KernelJob<DeviceTensorConstView2f>::launched(DeviceTensorConstView2f(inputs.data, {batch, features}, 2), 0);
+    return KernelJob<DeviceTensorConstView2f>::launched(DeviceTensorConstView2f(inputs.data, {batch, features}), 0);
 }
 
 auto InputLayer::forward(DeviceTensorConstViewf input) const -> KernelJob<DeviceTensorConstViewf>
@@ -1770,7 +1810,7 @@ auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> KernelJob<De
 
 auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -> KernelJob<DeviceTensorConstViewf>
 {
-    const auto upstream_extents = to_extents(upstream_gradient.extents, upstream_gradient.rank);
+    const auto upstream_extents = upstream_gradient.to_extents();
     if (element_count(upstream_extents) != element_count(extents))
     {
         return KernelJob<DeviceTensorConstViewf>::failed(
@@ -1779,7 +1819,7 @@ auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -
     }
 
     return KernelJob<DeviceTensorConstViewf>::launched(
-        DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size()), 0);
+        DeviceTensorConstViewf(upstream_gradient.data, extents), 0);
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
@@ -1988,17 +2028,17 @@ auto ComputationGraph::input(Extents spatial_extents) -> NodeId
     return id;
 }
 
-auto ComputationGraph::dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, std::string>
+auto ComputationGraph::dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, Error>
 {
     if (input.value >= nodes.size())
     {
-        return error(std::string("dense: invalid NodeId"));
+        return error(VIKA_GRAPH_ERROR("dense: invalid NodeId"));
     }
 
     const auto in_extents = nodes[input.value].output_extents;
     if (in_extents.size() != 2)
     {
-        return error(std::string("dense: input must be rank 2 [N, features]"));
+        return error(VIKA_SHAPE_ERROR("dense: input must be rank 2 [N, features]"));
     }
 
     const NodeId id{nodes.size()};
@@ -2010,11 +2050,11 @@ auto ComputationGraph::dense(NodeId input, usize output_features, u32 seed) -> R
     return ok(id);
 }
 
-auto ComputationGraph::sigmoid(NodeId input) -> Result<NodeId, std::string>
+auto ComputationGraph::sigmoid(NodeId input) -> Result<NodeId, Error>
 {
     if (input.value >= nodes.size())
     {
-        return error(std::string("sigmoid: invalid NodeId"));
+        return error(VIKA_GRAPH_ERROR("sigmoid: invalid NodeId"));
     }
 
     const auto in_extents = nodes[input.value].output_extents;
@@ -2027,17 +2067,17 @@ auto ComputationGraph::sigmoid(NodeId input) -> Result<NodeId, std::string>
     return ok(id);
 }
 
-auto ComputationGraph::flatten(NodeId input) -> Result<NodeId, std::string>
+auto ComputationGraph::flatten(NodeId input) -> Result<NodeId, Error>
 {
     if (input.value >= nodes.size())
     {
-        return error(std::string("flatten: invalid NodeId"));
+        return error(VIKA_GRAPH_ERROR("flatten: invalid NodeId"));
     }
 
     const auto in_extents = nodes[input.value].output_extents;
     if (in_extents.size() < 2)
     {
-        return error(std::string("flatten: input must be at least rank 2"));
+        return error(VIKA_SHAPE_ERROR("flatten: input must be at least rank 2"));
     }
 
     usize features = 1;
@@ -2056,17 +2096,17 @@ auto ComputationGraph::flatten(NodeId input) -> Result<NodeId, std::string>
 }
 
 auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride,
-                              usize padding, u32 seed) -> Result<NodeId, std::string>
+                              usize padding, u32 seed) -> Result<NodeId, Error>
 {
     if (input.value >= nodes.size())
     {
-        return error(std::string("conv2d: invalid NodeId"));
+        return error(VIKA_GRAPH_ERROR("conv2d: invalid NodeId"));
     }
 
     const auto in_extents = nodes[input.value].output_extents;
     if (in_extents.size() != 4)
     {
-        return error(std::string("conv2d: input must be rank 4 [N, H, W, C]"));
+        return error(VIKA_SHAPE_ERROR("conv2d: input must be rank 4 [N, H, W, C]"));
     }
 
     const auto H = in_extents[1];
@@ -2074,11 +2114,11 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
 
     if (H + 2 * padding < kernel_height)
     {
-        return error(std::string("conv2d: kernel height exceeds padded input height"));
+        return error(VIKA_SHAPE_ERROR("conv2d: kernel height exceeds padded input height"));
     }
     if (W + 2 * padding < kernel_width)
     {
-        return error(std::string("conv2d: kernel width exceeds padded input width"));
+        return error(VIKA_SHAPE_ERROR("conv2d: kernel width exceeds padded input width"));
     }
 
     const auto out_H = window_output_extent(H, kernel_height, stride, padding);
@@ -2094,17 +2134,17 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
 }
 
 auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride)
-    -> Result<NodeId, std::string>
+    -> Result<NodeId, Error>
 {
     if (input.value >= nodes.size())
     {
-        return error(std::string("maxpool2d: invalid NodeId"));
+        return error(VIKA_GRAPH_ERROR("maxpool2d: invalid NodeId"));
     }
 
     const auto in_extents = nodes[input.value].output_extents;
     if (in_extents.size() != 4)
     {
-        return error(std::string("maxpool2d: input must be rank 4 [N, H, W, C]"));
+        return error(VIKA_SHAPE_ERROR("maxpool2d: input must be rank 4 [N, H, W, C]"));
     }
 
     const auto H = in_extents[1];
@@ -2112,11 +2152,11 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
 
     if (H < pool_height)
     {
-        return error(std::string("maxpool2d: pool height exceeds input height"));
+        return error(VIKA_SHAPE_ERROR("maxpool2d: pool height exceeds input height"));
     }
     if (W < pool_width)
     {
-        return error(std::string("maxpool2d: pool width exceeds input width"));
+        return error(VIKA_SHAPE_ERROR("maxpool2d: pool width exceeds input width"));
     }
 
     const auto out_H = window_output_extent(H, pool_height, stride, 0);
@@ -2131,10 +2171,10 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     return ok(id);
 }
 
-auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, std::string>
+auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, Error>
 {
     return std::visit(
-        [&](const auto &s) -> Result<Layer, std::string> {
+        [&](const auto &s) -> Result<Layer, Error> {
             using T = std::decay_t<decltype(s)>;
             if constexpr (std::is_same_v<T, InputSpec>)
             {
@@ -2145,7 +2185,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 auto result = DenseLayer::randomized(batch_size, pred_extents.at(1), s.output_features, s.seed);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().describe());
+                    return error(result.unwrap_error());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
@@ -2154,7 +2194,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 auto result = SigmoidLayer::with_extents(pred_extents);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().describe());
+                    return error(result.unwrap_error());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
@@ -2169,7 +2209,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                                                       s.channels_out, s.stride, s.padding, s.seed);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().describe());
+                    return error(result.unwrap_error());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
@@ -2179,24 +2219,24 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                                                            pred_extents.at(3), s.pool_height, s.pool_width, s.stride);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().describe());
+                    return error(result.unwrap_error());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
             else
             {
                 static_assert(sizeof(T) == 0, "unhandled LayerSpec type in make_layer");
-                return error(std::string("unreachable"));
+                return error(VIKA_GRAPH_ERROR("unreachable"));
             }
         },
         spec);
 }
 
-auto ComputationGraph::compile(NodeId output) -> Result<Model, std::string>
+auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
 {
     if (output.value >= nodes.size())
     {
-        return error(std::string("compile: invalid output NodeId"));
+        return error(VIKA_GRAPH_ERROR("compile: invalid output NodeId"));
     }
 
     NodeId input_node{0};
@@ -2211,7 +2251,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, std::string>
     }
     if (input_count != 1)
     {
-        return error(std::string("compile: graph must have exactly one input node"));
+        return error(VIKA_GRAPH_ERROR("compile: graph must have exactly one input node"));
     }
 
     AdjecencyGraph<usize> adj{};
@@ -2280,13 +2320,17 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
     for (const auto node_id : execution_order)
     {
         const auto &preds = layer_inputs[node_id.value];
-        panic_if(preds.size() > 1, "forward: multi-input nodes not yet supported");
+        if (preds.size() > 1)
+        {
+            return error(VIKA_UNSUPPORTED_ERROR("forward: node %zu has %zu inputs, multi-input nodes are not supported",
+                                                node_id.value, preds.size()));
+        }
 
-        const auto pred_output = preds.empty() ? input : [&]() -> DeviceTensorConstViewf {
-            auto result = forward_jobs.at(preds[0].value).wait();
-            panic_if(result.is_error(), "forward: predecessor stream sync failed");
-            return result.unwrap();
-        }();
+        DeviceTensorConstViewf pred_output = input;
+        if (!preds.empty())
+        {
+            pred_output = unwrap_or_return(forward_jobs.at(preds[0].value).wait());
+        }
 
         auto job = std::visit(
             [&pred_output](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.forward(pred_output); },
@@ -2318,18 +2362,20 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
             continue;
         }
 
-        auto upstream_result = backward_jobs.at(node_id.value).wait();
-        if (upstream_result.is_error())
+        // Checked before dispatching, so an unsupported node does not launch work first.
+        if (preds.size() > 1)
         {
-            return error(upstream_result.unwrap_error());
+            return error(VIKA_UNSUPPORTED_ERROR(
+                "backward: node %zu has %zu inputs, multi-input nodes are not supported", node_id.value,
+                preds.size()));
         }
-        const auto upstream = upstream_result.unwrap();
+
+        const auto upstream = unwrap_or_return(backward_jobs.at(node_id.value).wait());
 
         auto d_input_job = std::visit(
             [&upstream](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.backward(upstream); },
             layers[node_id.value].kind);
 
-        panic_if(preds.size() > 1, "backward: multi-input nodes not yet supported");
         backward_jobs.emplace(preds[0].value, std::move(d_input_job));
     }
 

@@ -11,8 +11,8 @@ int main()
     constexpr usize epochs = 10000;
 
     const auto cpu_inputs =
-        HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2});
-    const auto cpu_targets = HostTensor2f::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1});
+        HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_targets = HostTensor2f::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1}).unwrap();
     const auto inputs = upload(cpu_inputs).unwrap();
     const auto targets = upload(cpu_targets).unwrap();
 

@@ -24,7 +24,7 @@ UTEST(sigmoid, backward)
 
     const auto upstream_gradient = DeviceOwningTensor2f::from({1.0, 2.0, 3.0, 4.0}, {2, 2}).unwrap();
     auto layer = SigmoidLayer::with_extents({2, 2}).unwrap();
-    copy(HostTensor2f::from({0.0, 0.5, 0.7310585786300048793, 1.0}, {2, 2}), layer.outputs).unwrap();
+    copy(HostTensor2f::from({0.0, 0.5, 0.7310585786300048793, 1.0}, {2, 2}).unwrap(), layer.outputs).unwrap();
 
     const auto outputs = layer.backward(upstream_gradient.const_view()).wait().unwrap();
 
