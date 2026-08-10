@@ -1432,7 +1432,6 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, De
     auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
 
     auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
-    auto d_outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
     auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
     auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
 
