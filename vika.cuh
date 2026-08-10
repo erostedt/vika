@@ -390,6 +390,37 @@ class [[nodiscard]] Result
         return std::move(fallback);
     }
 
+    // Transforms the value, forwarding an error untouched:
+    //   Result<A, E>::map(A -> B) -> Result<B, E>
+    // The callback must return a value; use Void for "nothing meaningful".
+    // Consuming, because T is usually move-only here (tensors, layers, models).
+    template <typename F>
+    auto map(F &&f) && -> Result<std::invoke_result_t<F, T &&>, E>
+    {
+        using U = std::invoke_result_t<F, T &&>;
+        if (is_error())
+        {
+            return Result<U, E>(Err<E>{std::move(std::get<E>(storage))});
+        }
+        return Result<U, E>(Ok<U>{std::forward<F>(f)(std::move(std::get<T>(storage)))});
+    }
+
+    // Chains a step that can itself fail, flattening the two Results into one:
+    //   Result<A, E>::and_then(A -> Result<B, E>) -> Result<B, E>
+    template <typename F>
+    auto and_then(F &&f) && -> std::invoke_result_t<F, T &&>
+    {
+        using R = std::invoke_result_t<F, T &&>;
+        static_assert(std::is_same_v<typename R::error_type, E>,
+                      "and_then callback must return a Result with the same error type");
+
+        if (is_error())
+        {
+            return R(Err<E>{std::move(std::get<E>(storage))});
+        }
+        return std::forward<F>(f)(std::move(std::get<T>(storage)));
+    }
+
   private:
     explicit Result(T value) : storage(std::move(value))
     {
@@ -1818,8 +1849,7 @@ auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -
                              element_count(upstream_extents), element_count(extents)));
     }
 
-    return KernelJob<DeviceTensorConstViewf>::launched(
-        DeviceTensorConstViewf(upstream_gradient.data, extents), 0);
+    return KernelJob<DeviceTensorConstViewf>::launched(DeviceTensorConstViewf(upstream_gradient.data, extents), 0);
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
@@ -2176,27 +2206,22 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
     return std::visit(
         [&](const auto &s) -> Result<Layer, Error> {
             using T = std::decay_t<decltype(s)>;
+
+            // Every constructed layer is wrapped the same way; map() forwards a
+            // construction failure untouched instead of repeating an is_error() block.
+            const auto as_trainable = [](auto layer) { return Layer::trainable(LayerKind{std::move(layer)}); };
             if constexpr (std::is_same_v<T, InputSpec>)
             {
                 return ok(Layer::trainable(LayerKind{InputLayer{}}));
             }
             else if constexpr (std::is_same_v<T, DenseSpec>)
             {
-                auto result = DenseLayer::randomized(batch_size, pred_extents.at(1), s.output_features, s.seed);
-                if (result.is_error())
-                {
-                    return error(result.unwrap_error());
-                }
-                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
+                return DenseLayer::randomized(batch_size, pred_extents.at(1), s.output_features, s.seed)
+                    .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, SigmoidSpec>)
             {
-                auto result = SigmoidLayer::with_extents(pred_extents);
-                if (result.is_error())
-                {
-                    return error(result.unwrap_error());
-                }
-                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
+                return SigmoidLayer::with_extents(pred_extents).map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, FlattenSpec>)
             {
@@ -2204,24 +2229,16 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
             }
             else if constexpr (std::is_same_v<T, Conv2DSpec>)
             {
-                auto result = Conv2DLayer::randomized(batch_size, pred_extents.at(1), pred_extents.at(2),
-                                                      s.kernel_height, s.kernel_width, pred_extents.at(3),
-                                                      s.channels_out, s.stride, s.padding, s.seed);
-                if (result.is_error())
-                {
-                    return error(result.unwrap_error());
-                }
-                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
+                return Conv2DLayer::randomized(batch_size, pred_extents.at(1), pred_extents.at(2), s.kernel_height,
+                                               s.kernel_width, pred_extents.at(3), s.channels_out, s.stride, s.padding,
+                                               s.seed)
+                    .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
             {
-                auto result = MaxPool2DLayer::with_extents(batch_size, pred_extents.at(1), pred_extents.at(2),
-                                                           pred_extents.at(3), s.pool_height, s.pool_width, s.stride);
-                if (result.is_error())
-                {
-                    return error(result.unwrap_error());
-                }
-                return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
+                return MaxPool2DLayer::with_extents(batch_size, pred_extents.at(1), pred_extents.at(2),
+                                                    pred_extents.at(3), s.pool_height, s.pool_width, s.stride)
+                    .map(as_trainable);
             }
             else
             {
@@ -2366,8 +2383,7 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
         if (preds.size() > 1)
         {
             return error(VIKA_UNSUPPORTED_ERROR(
-                "backward: node %zu has %zu inputs, multi-input nodes are not supported", node_id.value,
-                preds.size()));
+                "backward: node %zu has %zu inputs, multi-input nodes are not supported", node_id.value, preds.size()));
         }
 
         const auto upstream = unwrap_or_return(backward_jobs.at(node_id.value).wait());
