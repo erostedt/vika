@@ -65,7 +65,7 @@ using usize = size_t;
         const auto _err = (cudacall);                                                                                  \
         if (is_error(_err))                                                                                            \
         {                                                                                                              \
-            return error(VIKA_DEVICE_ERROR(_err));                                                                           \
+            return error(VIKA_DEVICE_ERROR(_err));                                                                     \
         }                                                                                                              \
     } while (0)
 
@@ -309,7 +309,7 @@ auto error(E value) -> Err<std::decay_t<E>>
 }
 
 template <typename T, typename E>
-class Result
+class [[nodiscard]] Result
 {
   public:
     using value_type = T;
@@ -462,18 +462,6 @@ auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Nod
 // =============================================================================
 
 auto is_error(cudaError_t err) -> bool;
-
-class DeviceError
-{
-  public:
-    DeviceError(cudaError_t err);
-    auto name() -> std::string;
-    auto string() -> std::string;
-    [[noreturn]] auto crash() -> void;
-
-  private:
-    cudaError_t _code;
-};
 
 enum class ErrorKind
 {
@@ -1052,18 +1040,40 @@ auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f;
 // =============================================================================
 
 template <typename T>
-struct KernelJob
+struct [[nodiscard]] KernelJob
 {
+    // Work that was enqueued on a stream.
+    static auto launched(T value, cudaStream_t stream) -> KernelJob
+    {
+        return KernelJob{ok(std::move(value)), stream};
+    }
+
+    // A request rejected before anything was enqueued, so there is no stream to wait on.
+    // Holding a Result rather than a value plus an error flag means there is no
+    // placeholder value to accidentally read: callers cannot reach a T without first
+    // confronting the error, and result.is_error() is inspectable without synchronising.
+    static auto failed(Error err) -> KernelJob
+    {
+        return KernelJob{error(std::move(err)), 0};
+    }
+
     auto wait() -> Result<T, Error>
     {
+        if (result.is_error())
+        {
+            return error(result.unwrap_error());
+        }
+
+        // Qualified: the unqualified name would resolve to this class's is_error().
         const auto err = cudaStreamSynchronize(stream);
-        if (is_error(err))
+        if (vika::is_error(err))
         {
             return error(VIKA_DEVICE_ERROR(err));
         }
-        return ok(value);
+        return ok(result.unwrap());
     }
-    T value;
+
+    Result<T, Error> result;
     cudaStream_t stream;
 };
 
@@ -1221,8 +1231,7 @@ struct Conv2DLayer
 {
     // filters: [kH, kW, C_in, C_out]
     static auto with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
-                             DeviceOwningTensor1f biases, usize stride, usize padding)
-        -> Result<Conv2DLayer, Error>;
+                             DeviceOwningTensor1f biases, usize stride, usize padding) -> Result<Conv2DLayer, Error>;
 
     static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
                            usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, Error>;
@@ -1430,26 +1439,6 @@ auto is_error(cudaError_t err) -> bool
     return err != cudaSuccess;
 }
 
-DeviceError::DeviceError(cudaError_t err) : _code(err)
-{
-    panic_if(!is_error(err), "%s %s", "Not an error type: ", cudaGetErrorName(_code));
-}
-
-auto DeviceError::name() -> std::string
-{
-    return cudaGetErrorName(_code);
-}
-
-auto DeviceError::string() -> std::string
-{
-    return cudaGetErrorString(_code);
-}
-
-auto DeviceError::crash() -> void
-{
-    panic("Crashed due to: [%s] %s", cudaGetErrorName(_code), cudaGetErrorString(_code));
-}
-
 auto error_kind_name(ErrorKind kind) -> const char *
 {
     switch (kind)
@@ -1582,7 +1571,7 @@ auto uniform_tensor(DeviceTensorViewf tensor, u32 seed) -> KernelJob<Void>
     const usize n = tensor.element_count();
     const usize threads = 256;
     uniform_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed);
-    return KernelJob<Void>{Void{}, 0};
+    return KernelJob<Void>::launched(Void{}, 0);
 }
 
 auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out) -> KernelJob<Void>
@@ -1591,7 +1580,7 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
     const usize n = tensor.element_count();
     const usize threads = 256;
     xavier_tensor_kernel<<<(n + threads - 1) / threads, threads>>>(tensor, seed, limit);
-    return KernelJob<Void>{Void{}, 0};
+    return KernelJob<Void>::launched(Void{}, 0);
 }
 
 // Adam bias-correction scales. These depend only on the step count, so computing them
@@ -1650,7 +1639,7 @@ auto DenseLayer::forward(const DeviceTensorConstView2f &inputs) -> KernelJob<Dev
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     matmul_kernel<<<grid, block, 0, stream>>>(inputs, weights.const_view(), outputs.view());
     add_bias<<<grid, block, 0, stream>>>(biases.const_view(), outputs.view());
-    return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView2f>::launched(outputs.const_view(), stream);
 }
 
 auto DenseLayer::backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
@@ -1660,7 +1649,7 @@ auto DenseLayer::backward(const DeviceTensorConstView2f &upstream_gradient) -> K
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     matmul_kernel<<<grid, block, 0, stream>>>(upstream_gradient, transposed(weights.const_view()), d_inputs.view());
-    return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView2f>::launched(d_inputs.const_view(), stream);
 }
 
 auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
@@ -1677,8 +1666,8 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
     const auto block_dim = dim3(256);
     const auto grid_dim = dim3((upstream_gradient.extents[1] + block_dim.x - 1) / block_dim.x);
     sum_rows<<<grid_dim, block_dim, 0, stream>>>(transposed(upstream_gradient), d_biases.view());
-    return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>{
-        std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
+    return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>::launched(
+        std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream);
 }
 
 auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView1f d_biases, AdamState &state,
@@ -1692,7 +1681,7 @@ auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView
         params, m_hat_scale, v_hat_scale, d_weights, weights.view(), state.m_weights.view(), state.v_weights.view());
     adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
         params, m_hat_scale, v_hat_scale, d_biases, biases.view(), state.m_biases.view(), state.v_biases.view());
-    return KernelJob<Void>{Void{}, stream};
+    return KernelJob<Void>::launched(Void{}, stream);
 }
 
 auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, Error>
@@ -1707,23 +1696,45 @@ auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, 
 
 auto SigmoidLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>
 {
-    panic_if(to_extents(inputs.extents, inputs.rank) != outputs.extents(), "MISMATCH");
+    const auto input_extents = to_extents(inputs.extents, inputs.rank);
+    if (input_extents != outputs.extents())
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
+            "sigmoid forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
+            input_extents.size(), element_count(input_extents), outputs.extents().size(), outputs.element_count()));
+    }
+
     usize threads = 256;
     usize blocks = (inputs.element_count() + threads - 1) / threads;
 
     sigmoid_forward<<<blocks, threads, 0, stream>>>(inputs, outputs.view());
-    return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView2f>::launched(outputs.const_view(), stream);
 }
 
 auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
 {
-    panic_if(to_extents(upstream_gradient.extents, upstream_gradient.rank) != d_inputs.extents(), "MISMATCH");
-    panic_if(d_inputs.extents() != outputs.extents(), "MISMATCH");
+    const auto upstream_extents = to_extents(upstream_gradient.extents, upstream_gradient.rank);
+    if (upstream_extents != d_inputs.extents())
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
+            "sigmoid backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
+            upstream_extents.size(), element_count(upstream_extents), d_inputs.extents().size(),
+            d_inputs.element_count()));
+    }
+
+    // Invariant: with_extents allocates both from the same extents.
+    if (d_inputs.extents() != outputs.extents())
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(
+            VIKA_SHAPE_ERROR("sigmoid backward: gradient holds %zu elements but outputs hold %zu",
+                             d_inputs.element_count(), outputs.element_count()));
+    }
+
     usize threads = 256;
     usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
 
     sigmoid_backward<<<blocks, threads, 0, stream>>>(outputs.const_view(), upstream_gradient, d_inputs.view());
-    return KernelJob<DeviceTensorConstView2f>{d_inputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView2f>::launched(d_inputs.const_view(), stream);
 }
 
 auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
@@ -1733,35 +1744,46 @@ auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
 
 auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> KernelJob<DeviceTensorConstView2f>
 {
-    panic_if(to_extents(inputs.extents, inputs.rank) != extents, "INVALID EXTENTS");
+    const auto input_extents = to_extents(inputs.extents, inputs.rank);
+    if (input_extents != extents)
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
+            "flatten forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
+            input_extents.size(), element_count(input_extents), extents.size(), element_count(extents)));
+    }
 
     const auto batch = inputs.extents[0];
     const usize features =
         std::accumulate(inputs.extents + 1, inputs.extents + extents.size(), 1ul, std::multiplies<usize>{});
-    return KernelJob<DeviceTensorConstView2f>{DeviceTensorConstView2f(inputs.data, {batch, features}, 2), 0};
+    return KernelJob<DeviceTensorConstView2f>::launched(DeviceTensorConstView2f(inputs.data, {batch, features}, 2), 0);
 }
 
 auto InputLayer::forward(DeviceTensorConstViewf input) const -> KernelJob<DeviceTensorConstViewf>
 {
-    return KernelJob<DeviceTensorConstViewf>{input, 0};
+    return KernelJob<DeviceTensorConstViewf>::launched(input, 0);
 }
 
 auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> KernelJob<DeviceTensorConstViewf>
 {
-    return KernelJob<DeviceTensorConstViewf>{upstream, 0};
+    return KernelJob<DeviceTensorConstViewf>::launched(upstream, 0);
 }
 
 auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -> KernelJob<DeviceTensorConstViewf>
 {
-    panic_if(element_count(to_extents(upstream_gradient.extents, upstream_gradient.rank)) != element_count(extents),
-             "INVALID EXTENTS");
-    return KernelJob<DeviceTensorConstViewf>{DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size()),
-                                             0};
+    const auto upstream_extents = to_extents(upstream_gradient.extents, upstream_gradient.rank);
+    if (element_count(upstream_extents) != element_count(extents))
+    {
+        return KernelJob<DeviceTensorConstViewf>::failed(
+            VIKA_SHAPE_ERROR("flatten backward: upstream holds %zu elements, layer extents hold %zu",
+                             element_count(upstream_extents), element_count(extents)));
+    }
+
+    return KernelJob<DeviceTensorConstViewf>::launched(
+        DeviceTensorConstViewf(upstream_gradient.data, extents, extents.size()), 0);
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
-                               DeviceOwningTensor1f biases, usize stride, usize padding)
-    -> Result<Conv2DLayer, Error>
+                               DeviceOwningTensor1f biases, usize stride, usize padding) -> Result<Conv2DLayer, Error>
 {
     const usize kH = filters.extent(0);
     const usize kW = filters.extent(1);
@@ -1814,7 +1836,7 @@ auto Conv2DLayer::forward(const DeviceTensorConstView4f &inputs) -> KernelJob<De
 
     conv_forward<<<grid, block, 0, stream>>>(inputs, filters.const_view(), biases.const_view(), outputs.view(), stride,
                                              padding);
-    return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView4f>::launched(outputs.const_view(), stream);
 }
 
 auto Conv2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
@@ -1828,7 +1850,7 @@ auto Conv2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob
     dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, N * C_in);
 
     conv_backward<<<grid, block, 0, stream>>>(upstream, filters.const_view(), d_inputs.view(), stride, padding);
-    return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView4f>::launched(d_inputs.const_view(), stream);
 }
 
 auto Conv2DLayer::weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
@@ -1842,8 +1864,8 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstView4f &inputs, const 
         inputs, upstream, d_filters.view(), stride, padding);
     conv_bias_gradients<<<(C_out + threads - 1) / threads, threads, 0, stream>>>(upstream, d_biases.view());
 
-    return KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>{
-        std::make_tuple(d_filters.const_view(), d_biases.const_view()), stream};
+    return KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>::launched(
+        std::make_tuple(d_filters.const_view(), d_biases.const_view()), stream);
 }
 
 auto Conv2DLayer::update(const DeviceTensorConstView4f &d_filters_, const DeviceTensorConstView1f &d_biases_,
@@ -1859,7 +1881,7 @@ auto Conv2DLayer::update(const DeviceTensorConstView4f &d_filters_, const Device
     adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
         params, m_hat_scale, v_hat_scale, d_biases_, biases.view(), state.m_biases.view(), state.v_biases.view());
 
-    return KernelJob<Void>{Void{}, stream};
+    return KernelJob<Void>::launched(Void{}, stream);
 }
 
 auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
@@ -1896,7 +1918,7 @@ auto MaxPool2DLayer::forward(const DeviceTensorConstView4f &inputs) -> KernelJob
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
 
     maxpool_forward<<<grid, block, 0, stream>>>(inputs, outputs.view(), argmax.view(), pool_h, pool_w, stride);
-    return KernelJob<DeviceTensorConstView4f>{outputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView4f>::launched(outputs.const_view(), stream);
 }
 
 auto MaxPool2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
@@ -1912,7 +1934,7 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstView4f &upstream) -> Kernel
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
 
     maxpool_backward<<<grid, block, 0, stream>>>(upstream, argmax.const_view(), d_inputs.view());
-    return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstView4f>::launched(d_inputs.const_view(), stream);
 }
 
 auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
@@ -1933,7 +1955,7 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
     const usize n = predictions.element_count();
     const usize threads = 256;
     mse_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, loss.view());
-    return KernelJob<DeviceTensorConstView1f>{loss.const_view(), stream};
+    return KernelJob<DeviceTensorConstView1f>::launched(loss.const_view(), stream);
 }
 
 auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
@@ -1942,7 +1964,7 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
     const usize n = predictions.element_count();
     const usize threads = 256;
     mse_gradient_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(predictions, targets, d_inputs.view());
-    return KernelJob<DeviceTensorConstViewf>{d_inputs.const_view(), stream};
+    return KernelJob<DeviceTensorConstViewf>::launched(d_inputs.const_view(), stream);
 }
 
 // =============================================================================
@@ -2285,7 +2307,7 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
 {
     backward_jobs.clear();
     backward_jobs.reserve(layers.size());
-    backward_jobs.emplace(output_node.value, KernelJob<DeviceTensorConstViewf>{loss_grad, 0});
+    backward_jobs.emplace(output_node.value, KernelJob<DeviceTensorConstViewf>::launched(loss_grad, 0));
 
     for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it)
     {
@@ -2424,8 +2446,8 @@ auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
             continue;
         }
 
-        const auto forward_input = forward_jobs.at(preds[0].value).value;
-        const auto upstream = backward_jobs.at(node_id.value).value;
+        const auto forward_input = unwrap_or_return(forward_jobs.at(preds[0].value).wait());
+        const auto upstream = unwrap_or_return(backward_jobs.at(node_id.value).wait());
 
         auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
         if (result.is_error())
