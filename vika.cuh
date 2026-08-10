@@ -1032,9 +1032,9 @@ __global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out)
 __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream_gradient,
                                  DeviceTensorViewf out) -> void;
 
-__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf d_weights,
-                            DeviceTensorViewf weights, DeviceTensorViewf m_weights, DeviceTensorViewf v_weights)
-    -> void;
+__global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f32 v_hat_scale,
+                            DeviceTensorConstViewf d_weights, DeviceTensorViewf weights, DeviceTensorViewf m_weights,
+                            DeviceTensorViewf v_weights) -> void;
 
 __global__ auto add_bias(DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void;
 
@@ -1418,6 +1418,14 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
     return KernelJob<Void>{Void{}, 0};
 }
 
+// Adam bias-correction scales. These depend only on the step count, so computing them
+// once on the host beats recomputing pow() in every thread.
+inline auto adam_bias_correction(const AdamParameters &params, usize t) -> std::pair<f32, f32>
+{
+    const auto correct = [t](f32 beta) -> f32 { return (f32)(1.0 / (1.0 - std::pow((double)beta, (double)t))); };
+    return {correct(params.beta1), correct(params.beta2)};
+}
+
 // =============================================================================
 // Layers
 // =============================================================================
@@ -1503,10 +1511,11 @@ auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView
     const usize threads = 256;
     const auto weight_count = d_weights.element_count();
     const auto bias_count = d_biases.element_count();
+    const auto [m_hat_scale, v_hat_scale] = adam_bias_correction(params, t);
     adam_update<<<(weight_count + threads - 1) / threads, threads, 0, stream>>>(
-        params, (f32)t, d_weights, weights.view(), state.m_weights.view(), state.v_weights.view());
+        params, m_hat_scale, v_hat_scale, d_weights, weights.view(), state.m_weights.view(), state.v_weights.view());
     adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
-        params, (f32)t, d_biases, biases.view(), state.m_biases.view(), state.v_biases.view());
+        params, m_hat_scale, v_hat_scale, d_biases, biases.view(), state.m_biases.view(), state.v_biases.view());
     return KernelJob<Void>{Void{}, stream};
 }
 
@@ -1667,11 +1676,12 @@ auto Conv2DLayer::update(const DeviceTensorConstView4f &d_filters_, const Device
     const usize threads = 256;
     const usize filter_count = filters.element_count();
     const usize bias_count = biases.element_count();
+    const auto [m_hat_scale, v_hat_scale] = adam_bias_correction(params, t);
 
     adam_update<<<(filter_count + threads - 1) / threads, threads, 0, stream>>>(
-        params, (f32)t, d_filters_, filters.view(), state.m_weights.view(), state.v_weights.view());
+        params, m_hat_scale, v_hat_scale, d_filters_, filters.view(), state.m_weights.view(), state.v_weights.view());
     adam_update<<<(bias_count + threads - 1) / threads, threads, 0, stream>>>(
-        params, (f32)t, d_biases_, biases.view(), state.m_biases.view(), state.v_biases.view());
+        params, m_hat_scale, v_hat_scale, d_biases_, biases.view(), state.m_biases.view(), state.v_biases.view());
 
     return KernelJob<Void>{Void{}, stream};
 }
@@ -2298,17 +2308,15 @@ __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
     out[i] = 2.0f * (predictions[i] - targets[i]) / (f32)predictions.element_count();
 }
 
-__global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensorConstViewf d_weights,
-                            DeviceTensorViewf weights, DeviceTensorViewf m_weights, DeviceTensorViewf v_weights) -> void
+__global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f32 v_hat_scale,
+                            DeviceTensorConstViewf d_weights, DeviceTensorViewf weights, DeviceTensorViewf m_weights,
+                            DeviceTensorViewf v_weights) -> void
 {
     usize i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= weights.element_count())
     {
         return;
     }
-
-    f32 m_hat_scale = 1.0 / (1.0 - std::pow(parameters.beta1, t));
-    f32 v_hat_scale = 1.0 / (1.0 - std::pow(parameters.beta2, t));
 
     f32 g = d_weights[i];
     f32 m = m_weights[i];
