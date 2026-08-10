@@ -1036,8 +1036,7 @@ __global__ auto adam_update(const AdamParameters parameters, f32 t, DeviceTensor
                             DeviceTensorViewf weights, DeviceTensorViewf m_weights, DeviceTensorViewf v_weights)
     -> void;
 
-__global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out)
-    -> void;
+__global__ auto add_bias(DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void;
 
 __global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out) -> void;
 
@@ -1466,7 +1465,7 @@ auto DenseLayer::forward(const DeviceTensorConstView2f &inputs) -> KernelJob<Dev
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     matmul_kernel<<<grid, block, 0, stream>>>(inputs, weights.const_view(), outputs.view());
-    add_bias<<<grid, block, 0, stream>>>(inputs, biases.const_view(), outputs.view());
+    add_bias<<<grid, block, 0, stream>>>(biases.const_view(), outputs.view());
     return KernelJob<DeviceTensorConstView2f>{outputs.const_view(), stream};
 }
 
@@ -2372,12 +2371,12 @@ __global__ auto sum_rows(DeviceTensorConstView2f matrix, DeviceTensorView1f out)
     out[row] = sum;
 }
 
-__global__ auto add_bias(DeviceTensorConstView2f matrix, DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void
+__global__ auto add_bias(DeviceTensorConstView1f biases, DeviceTensorView2f out) -> void
 {
     const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
     const usize col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    const usize sample_count = matrix.extents[0];
+    const usize sample_count = out.extents[0];
     const usize bias_count = biases.extents[0];
 
     if (sample_index >= sample_count || col >= bias_count)
