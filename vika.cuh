@@ -346,7 +346,9 @@ class Result
         return std::get<T>(storage);
     }
 
-    auto unwrap() && -> T &&
+    // Returns by value: an rvalue Result is usually a temporary, so handing back a
+    // reference into its storage would dangle as soon as the full expression ends.
+    auto unwrap() && -> T
     {
         panic_if(is_error(), "called unwrap() on Error Result");
         return std::move(std::get<T>(storage));
@@ -364,7 +366,7 @@ class Result
         return std::get<E>(storage);
     }
 
-    auto unwrap_error() && -> E &&
+    auto unwrap_error() && -> E
     {
         panic_if(is_ok(), "called unwrap_error() on Ok Result");
         return std::move(std::get<E>(storage));
