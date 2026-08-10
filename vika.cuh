@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cuda_runtime.h>
 #include <functional>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <queue>
@@ -25,6 +28,10 @@ using f32 = float;
 using usize = size_t;
 
 #define VIKA_MAX_RANK 6
+
+#ifndef VIKA_MAX_ERROR_MESSAGE
+#define VIKA_MAX_ERROR_MESSAGE 192
+#endif
 
 #define panic(fmt, ...)                                                                                                \
     do                                                                                                                 \
@@ -58,7 +65,7 @@ using usize = size_t;
         const auto _err = (cudacall);                                                                                  \
         if (is_error(_err))                                                                                            \
         {                                                                                                              \
-            return error(DeviceError(_err));                                                                           \
+            return error(VIKA_DEVICE_ERROR(_err));                                                                           \
         }                                                                                                              \
     } while (0)
 
@@ -281,8 +288,10 @@ struct Ok
     T value;
 };
 
+// Tag type paired with Ok<T>, produced by error() below. Distinct from the Error class
+// in the Error Handling section, which is the actual error payload.
 template <typename E>
-struct Error
+struct Err
 {
     E value;
 };
@@ -294,9 +303,9 @@ auto ok(T value) -> Ok<std::decay_t<T>>
 }
 
 template <typename E>
-auto error(E value) -> Error<std::decay_t<E>>
+auto error(E value) -> Err<std::decay_t<E>>
 {
-    return Error<std::decay_t<E>>{std::move(value)};
+    return Err<std::decay_t<E>>{std::move(value)};
 }
 
 template <typename T, typename E>
@@ -320,7 +329,7 @@ class Result
     {
     }
 
-    Result(Error<E> error) : storage(std::move(error.value))
+    Result(Err<E> error) : storage(std::move(error.value))
     {
     }
 
@@ -336,13 +345,13 @@ class Result
 
     auto unwrap() & -> T &
     {
-        panic_if(is_error(), "called unwrap() on Error Result");
+        panic_if(is_error(), "called unwrap() on Err Result");
         return std::get<T>(storage);
     }
 
     auto unwrap() const & -> const T &
     {
-        panic_if(is_error(), "called unwrap() on Error Result");
+        panic_if(is_error(), "called unwrap() on Err Result");
         return std::get<T>(storage);
     }
 
@@ -350,7 +359,7 @@ class Result
     // reference into its storage would dangle as soon as the full expression ends.
     auto unwrap() && -> T
     {
-        panic_if(is_error(), "called unwrap() on Error Result");
+        panic_if(is_error(), "called unwrap() on Err Result");
         return std::move(std::get<T>(storage));
     }
 
@@ -449,7 +458,7 @@ auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Nod
 }
 
 // =============================================================================
-// CUDA Error Handling
+// Error Handling
 // =============================================================================
 
 auto is_error(cudaError_t err) -> bool;
@@ -466,6 +475,69 @@ class DeviceError
     cudaError_t _code;
 };
 
+enum class ErrorKind
+{
+    Device,      // a CUDA runtime call or kernel launch failed
+    Shape,       // extents, rank, or layout disagreement
+    Graph,       // malformed computation graph
+    Unsupported, // a valid request vika cannot serve yet
+};
+
+auto error_kind_name(ErrorKind kind) -> const char *;
+
+// A single flat error type for every fallible vika operation. Deliberately allocation
+// free and trivially copyable: it travels through Result and KernelJob by value, and one
+// of the failures it reports is device allocation running out of memory.
+class Error
+{
+  public:
+    // Prefer the VIKA_*_ERROR macros below, which capture the originating file and line.
+    static auto make(ErrorKind kind, const char *file, i32 line, const char *fmt, ...) -> Error;
+    static auto from_cuda(cudaError_t code, const char *file, i32 line) -> Error;
+
+    auto kind() const -> ErrorKind
+    {
+        return _kind;
+    }
+
+    // cudaSuccess unless kind() == ErrorKind::Device
+    auto code() const -> cudaError_t
+    {
+        return _code;
+    }
+
+    auto message() const -> const char *
+    {
+        return _message;
+    }
+
+    auto file() const -> const char *
+    {
+        return _file;
+    }
+
+    auto line() const -> i32
+    {
+        return _line;
+    }
+
+    auto describe() const -> std::string;
+    [[noreturn]] auto crash() const -> void;
+
+  private:
+    ErrorKind _kind = ErrorKind::Device;
+    cudaError_t _code = cudaSuccess;
+    const char *_file = "";
+    i32 _line = 0;
+    char _message[VIKA_MAX_ERROR_MESSAGE] = {};
+};
+
+#define VIKA_ERROR(kind, ...) ::vika::Error::make((kind), __FILE__, __LINE__, __VA_ARGS__)
+#define VIKA_SHAPE_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Shape, __VA_ARGS__)
+#define VIKA_GRAPH_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Graph, __VA_ARGS__)
+#define VIKA_UNSUPPORTED_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Unsupported, __VA_ARGS__)
+#define VIKA_DEVICE_ERROR(code) ::vika::Error::from_cuda((code), __FILE__, __LINE__)
+
 // =============================================================================
 // Tensor Helpers
 // =============================================================================
@@ -477,6 +549,30 @@ template <typename T>
 inline auto byte_count(const Extents &extents) -> usize
 {
     return element_count(extents) * sizeof(T);
+}
+
+// Overflow-reporting counterparts, for the paths that turn extents into an allocation
+// size. Wrapping there is worse than failing: the product can land on a small value (or
+// exactly zero), cudaMalloc happily succeeds, and every later kernel writes out of
+// bounds with nothing reporting an error. The unchecked versions above stay for extents
+// that were already validated when their tensor was created.
+auto checked_element_count(const Extents &extents) -> Result<usize, Error>;
+
+template <typename T>
+inline auto checked_byte_count(const Extents &extents) -> Result<usize, Error>
+{
+    auto count = checked_element_count(extents);
+    if (count.is_error())
+    {
+        return error(count.unwrap_error());
+    }
+
+    const usize elements = count.unwrap();
+    if (elements > std::numeric_limits<usize>::max() / sizeof(T))
+    {
+        return error(VIKA_SHAPE_ERROR("byte count overflows usize: %zu elements of %zu bytes", elements, sizeof(T)));
+    }
+    return ok(elements * sizeof(T));
 }
 
 // Output extent of one spatial dimension for a sliding window. Convolution and pooling
@@ -667,18 +763,20 @@ class DeviceOwningTensor
     using Self = DeviceOwningTensor<T>;
 
   public:
-    static auto empty(const Extents &extents) -> Result<Self, DeviceError>
+    static auto empty(const Extents &extents) -> Result<Self, Error>
     {
+        const usize bytes = unwrap_or_return(vika::checked_byte_count<T>(extents));
+
         T *ptr = nullptr;
-        const auto err = cudaMalloc(&ptr, vika::byte_count<T>(extents));
+        const auto err = cudaMalloc(&ptr, bytes);
         if (err)
         {
-            return error(DeviceError(err));
+            return error(VIKA_DEVICE_ERROR(err));
         }
         return ok(Self(ptr, extents));
     }
 
-    static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, DeviceError>
+    static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, Error>
     {
         auto tensor = empty(extents);
         if (tensor.is_error())
@@ -690,22 +788,22 @@ class DeviceOwningTensor
 
         if (is_error(err))
         {
-            return error(DeviceError(err));
+            return error(VIKA_DEVICE_ERROR(err));
         }
         return tensor;
     }
 
-    static auto from(const std::vector<T> &data) -> Result<Self, DeviceError>
+    static auto from(const std::vector<T> &data) -> Result<Self, Error>
     {
         return from(data, {data.size()});
     }
 
-    static auto empty_like(const Self &other) -> Result<Self, DeviceError>
+    static auto empty_like(const Self &other) -> Result<Self, Error>
     {
         return empty(other.extents());
     }
 
-    static auto zero_like(const Self &other) -> Result<Self, DeviceError>
+    static auto zero_like(const Self &other) -> Result<Self, Error>
     {
         auto tensor = empty_like(other);
         if (tensor.is_error())
@@ -715,7 +813,7 @@ class DeviceOwningTensor
         const auto err = cudaMemset(tensor.unwrap().data(), 0, tensor.unwrap().byte_count());
         if (is_error(err))
         {
-            return error(DeviceError(err));
+            return error(VIKA_DEVICE_ERROR(err));
         }
         return tensor;
     }
@@ -771,44 +869,44 @@ class DeviceOwningTensor
 };
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
-auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, DeviceError>
+auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
     panic_if(src.extents() != dst.extents(), "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
-        return error(DeviceError(err));
+        return error(VIKA_DEVICE_ERROR(err));
     }
     return ok(Void{});
 }
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
-auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Void, DeviceError>
+auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
     const auto extents = to_extents(src.extents, src.rank);
     panic_if(dst.extents() != extents, "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
     if (is_error(err))
     {
-        return error(DeviceError(err));
+        return error(VIKA_DEVICE_ERROR(err));
     }
     return ok(Void{});
 }
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
-auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, DeviceError>
+auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, Error>
 {
     panic_if(src.extents() != dst.extents(), "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
     if (is_error(err))
     {
-        return error(DeviceError(err));
+        return error(VIKA_DEVICE_ERROR(err));
     }
     return ok(Void{});
 }
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
-auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, DeviceError>
+auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, Error>
 {
     auto dst = DeviceOwningTensor<T>::empty(src.extents());
     if (dst.is_error())
@@ -825,7 +923,7 @@ auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, DeviceErr
 }
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
-auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, DeviceError>
+auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, Error>
 {
     auto dst = HostTensor<T>::empty(to_extents(src.extents, src.rank));
     const auto err = copy(src, dst);
@@ -837,7 +935,7 @@ auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, Dev
 }
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
-auto download(const DeviceOwningTensor<T> &src) -> Result<HostTensor<T>, DeviceError>
+auto download(const DeviceOwningTensor<T> &src) -> Result<HostTensor<T>, Error>
 {
     return download(src.const_view());
 }
@@ -956,12 +1054,12 @@ auto transposed(const DeviceTensorConstView2f &view) -> DeviceTensorConstView2f;
 template <typename T>
 struct KernelJob
 {
-    auto wait() -> Result<T, DeviceError>
+    auto wait() -> Result<T, Error>
     {
         const auto err = cudaStreamSynchronize(stream);
         if (is_error(err))
         {
-            return error(DeviceError(err));
+            return error(VIKA_DEVICE_ERROR(err));
         }
         return ok(value);
     }
@@ -970,7 +1068,7 @@ struct KernelJob
 };
 
 template <typename T>
-auto wait_on(std::vector<KernelJob<T>> &jobs) -> Result<std::vector<T>, DeviceError>
+auto wait_on(std::vector<KernelJob<T>> &jobs) -> Result<std::vector<T>, Error>
 {
     std::vector<T> results;
     results.reserve(jobs.size());
@@ -1002,7 +1100,7 @@ struct AdamState
     DeviceOwningTensorf v_biases;
 
     static auto create(const DeviceOwningTensorf &weights, const DeviceOwningTensorf &biases)
-        -> Result<AdamState, DeviceError>;
+        -> Result<AdamState, Error>;
 };
 
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
@@ -1067,10 +1165,10 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
 struct DenseLayer
 {
     static auto with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
-        -> Result<DenseLayer, DeviceError>;
+        -> Result<DenseLayer, Error>;
 
     static auto randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
-        -> Result<DenseLayer, DeviceError>;
+        -> Result<DenseLayer, Error>;
 
     auto forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>;
 
@@ -1095,7 +1193,7 @@ struct DenseLayer
 
 struct SigmoidLayer
 {
-    static auto with_extents(const Extents &extents) -> Result<SigmoidLayer, DeviceError>;
+    static auto with_extents(const Extents &extents) -> Result<SigmoidLayer, Error>;
 
     auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>;
 
@@ -1124,10 +1222,10 @@ struct Conv2DLayer
     // filters: [kH, kW, C_in, C_out]
     static auto with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
                              DeviceOwningTensor1f biases, usize stride, usize padding)
-        -> Result<Conv2DLayer, DeviceError>;
+        -> Result<Conv2DLayer, Error>;
 
     static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
-                           usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>;
+                           usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, Error>;
 
     auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>;
 
@@ -1155,7 +1253,7 @@ struct Conv2DLayer
 struct MaxPool2DLayer
 {
     static auto with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
-                             usize pool_w, usize stride) -> Result<MaxPool2DLayer, DeviceError>;
+                             usize pool_w, usize stride) -> Result<MaxPool2DLayer, Error>;
 
     auto forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>;
 
@@ -1174,7 +1272,7 @@ struct MaxPool2DLayer
 
 struct MSELoss
 {
-    static auto with_extents(const Extents &extents) -> Result<MSELoss, DeviceError>;
+    static auto with_extents(const Extents &extents) -> Result<MSELoss, Error>;
 
     auto forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
         -> KernelJob<DeviceTensorConstView1f>;
@@ -1281,9 +1379,9 @@ struct Model
     std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> forward_jobs;
     std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> backward_jobs;
 
-    auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, DeviceError>;
-    auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, DeviceError>;
-    auto step(AdamOptimizer &optimizer, usize t) -> Result<Void, DeviceError>;
+    auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>;
+    auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>;
+    auto step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>;
 };
 
 struct AdamOptimizer
@@ -1291,7 +1389,7 @@ struct AdamOptimizer
     AdamParameters params;
     std::unordered_map<usize, AdamState> states;
 
-    static auto from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, DeviceError>;
+    static auto from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>;
 };
 
 struct ComputationGraph
@@ -1312,7 +1410,7 @@ struct ComputationGraph
 auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, std::string>;
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
-                  AdamState &state, const AdamParameters &params, usize t) -> Result<Void, DeviceError>;
+                  AdamState &state, const AdamParameters &params, usize t) -> Result<Void, Error>;
 
 }; // namespace vika
 
@@ -1352,6 +1450,59 @@ auto DeviceError::crash() -> void
     panic("Crashed due to: [%s] %s", cudaGetErrorName(_code), cudaGetErrorString(_code));
 }
 
+auto error_kind_name(ErrorKind kind) -> const char *
+{
+    switch (kind)
+    {
+    case ErrorKind::Device:
+        return "device";
+    case ErrorKind::Shape:
+        return "shape";
+    case ErrorKind::Graph:
+        return "graph";
+    case ErrorKind::Unsupported:
+        return "unsupported";
+    }
+    return "unknown";
+}
+
+auto Error::make(ErrorKind kind, const char *file, i32 line, const char *fmt, ...) -> Error
+{
+    Error err{};
+    err._kind = kind;
+    err._file = file;
+    err._line = line;
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(err._message, sizeof(err._message), fmt, args);
+    va_end(args);
+    return err;
+}
+
+auto Error::from_cuda(cudaError_t code, const char *file, i32 line) -> Error
+{
+    panic_if(!is_error(code), "Error::from_cuda called with cudaSuccess");
+
+    Error err{};
+    err._kind = ErrorKind::Device;
+    err._code = code;
+    err._file = file;
+    err._line = line;
+    snprintf(err._message, sizeof(err._message), "[%s] %s", cudaGetErrorName(code), cudaGetErrorString(code));
+    return err;
+}
+
+auto Error::describe() const -> std::string
+{
+    return std::string(_file) + ":" + std::to_string(_line) + ": " + error_kind_name(_kind) + ": " + _message;
+}
+
+auto Error::crash() const -> void
+{
+    panic("%s", describe().c_str());
+}
+
 // =============================================================================
 // Tensor Helpers
 // =============================================================================
@@ -1371,6 +1522,21 @@ auto element_count(const Extents &extents) -> usize
 {
     using namespace std;
     return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
+}
+
+auto checked_element_count(const Extents &extents) -> Result<usize, Error>
+{
+    usize count = 1;
+    for (usize i = 0; i < extents.size(); ++i)
+    {
+        const usize extent = extents[i];
+        if (extent != 0 && count > std::numeric_limits<usize>::max() / extent)
+        {
+            return error(VIKA_SHAPE_ERROR("element count overflows usize at dimension %zu (extent %zu)", i, extent));
+        }
+        count *= extent;
+    }
+    return ok(count);
 }
 
 // =============================================================================
@@ -1441,7 +1607,7 @@ inline auto adam_bias_correction(const AdamParameters &params, usize t) -> std::
 // =============================================================================
 
 auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, DeviceOwningTensor1f biases)
-    -> Result<DenseLayer, DeviceError>
+    -> Result<DenseLayer, Error>
 {
     const auto feature_count = weights.extent(0);
     const auto neuron_count = weights.extent(1);
@@ -1466,7 +1632,7 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, De
 }
 
 auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
-    -> Result<DenseLayer, DeviceError>
+    -> Result<DenseLayer, Error>
 {
     auto weights = unwrap_or_return(DeviceOwningTensor2f::empty({input_features, neuron_count}));
     auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
@@ -1529,7 +1695,7 @@ auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView
     return KernelJob<Void>{Void{}, stream};
 }
 
-auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, DeviceError>
+auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, Error>
 {
     auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
     auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
@@ -1595,7 +1761,7 @@ auto Flatten2DLayer::backward(DeviceTensorConstView2f upstream_gradient) const -
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensor4f filters,
                                DeviceOwningTensor1f biases, usize stride, usize padding)
-    -> Result<Conv2DLayer, DeviceError>
+    -> Result<Conv2DLayer, Error>
 {
     const usize kH = filters.extent(0);
     const usize kW = filters.extent(1);
@@ -1626,7 +1792,7 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
 }
 
 auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
-                             usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, DeviceError>
+                             usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, Error>
 {
     auto filters = unwrap_or_return(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
     auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
@@ -1697,7 +1863,7 @@ auto Conv2DLayer::update(const DeviceTensorConstView4f &d_filters_, const Device
 }
 
 auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
-                                  usize pool_w, usize stride) -> Result<MaxPool2DLayer, DeviceError>
+                                  usize pool_w, usize stride) -> Result<MaxPool2DLayer, Error>
 {
     const usize out_H = window_output_extent(input_height, pool_h, stride, 0);
     const usize out_W = window_output_extent(input_width, pool_w, stride, 0);
@@ -1749,7 +1915,7 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstView4f &upstream) -> Kernel
     return KernelJob<DeviceTensorConstView4f>{d_inputs.const_view(), stream};
 }
 
-auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, DeviceError>
+auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
 {
     auto loss = unwrap_or_return(DeviceOwningTensor1f::empty({1}));
     auto d_inputs = unwrap_or_return(DeviceOwningTensorf::empty(extents));
@@ -1957,7 +2123,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 auto result = DenseLayer::randomized(batch_size, pred_extents.at(1), s.output_features, s.seed);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().string());
+                    return error(result.unwrap_error().describe());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
@@ -1966,7 +2132,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                 auto result = SigmoidLayer::with_extents(pred_extents);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().string());
+                    return error(result.unwrap_error().describe());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
@@ -1981,7 +2147,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                                                       s.channels_out, s.stride, s.padding, s.seed);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().string());
+                    return error(result.unwrap_error().describe());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
@@ -1991,7 +2157,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
                                                            pred_extents.at(3), s.pool_height, s.pool_width, s.stride);
                 if (result.is_error())
                 {
-                    return error(result.unwrap_error().string());
+                    return error(result.unwrap_error().describe());
                 }
                 return ok(Layer::trainable(LayerKind{std::move(result.unwrap())}));
             }
@@ -2084,7 +2250,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, std::string>
     });
 }
 
-auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, DeviceError>
+auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>
 {
     forward_jobs.clear();
     forward_jobs.reserve(layers.size());
@@ -2115,7 +2281,7 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
     return ok(result.unwrap());
 }
 
-auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, DeviceError>
+auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
 {
     backward_jobs.clear();
     backward_jobs.reserve(layers.size());
@@ -2149,10 +2315,10 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, DeviceErr
 }
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
-                  AdamState &state, const AdamParameters &params, usize t) -> Result<Void, DeviceError>
+                  AdamState &state, const AdamParameters &params, usize t) -> Result<Void, Error>
 {
     return std::visit(
-        [&](auto &l) -> Result<Void, DeviceError> {
+        [&](auto &l) -> Result<Void, Error> {
             using T = std::decay_t<decltype(l)>;
             if constexpr (std::is_same_v<T, DenseLayer>)
             {
@@ -2188,7 +2354,7 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
 }
 
 auto AdamState::create(const DeviceOwningTensorf &weights, const DeviceOwningTensorf &biases)
-    -> Result<AdamState, DeviceError>
+    -> Result<AdamState, Error>
 {
     auto m_w = unwrap_or_return(DeviceOwningTensorf::zero_like(weights));
     auto v_w = unwrap_or_return(DeviceOwningTensorf::zero_like(weights));
@@ -2197,7 +2363,7 @@ auto AdamState::create(const DeviceOwningTensorf &weights, const DeviceOwningTen
     return ok(AdamState{std::move(m_w), std::move(v_w), std::move(m_b), std::move(v_b)});
 }
 
-auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, DeviceError>
+auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>
 {
     AdamOptimizer optimizer{params, {}};
 
@@ -2205,7 +2371,7 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
     {
         const auto &layer = model.layers[node_id.value];
         auto maybe_state = std::visit(
-            [](const auto &l) -> std::optional<Result<AdamState, DeviceError>> {
+            [](const auto &l) -> std::optional<Result<AdamState, Error>> {
                 using T = std::decay_t<decltype(l)>;
                 if constexpr (std::is_same_v<T, DenseLayer>)
                 {
@@ -2236,7 +2402,7 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
     return ok(std::move(optimizer));
 }
 
-auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, DeviceError>
+auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
 {
     for (const auto node_id : execution_order)
     {
