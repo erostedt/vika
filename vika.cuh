@@ -761,7 +761,7 @@ class DeviceOwningTensor
 };
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
-auto copy(DeviceOwningTensor<T> src, HostTensor<T> &dst) -> Result<Void, DeviceError>
+auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, DeviceError>
 {
     panic_if(src.extents() != dst.extents(), "element_mismatch");
     const auto err = cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
