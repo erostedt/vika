@@ -1492,7 +1492,7 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
 
     const auto block_dim = dim3(256);
     const auto grid_dim = dim3((upstream_gradient.extents[1] + block_dim.x - 1) / block_dim.x);
-    sum_rows<<<block_dim, grid_dim, 0, stream>>>(transposed(upstream_gradient), d_biases.view());
+    sum_rows<<<grid_dim, block_dim, 0, stream>>>(transposed(upstream_gradient), d_biases.view());
     return KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>{
         std::make_tuple(d_weights.const_view(), d_biases.const_view()), stream};
 }
