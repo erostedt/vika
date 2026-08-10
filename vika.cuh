@@ -477,6 +477,14 @@ inline auto byte_count(const Extents &extents) -> usize
     return element_count(extents) * sizeof(T);
 }
 
+// Output extent of one spatial dimension for a sliding window. Convolution and pooling
+// share this geometry; pooling is simply the padding == 0 case.
+// Requires stride > 0 and input + 2 * padding >= window.
+inline constexpr auto window_output_extent(usize input, usize window, usize stride, usize padding) -> usize
+{
+    return (input + 2 * padding - window) / stride + 1;
+}
+
 // =============================================================================
 // Host Tensors
 // =============================================================================
@@ -1592,8 +1600,8 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     const usize C_out = filters.extent(3);
 
     const usize C_in = filters.extent(2);
-    const usize out_H = (input_height + 2 * padding - kH) / stride + 1;
-    const usize out_W = (input_width + 2 * padding - kW) / stride + 1;
+    const usize out_H = window_output_extent(input_height, kH, stride, padding);
+    const usize out_W = window_output_extent(input_width, kW, stride, padding);
 
     auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
     auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
@@ -1689,8 +1697,8 @@ auto Conv2DLayer::update(const DeviceTensorConstView4f &d_filters_, const Device
 auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
                                   usize pool_w, usize stride) -> Result<MaxPool2DLayer, DeviceError>
 {
-    const usize out_H = (input_height - pool_h) / stride + 1;
-    const usize out_W = (input_width - pool_w) / stride + 1;
+    const usize out_H = window_output_extent(input_height, pool_h, stride, 0);
+    const usize out_W = window_output_extent(input_width, pool_w, stride, 0);
 
     auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
     auto argmax = unwrap_or_return((DeviceOwningTensor4u::empty({batch_size, out_H, out_W, channels})));
@@ -1883,8 +1891,8 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
         return error(std::string("conv2d: kernel width exceeds padded input width"));
     }
 
-    const auto out_H = (H + 2 * padding - kernel_height) / stride + 1;
-    const auto out_W = (W + 2 * padding - kernel_width) / stride + 1;
+    const auto out_H = window_output_extent(H, kernel_height, stride, padding);
+    const auto out_W = window_output_extent(W, kernel_width, stride, padding);
 
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
@@ -1921,8 +1929,8 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
         return error(std::string("maxpool2d: pool width exceeds input width"));
     }
 
-    const auto out_H = (H - pool_height) / stride + 1;
-    const auto out_W = (W - pool_width) / stride + 1;
+    const auto out_H = window_output_extent(H, pool_height, stride, 0);
+    const auto out_W = window_output_extent(W, pool_width, stride, 0);
 
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
