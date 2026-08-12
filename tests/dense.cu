@@ -71,10 +71,14 @@ UTEST(dense, layer_adam_update)
     using namespace vika;
     auto weights = DeviceOwningTensor2f::from({0.1f, -0.2f, 0.3f, 0.4f, -0.5f, 0.6f}, {2, 3}).unwrap();
     auto biases = DeviceOwningTensor1f::from({0.01f, -0.02f, 0.03f}).unwrap();
-    const auto d_weights = DeviceOwningTensor2f::from({0.7f, -0.8f, 0.9f, -1.0f, 1.1f, -1.2f}, {2, 3}).unwrap();
-    const auto d_biases = DeviceOwningTensor1f::from({0.05f, -0.06f, 0.07f}).unwrap();
 
     auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(biases)).unwrap();
+
+    // update() now reads gradients from the layer's own d_weights/d_biases via parameters()
+    // instead of taking them as arguments, so fixed gradients (standing in for what
+    // weight_gradients() would have computed) are fed in by overwriting those buffers directly.
+    layer.d_weights = DeviceOwningTensor2f::from({0.7f, -0.8f, 0.9f, -1.0f, 1.1f, -1.2f}, {2, 3}).unwrap();
+    layer.d_biases = DeviceOwningTensor1f::from({0.05f, -0.06f, 0.07f}).unwrap();
 
     const auto parameters = AdamParameters{
         .learning_rate = 0.1f,
@@ -119,18 +123,28 @@ UTEST(dense, layer_adam_update)
         {7.4925033e-06f, 1.0789205e-05f, 1.4685305e-05f},
     };
 
-    auto state = AdamState::create(layer.weights, layer.biases).unwrap();
+    // parameters() order is {weights, biases} (see DenseLayer::parameters), so states[0]/[1]
+    // are the weights'/biases' Adam state respectively.
+    std::vector<AdamState> states;
+    for (const auto &param : layer.parameters())
+    {
+        states.push_back(AdamState::create(param.value.to_extents()).unwrap());
+    }
 
     for (usize step = 1; step <= 3; ++step)
     {
-        layer.update(d_weights.const_view(), d_biases.const_view(), state, parameters, step).wait().unwrap();
+        auto jobs = layer.update(states, parameters, step);
+        for (auto &result : wait_on(jobs))
+        {
+            result.unwrap();
+        }
 
         const auto host_weights = download(layer.weights).unwrap();
         const auto host_biases = download(layer.biases).unwrap();
-        const auto host_m_weights = download(state.m_weights).unwrap();
-        const auto host_v_weights = download(state.v_weights).unwrap();
-        const auto host_m_biases = download(state.m_biases).unwrap();
-        const auto host_v_biases = download(state.v_biases).unwrap();
+        const auto host_m_weights = download(states[0].m).unwrap();
+        const auto host_v_weights = download(states[0].v).unwrap();
+        const auto host_m_biases = download(states[1].m).unwrap();
+        const auto host_v_biases = download(states[1].v).unwrap();
 
         const auto index = step - 1;
         ASSERT_TRUE(are_close(host_weights, expected_weights[index], 1e-5f));
