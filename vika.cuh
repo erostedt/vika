@@ -1042,6 +1042,23 @@ struct DeviceTensorView
         return result;
     }
 
+    // Slices the leading (batch) dimension down to the first n entries. Row-major storage means
+    // those are already a contiguous prefix of the same buffer, so this is just a reinterpreted
+    // extent, never a copy or allocation. A Result rather than a panic: the view is a
+    // self-contained type and shouldn't assume its caller already validated n, since a caller's
+    // actual batch size exceeding what a tensor was allocated for is an ordinary, expected-to-be-
+    // handled condition, not an internal invariant violation.
+    auto first_n(usize n) const -> Result<DeviceTensorView, Error>
+    {
+        if (n > extents[0])
+        {
+            return error(VIKA_SHAPE_ERROR("first_n: requested %zu rows but tensor only has %zu", n, extents[0]));
+        }
+        auto sliced_extents = to_extents();
+        sliced_extents[0] = n;
+        return ok(DeviceTensorView(data, sliced_extents));
+    }
+
     __host__ __device__ inline usize element_count() const
     {
         usize count = 1;
@@ -1732,6 +1749,19 @@ auto element_count(const Extents &extents) -> usize
     return accumulate(begin(extents), end(extents), 1ul, std::multiplies<>{});
 }
 
+// Every dimension but the leading one. A layer whose workspace is sized for a batch capacity
+// rather than one fixed batch size compares two extents on this rather than in full, since the
+// leading (batch) dimension is expected to vary from call to call.
+auto trailing_extents(const Extents &extents) -> Extents
+{
+    Extents result{};
+    for (usize i = 1; i < extents.size(); ++i)
+    {
+        result.push_back(extents[i]);
+    }
+    return result;
+}
+
 auto checked_element_count(const Extents &extents) -> Result<usize, Error>
 {
     usize count = 1;
@@ -1873,28 +1903,59 @@ auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron
 
 auto DenseLayer::forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
 {
-    const u32 M = outputs.extent(0);
+    if (inputs.extents[1] != weights.extent(0))
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
+            "dense forward: input has %zu features, layer expects %zu", inputs.extents[1], weights.extent(0)));
+    }
+
+    const usize k = inputs.extents[0];
+    auto sliced_result = outputs.view().first_n(k);
+    if (sliced_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(sliced_result.unwrap_error());
+    }
+    auto sliced_outputs = sliced_result.unwrap();
+    auto sliced_outputs_const = outputs.const_view().first_n(k).unwrap();
+
+    const u32 M = (u32)k;
     const u32 N = outputs.extent(1);
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    auto matmul_job = launch_kernel(matmul_kernel, outputs.const_view(), grid, block, stream.handle(), inputs,
-                                    weights.const_view(), outputs.view());
+    auto matmul_job = launch_kernel(matmul_kernel, sliced_outputs_const, grid, block, stream.handle(), inputs,
+                                    weights.const_view(), sliced_outputs);
     if (matmul_job.is_error())
     {
         return matmul_job;
     }
-    return launch_kernel(add_bias, outputs.const_view(), grid, block, stream.handle(), biases.const_view(),
-                         outputs.view());
+    return launch_kernel(add_bias, sliced_outputs_const, grid, block, stream.handle(), biases.const_view(),
+                         sliced_outputs);
 }
 
 auto DenseLayer::backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
 {
-    const u32 M = d_inputs.extent(0);
+    if (upstream_gradient.extents[1] != weights.extent(1))
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(
+            VIKA_SHAPE_ERROR("dense backward: upstream has %zu features, layer expects %zu",
+                             upstream_gradient.extents[1], weights.extent(1)));
+    }
+
+    const usize k = upstream_gradient.extents[0];
+    auto sliced_result = d_inputs.view().first_n(k);
+    if (sliced_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(sliced_result.unwrap_error());
+    }
+    auto sliced_d_inputs = sliced_result.unwrap();
+    auto sliced_d_inputs_const = d_inputs.const_view().first_n(k).unwrap();
+
+    const u32 M = (u32)k;
     const u32 N = d_inputs.extent(1);
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    return launch_kernel(matmul_kernel, d_inputs.const_view(), grid, block, stream.handle(), upstream_gradient,
-                         transposed(weights.const_view()), d_inputs.view());
+    return launch_kernel(matmul_kernel, sliced_d_inputs_const, grid, block, stream.handle(), upstream_gradient,
+                         transposed(weights.const_view()), sliced_d_inputs);
 }
 
 auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
@@ -1958,24 +2019,33 @@ auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, 
 auto SigmoidLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstView2f>
 {
     const auto input_extents = inputs.to_extents();
-    if (input_extents != outputs.extents())
+    if (trailing_extents(input_extents) != trailing_extents(outputs.extents()))
     {
         return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
             "sigmoid forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
             input_extents.size(), element_count(input_extents), outputs.extents().size(), outputs.element_count()));
     }
 
+    const usize k = input_extents[0];
+    auto sliced_result = outputs.view().first_n(k);
+    if (sliced_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(sliced_result.unwrap_error());
+    }
+    auto sliced_outputs = sliced_result.unwrap();
+    auto sliced_outputs_const = outputs.const_view().first_n(k).unwrap();
+
     usize threads = 256;
     usize blocks = (inputs.element_count() + threads - 1) / threads;
 
-    return launch_kernel(sigmoid_forward, outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(), inputs,
-                         outputs.view());
+    return launch_kernel(sigmoid_forward, sliced_outputs_const, dim3(blocks), dim3(threads), stream.handle(), inputs,
+                         sliced_outputs);
 }
 
 auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
 {
     const auto upstream_extents = upstream_gradient.to_extents();
-    if (upstream_extents != d_inputs.extents())
+    if (trailing_extents(upstream_extents) != trailing_extents(d_inputs.extents()))
     {
         return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
             "sigmoid backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
@@ -1991,11 +2061,21 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> 
                              d_inputs.element_count(), outputs.element_count()));
     }
 
+    const usize k = upstream_extents[0];
+    auto sliced_d_inputs_result = d_inputs.view().first_n(k);
+    if (sliced_d_inputs_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView2f>::failed(sliced_d_inputs_result.unwrap_error());
+    }
+    auto sliced_d_inputs = sliced_d_inputs_result.unwrap();
+    auto sliced_d_inputs_const = d_inputs.const_view().first_n(k).unwrap();
+    auto sliced_outputs_const = outputs.const_view().first_n(k).unwrap();
+
     usize threads = 256;
     usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
 
-    return launch_kernel(sigmoid_backward, d_inputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                         outputs.const_view(), upstream_gradient, d_inputs.view());
+    return launch_kernel(sigmoid_backward, sliced_d_inputs_const, dim3(blocks), dim3(threads), stream.handle(),
+                         sliced_outputs_const, upstream_gradient, sliced_d_inputs);
 }
 
 auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
@@ -2089,30 +2169,61 @@ auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_w
 
 auto Conv2DLayer::forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
 {
-    const usize N = outputs.extent(0);
+    if (trailing_extents(inputs.to_extents()) != trailing_extents(d_inputs.extents()))
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(
+            VIKA_SHAPE_ERROR("conv2d forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
+                             inputs.rank, inputs.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
+    }
+
+    const usize k = inputs.extents[0];
+    auto sliced_result = outputs.view().first_n(k);
+    if (sliced_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(sliced_result.unwrap_error());
+    }
+    auto sliced_outputs = sliced_result.unwrap();
+    auto sliced_outputs_const = outputs.const_view().first_n(k).unwrap();
+
     const usize H_out = outputs.extent(1);
     const usize W_out = outputs.extent(2);
     const usize C_out = outputs.extent(3);
 
     dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C_out);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C_out);
 
-    return launch_kernel(conv_forward, outputs.const_view(), grid, block, stream.handle(), inputs, filters.const_view(),
-                         biases.const_view(), outputs.view(), stride, padding);
+    return launch_kernel(conv_forward, sliced_outputs_const, grid, block, stream.handle(), inputs, filters.const_view(),
+                         biases.const_view(), sliced_outputs, stride, padding);
 }
 
 auto Conv2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
 {
-    const usize N = d_inputs.extent(0);
+    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(
+            VIKA_SHAPE_ERROR("conv2d backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
+                             upstream.rank, upstream.element_count(), outputs.extents().size(),
+                             outputs.element_count()));
+    }
+
+    const usize k = upstream.extents[0];
+    auto sliced_result = d_inputs.view().first_n(k);
+    if (sliced_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(sliced_result.unwrap_error());
+    }
+    auto sliced_d_inputs = sliced_result.unwrap();
+    auto sliced_d_inputs_const = d_inputs.const_view().first_n(k).unwrap();
+
     const usize H_in = d_inputs.extent(1);
     const usize W_in = d_inputs.extent(2);
     const usize C_in = d_inputs.extent(3);
 
     dim3 block(16, 16, 1);
-    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, N * C_in);
+    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C_in);
 
-    return launch_kernel(conv_backward, d_inputs.const_view(), grid, block, stream.handle(), upstream,
-                         filters.const_view(), d_inputs.view(), stride, padding);
+    return launch_kernel(conv_backward, sliced_d_inputs_const, grid, block, stream.handle(), upstream,
+                         filters.const_view(), sliced_d_inputs, stride, padding);
 }
 
 auto Conv2DLayer::weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
@@ -2183,32 +2294,76 @@ auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize in
 
 auto MaxPool2DLayer::forward(const DeviceTensorConstView4f &inputs) -> KernelJob<DeviceTensorConstView4f>
 {
-    const usize N = outputs.extent(0);
+    if (trailing_extents(inputs.to_extents()) != trailing_extents(d_inputs.extents()))
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(
+            VIKA_SHAPE_ERROR("maxpool forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
+                             inputs.rank, inputs.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
+    }
+
+    const usize k = inputs.extents[0];
+    auto sliced_outputs_result = outputs.view().first_n(k);
+    if (sliced_outputs_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(sliced_outputs_result.unwrap_error());
+    }
+    auto sliced_outputs = sliced_outputs_result.unwrap();
+    auto sliced_outputs_const = outputs.const_view().first_n(k).unwrap();
+
+    auto sliced_argmax_result = argmax.view().first_n(k);
+    if (sliced_argmax_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(sliced_argmax_result.unwrap_error());
+    }
+    auto sliced_argmax = sliced_argmax_result.unwrap();
+
     const usize H_out = outputs.extent(1);
     const usize W_out = outputs.extent(2);
     const usize C = outputs.extent(3);
 
     dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
 
-    return launch_kernel(maxpool_forward, outputs.const_view(), grid, block, stream.handle(), inputs, outputs.view(),
-                         argmax.view(), pool_h, pool_w, stride);
+    return launch_kernel(maxpool_forward, sliced_outputs_const, grid, block, stream.handle(), inputs, sliced_outputs,
+                         sliced_argmax, pool_h, pool_w, stride);
 }
 
 auto MaxPool2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
 {
+    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(VIKA_SHAPE_ERROR(
+            "maxpool backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
+            upstream.element_count(), outputs.extents().size(), outputs.element_count()));
+    }
+
+    const usize k = upstream.extents[0];
+    auto sliced_d_inputs_result = d_inputs.view().first_n(k);
+    if (sliced_d_inputs_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(sliced_d_inputs_result.unwrap_error());
+    }
+    auto sliced_d_inputs = sliced_d_inputs_result.unwrap();
+    auto sliced_d_inputs_const = d_inputs.const_view().first_n(k).unwrap();
+
+    auto sliced_argmax_result = argmax.const_view().first_n(k);
+    if (sliced_argmax_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstView4f>::failed(sliced_argmax_result.unwrap_error());
+    }
+    auto sliced_argmax_const = sliced_argmax_result.unwrap();
+
     const usize H_out = upstream.extents[1];
     const usize W_out = upstream.extents[2];
-    const usize N = d_inputs.extent(0);
     const usize C = d_inputs.extent(3);
 
     cudaMemsetAsync(d_inputs.data(), 0, d_inputs.byte_count(), stream.handle());
 
     dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, N * C);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
 
-    return launch_kernel(maxpool_backward, d_inputs.const_view(), grid, block, stream.handle(), upstream,
-                         argmax.const_view(), d_inputs.view());
+    return launch_kernel(maxpool_backward, sliced_d_inputs_const, grid, block, stream.handle(), upstream,
+                         sliced_argmax_const, sliced_d_inputs);
 }
 
 auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
@@ -2234,10 +2389,26 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
 auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
+    if (trailing_extents(predictions.to_extents()) != trailing_extents(d_inputs.extents()))
+    {
+        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
+            "mse backward: predictions is rank %zu with %zu elements, layer expects rank %zu with %zu",
+            predictions.rank, predictions.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
+    }
+
+    const usize k = predictions.extents[0];
+    auto sliced_result = d_inputs.view().first_n(k);
+    if (sliced_result.is_error())
+    {
+        return KernelJob<DeviceTensorConstViewf>::failed(sliced_result.unwrap_error());
+    }
+    auto sliced_d_inputs = sliced_result.unwrap();
+    auto sliced_d_inputs_const = d_inputs.const_view().first_n(k).unwrap();
+
     const usize n = predictions.element_count();
     const usize threads = 256;
-    return launch_kernel(mse_gradient_kernel, d_inputs.const_view(), dim3((n + threads - 1) / threads), dim3(threads),
-                         stream.handle(), predictions, targets, d_inputs.view());
+    return launch_kernel(mse_gradient_kernel, sliced_d_inputs_const, dim3((n + threads - 1) / threads), dim3(threads),
+                         stream.handle(), predictions, targets, sliced_d_inputs);
 }
 
 // =============================================================================

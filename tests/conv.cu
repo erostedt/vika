@@ -65,6 +65,82 @@ UTEST(conv, forward_valid_stride1_multi_channel)
     EXPECT_NEAR(out(1, 1, 1, 1), 349716.0f, 1e-4f);
 }
 
+UTEST(conv, forward_smaller_batch)
+{
+    using namespace vika;
+    constexpr usize capacity = 2;
+    constexpr usize actual_batch = 1;
+    constexpr usize height = 4;
+    constexpr usize width = 4;
+    constexpr usize channels = 2;
+
+    // Same per-sample values as index n=0 in forward_valid_stride1_multi_channel, but the layer
+    // has spare capacity (2) while the actual batch (1) is smaller. Each output element only
+    // depends on its own sample, so this should reproduce that test's n=0 values exactly - both
+    // in what gets computed and in the shape of what's returned.
+    auto cpu_inputs = HostTensor4f::zero({actual_batch, height, width, channels}).unwrap();
+    for (usize h = 0; h < height; ++h)
+    {
+        for (usize w = 0; w < width; ++w)
+        {
+            for (usize c = 0; c < channels; ++c)
+            {
+                cpu_inputs(0, h, w, c) = static_cast<f32>(c * 100 + h * 10 + w);
+            }
+        }
+    }
+    const auto inputs = upload(cpu_inputs).unwrap();
+
+    constexpr usize kernel_height = 3;
+    constexpr usize kernel_width = 3;
+    constexpr usize out_channels = 2;
+    std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
+    std::iota(std::begin(weights), std::end(weights), 0.0f);
+    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    auto layer =
+        Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
+
+    const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto out = download(gpu_out).unwrap();
+
+    EXPECT_EQ(out.extent(0), actual_batch);
+    EXPECT_EQ(out.extent(1), 2u);
+    EXPECT_EQ(out.extent(2), 2u);
+    EXPECT_EQ(out.extent(3), out_channels);
+
+    EXPECT_NEAR(out(0, 0, 0, 0), 21054.0f, 1e-4f);
+    EXPECT_NEAR(out(0, 0, 1, 0), 21360.0f, 1e-4f);
+    EXPECT_NEAR(out(0, 1, 0, 0), 24114.0f, 1e-4f);
+    EXPECT_NEAR(out(0, 1, 1, 0), 24420.0f, 1e-4f);
+    EXPECT_NEAR(out(0, 0, 0, 1), 22152.0f, 1e-4f);
+    EXPECT_NEAR(out(0, 0, 1, 1), 22476.0f, 1e-4f);
+    EXPECT_NEAR(out(0, 1, 0, 1), 25392.0f, 1e-4f);
+    EXPECT_NEAR(out(0, 1, 1, 1), 25716.0f, 1e-4f);
+}
+
+UTEST(conv, forward_batch_exceeds_capacity)
+{
+    using namespace vika;
+    constexpr usize height = 4;
+    constexpr usize width = 4;
+    constexpr usize channels = 2;
+
+    const auto inputs = upload(HostTensor4f::zero({2, height, width, channels}).unwrap()).unwrap();
+
+    constexpr usize kernel_height = 3;
+    constexpr usize kernel_width = 3;
+    constexpr usize out_channels = 2;
+    std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
+    std::iota(std::begin(weights), std::end(weights), 0.0f);
+    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    // Layer only has capacity for 1 sample, but the input batch has 2.
+    auto layer = Conv2DLayer::with_weights(1, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
+
+    ASSERT_TRUE(layer.forward(inputs.const_view()).is_error());
+}
+
 UTEST(conv, backward_valid_stride1)
 {
     using namespace vika;

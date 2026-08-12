@@ -21,6 +21,39 @@ UTEST(dense, layer_forward)
     ASSERT_TRUE(are_close(out, expected, 1e-5f));
 }
 
+UTEST(dense, layer_forward_smaller_batch)
+{
+    using namespace vika;
+    // Same weights and first two input rows as layer_forward, but the layer has spare capacity
+    // (4) while the actual batch (2) is smaller. forward() should slice down to just those 2
+    // rows - both in what it computes and in the shape of what it returns - instead of operating
+    // on, or reporting, the full capacity.
+    const auto inputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    auto weights = DeviceOwningTensor2f::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+
+    auto layer = DenseLayer::with_weights(4, std::move(weights), std::move(bias)).unwrap();
+    const auto outputs = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto out = download(outputs).unwrap();
+    const std::vector<f32> expected = {59.0f, 66.0f, 140.0f, 156.0f};
+
+    EXPECT_EQ(out.extent(0), 2u);
+    EXPECT_EQ(out.extent(1), 2u);
+    ASSERT_TRUE(are_close(out, expected, 1e-5f));
+}
+
+UTEST(dense, layer_forward_batch_exceeds_capacity)
+{
+    using namespace vika;
+    const auto inputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    auto weights = DeviceOwningTensor2f::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+
+    // Layer only has capacity for 1 sample, but the input batch has 2.
+    auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(bias)).unwrap();
+    ASSERT_TRUE(layer.forward(inputs.const_view()).is_error());
+}
+
 UTEST(dense, layer_backward)
 {
     using namespace vika;
@@ -35,6 +68,25 @@ UTEST(dense, layer_backward)
     const std::vector<f32> expected = {17.0f, 23.0f, 29.0f, 39.0f, 53.0f, 67.0f};
 
     EXPECT_EQ(out.extent(0), 2u);
+    EXPECT_EQ(out.extent(1), 3u);
+    ASSERT_TRUE(are_close(out, expected, 1e-5f));
+}
+
+UTEST(dense, layer_backward_smaller_batch)
+{
+    using namespace vika;
+    const auto d_outputs = DeviceOwningTensor2f::from({1.0f, 2.0f}, {1, 2}).unwrap();
+    auto weights = DeviceOwningTensor2f::from({5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    // Built with capacity for 2 samples, but only 1 upstream gradient row is actually passed in.
+    auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
+
+    const auto d_inputs = layer.backward(d_outputs.const_view()).wait().unwrap();
+
+    const auto out = download(d_inputs).unwrap();
+    const std::vector<f32> expected = {17.0f, 23.0f, 29.0f};
+
+    EXPECT_EQ(out.extent(0), 1u);
     EXPECT_EQ(out.extent(1), 3u);
     ASSERT_TRUE(are_close(out, expected, 1e-5f));
 }
