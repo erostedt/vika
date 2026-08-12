@@ -22,10 +22,6 @@
 #include <variant>
 #include <vector>
 
-using i32 = int32_t;
-using u32 = uint32_t;
-using f32 = float;
-using usize = size_t;
 
 #define VIKA_MAX_RANK 6
 
@@ -71,6 +67,11 @@ using usize = size_t;
 
 namespace vika
 {
+
+using i32 = int32_t;
+using u32 = uint32_t;
+using f32 = float;
+using usize = size_t;
 
 // =============================================================================
 // Generic Utilities

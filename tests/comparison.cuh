@@ -20,7 +20,7 @@ inline auto are_close(const vika::HostTensor<T> &actual, const vika::HostTensor<
     {
         return false;
     }
-    for (usize i = 0; i < actual.size(); ++i)
+    for (vika::usize i = 0; i < actual.size(); ++i)
     {
         if (std::abs(actual[i] - expected[i]) > tol)
         {
@@ -37,7 +37,7 @@ inline auto are_close(const vika::HostTensor<T> &actual, const std::vector<T> &e
     {
         return false;
     }
-    for (usize i = 0; i < actual.size(); ++i)
+    for (vika::usize i = 0; i < actual.size(); ++i)
     {
         if (std::abs(actual[i] - expected[i]) > tol)
         {
