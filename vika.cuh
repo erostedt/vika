@@ -22,8 +22,9 @@
 #include <variant>
 #include <vector>
 
-
+#ifndef VIKA_MAX_RANK
 #define VIKA_MAX_RANK 6
+#endif
 
 #ifndef VIKA_MAX_ERROR_MESSAGE
 #define VIKA_MAX_ERROR_MESSAGE 192
