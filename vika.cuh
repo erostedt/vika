@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <string>
 #include <tuple>
@@ -1584,15 +1585,22 @@ struct ComputationGraph
 {
     usize batch_size;
     std::vector<Node> nodes;
+    u32 seed = 0;
 
     auto input(Extents spatial_extents) -> NodeId;
-    auto dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, Error>;
+    auto dense(NodeId input, usize output_features, std::optional<u32> requested_seed = std::nullopt)
+        -> Result<NodeId, Error>;
     auto sigmoid(NodeId input) -> Result<NodeId, Error>;
     auto flatten(NodeId input) -> Result<NodeId, Error>;
-    auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride, usize padding,
-                u32 seed) -> Result<NodeId, Error>;
+    auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride,
+                usize padding, std::optional<u32> requested_seed = std::nullopt) -> Result<NodeId, Error>;
     auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, Error>;
     auto compile(NodeId output) -> Result<Model, Error>;
+
+  private:
+    // Rolls the graph's own seed forward and returns the new value, so each layer that omits an
+    // explicit seed gets a distinct, deterministic one derived from this graph's seed alone.
+    auto next_seed() -> u32;
 };
 
 auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, Error>;
@@ -1603,8 +1611,6 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
 }; // namespace vika
 
 #ifdef VIKA_IMPLEMENTATION
-
-#include <optional>
 
 namespace vika
 {
@@ -1717,7 +1723,7 @@ __host__ __device__ auto sigmoid(f32 x) -> f32
     return 1.0f / (1.0f + std::exp(-x));
 }
 
-__device__ inline auto pcg_hash(u32 input) -> u32
+__host__ __device__ inline auto pcg_hash(u32 input) -> u32
 {
     u32 state = input * 747796405u + 2891336453u;
     u32 word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -2166,6 +2172,12 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
 // Computation Graph
 // =============================================================================
 
+auto ComputationGraph::next_seed() -> u32
+{
+    seed = pcg_hash(seed);
+    return seed;
+}
+
 auto ComputationGraph::input(Extents spatial_extents) -> NodeId
 {
     Extents output_extents{};
@@ -2183,7 +2195,8 @@ auto ComputationGraph::input(Extents spatial_extents) -> NodeId
     return id;
 }
 
-auto ComputationGraph::dense(NodeId input, usize output_features, u32 seed) -> Result<NodeId, Error>
+auto ComputationGraph::dense(NodeId input, usize output_features, std::optional<u32> requested_seed)
+    -> Result<NodeId, Error>
 {
     if (input.value >= nodes.size())
     {
@@ -2196,9 +2209,10 @@ auto ComputationGraph::dense(NodeId input, usize output_features, u32 seed) -> R
         return error(VIKA_SHAPE_ERROR("dense: input must be rank 2 [N, features]"));
     }
 
+    const u32 resolved_seed = requested_seed.has_value() ? *requested_seed : next_seed();
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
-        .spec = DenseSpec{output_features, seed},
+        .spec = DenseSpec{output_features, resolved_seed},
         .output_extents = {in_extents[0], output_features},
         .inputs = {input},
     });
@@ -2251,7 +2265,7 @@ auto ComputationGraph::flatten(NodeId input) -> Result<NodeId, Error>
 }
 
 auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride,
-                              usize padding, u32 seed) -> Result<NodeId, Error>
+                              usize padding, std::optional<u32> requested_seed) -> Result<NodeId, Error>
 {
     if (input.value >= nodes.size())
     {
@@ -2279,9 +2293,10 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
     const auto out_H = window_output_extent(H, kernel_height, stride, padding);
     const auto out_W = window_output_extent(W, kernel_width, stride, padding);
 
+    const u32 resolved_seed = requested_seed.has_value() ? *requested_seed : next_seed();
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
-        .spec = Conv2DSpec{kernel_height, kernel_width, channels_out, stride, padding, seed},
+        .spec = Conv2DSpec{kernel_height, kernel_width, channels_out, stride, padding, resolved_seed},
         .output_extents = {in_extents[0], out_H, out_W, channels_out},
         .inputs = {input},
     });
