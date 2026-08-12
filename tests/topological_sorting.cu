@@ -20,7 +20,10 @@ UTEST(topological_sort, no_cyle)
     adj[ptr + 3] = {ptr + 1};
 
     const auto actual = topological_sort(adj).unwrap();
-    const vector<int *> expected = {ptr + 5, ptr + 4, ptr + 2, ptr + 0, ptr + 3, ptr + 1};
+    // 4 and 5 (both indegree 0), and 0 and 2 (once available), are unordered pairs in this DAG;
+    // the min-heap always advances the smallest available node, so this is the one deterministic
+    // order rather than one of several the old hash-bucket-ordered queue could have produced.
+    const vector<int *> expected = {ptr + 4, ptr + 5, ptr + 0, ptr + 2, ptr + 3, ptr + 1};
     EXPECT_TRUE(equal(begin(actual), end(actual), begin(expected), end(expected)));
 }
 

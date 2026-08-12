@@ -280,6 +280,9 @@ using Extents = FixedVector<usize, VIKA_MAX_RANK>;
 template <typename Node>
 using AdjecencyGraph = std::unordered_map<Node, std::vector<Node>>;
 
+template <typename Node>
+using MinHeap = std::priority_queue<Node, std::vector<Node>, std::greater<Node>>;
+
 struct Void
 {
 };
@@ -520,21 +523,25 @@ auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Nod
         }
     }
 
-    std::queue<Node> q{};
+    // A min-heap rather than a plain FIFO queue: seeding/ties are otherwise resolved by
+    // unordered_map's bucket order, which is a deterministic function of the hash table but not
+    // of anything a caller controls (declaration order, NodeId value, ...). Always advancing the
+    // smallest available node gives one canonical order regardless of where ties occur.
+    MinHeap<Node> heap{};
     for (const auto &[node, deg] : indegree)
     {
         if (deg == 0)
         {
-            q.push(node);
+            heap.push(node);
         }
     }
 
     std::vector<Node> order;
     order.reserve(indegree.size());
-    while (!q.empty())
+    while (!heap.empty())
     {
-        Node u = std::move(q.front());
-        q.pop();
+        Node u = std::move(heap.top());
+        heap.pop();
         order.push_back(u);
         const auto it = adj.find(u);
         if (it == adj.end())
@@ -547,7 +554,7 @@ auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Nod
             --indegree[v];
             if (indegree[v] == 0)
             {
-                q.push(v);
+                heap.push(v);
             }
         }
     }
