@@ -1565,8 +1565,14 @@ struct Model
     NodeId input_node;
     NodeId output_node;
 
-    std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> forward_jobs;
-    std::unordered_map<usize, KernelJob<DeviceTensorConstViewf>> backward_jobs;
+    // Indexed directly by NodeId::value, which is already a dense 0..layers.size()-1 index
+    // (same space layers/layer_inputs use) rather than an opaque hash key. Slots are optional
+    // because KernelJob<T> cannot be default-constructed (see KernelJob<T>'s Result<T, Error>,
+    // which requires DeviceTensorConstViewf to be default-constructible, and it deliberately
+    // is not) and because not every slot is ever written: the input node never gets a
+    // backward_jobs entry, since nothing needs its gradient.
+    std::vector<std::optional<KernelJob<DeviceTensorConstViewf>>> forward_jobs;
+    std::vector<std::optional<KernelJob<DeviceTensorConstViewf>>> backward_jobs;
 
     auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>;
     auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>;
@@ -2472,7 +2478,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
 auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>
 {
     forward_jobs.clear();
-    forward_jobs.reserve(layers.size());
+    forward_jobs.resize(layers.size());
 
     for (const auto node_id : execution_order)
     {
@@ -2486,17 +2492,17 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         DeviceTensorConstViewf pred_output = input;
         if (!preds.empty())
         {
-            pred_output = UNWRAP_OR_RETURN(forward_jobs.at(preds[0].value).wait());
+            pred_output = UNWRAP_OR_RETURN(forward_jobs[preds[0].value].value().wait());
         }
 
         auto job = std::visit(
             [&pred_output](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.forward(pred_output); },
             layers[node_id.value].kind);
 
-        forward_jobs.emplace(node_id.value, std::move(job));
+        forward_jobs[node_id.value] = std::move(job);
     }
 
-    auto result = forward_jobs.at(output_node.value).wait();
+    auto result = forward_jobs[output_node.value].value().wait();
     if (result.is_error())
     {
         return error(result.unwrap_error());
@@ -2507,8 +2513,8 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
 auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
 {
     backward_jobs.clear();
-    backward_jobs.reserve(layers.size());
-    backward_jobs.emplace(output_node.value, KernelJob<DeviceTensorConstViewf>::ready(loss_grad));
+    backward_jobs.resize(layers.size());
+    backward_jobs[output_node.value] = KernelJob<DeviceTensorConstViewf>::ready(loss_grad);
 
     for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it)
     {
@@ -2526,13 +2532,13 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
                 "backward: node %zu has %zu inputs, multi-input nodes are not supported", node_id.value, preds.size()));
         }
 
-        const auto upstream = UNWRAP_OR_RETURN(backward_jobs.at(node_id.value).wait());
+        const auto upstream = UNWRAP_OR_RETURN(backward_jobs[node_id.value].value().wait());
 
         auto d_input_job = std::visit(
             [&upstream](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.backward(upstream); },
             layers[node_id.value].kind);
 
-        backward_jobs.emplace(preds[0].value, std::move(d_input_job));
+        backward_jobs[preds[0].value] = std::move(d_input_job);
     }
 
     return ok(Void{});
@@ -2648,8 +2654,8 @@ auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
             continue;
         }
 
-        const auto forward_input = UNWRAP_OR_RETURN(forward_jobs.at(preds[0].value).wait());
-        const auto upstream = UNWRAP_OR_RETURN(backward_jobs.at(node_id.value).wait());
+        const auto forward_input = UNWRAP_OR_RETURN(forward_jobs[preds[0].value].value().wait());
+        const auto upstream = UNWRAP_OR_RETURN(backward_jobs[node_id.value].value().wait());
 
         auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
         if (result.is_error())
