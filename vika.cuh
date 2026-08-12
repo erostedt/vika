@@ -30,23 +30,23 @@
 #define VIKA_MAX_ERROR_MESSAGE 192
 #endif
 
-#define panic(fmt, ...)                                                                                                \
+#define VIKA_PANIC(fmt, ...)                                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
         fprintf(stderr, "Panicked: " fmt "\n", ##__VA_ARGS__);                                                         \
         exit(1);                                                                                                       \
     } while (0)
 
-#define panic_if(expr, fmt, ...)                                                                                       \
+#define VIKA_PANIC_IF(expr, fmt, ...)                                                                                       \
     do                                                                                                                 \
     {                                                                                                                  \
         if (expr)                                                                                                      \
         {                                                                                                              \
-            panic(fmt, ##__VA_ARGS__);                                                                                 \
+            VIKA_PANIC(fmt, ##__VA_ARGS__);                                                                                 \
         }                                                                                                              \
     } while (0)
 
-#define unwrap_or_return(expr)                                                                                         \
+#define UNWRAP_OR_RETURN(expr)                                                                                         \
     ({                                                                                                                 \
         auto _res = (expr);                                                                                            \
         if (_res.is_error())                                                                                           \
@@ -56,7 +56,7 @@
         std::move(_res.unwrap());                                                                                      \
     })
 
-#define return_on_cuda_error(cudacall)                                                                                 \
+#define VIKA_RETURN_ON_CUDA_ERROR(cudacall)                                                                                 \
     do                                                                                                                 \
     {                                                                                                                  \
         const auto _err = (cudacall);                                                                                  \
@@ -191,7 +191,7 @@ class FixedVector
 
     auto pop_back() -> void
     {
-        panic_if(m_size == 0, "Panicked: FixedVector::pop_back on empty vector\n");
+        VIKA_PANIC_IF(m_size == 0, "Panicked: FixedVector::pop_back on empty vector\n");
         --m_size;
     }
 
@@ -266,12 +266,12 @@ class FixedVector
 
     auto check_bounds(usize idx) const -> void
     {
-        panic_if(idx >= m_size, "FixedVector::at index %zu out of bounds (size=%zu)\n", idx, m_size);
+        VIKA_PANIC_IF(idx >= m_size, "FixedVector::at index %zu out of bounds (size=%zu)\n", idx, m_size);
     }
 
     auto check_not_full() const -> void
     {
-        panic_if(m_size >= Capacity, "FixedVector is at capacity (%zu)\n", Capacity);
+        VIKA_PANIC_IF(m_size >= Capacity, "FixedVector is at capacity (%zu)\n", Capacity);
     }
 };
 
@@ -347,13 +347,13 @@ class [[nodiscard]] Result
 
     auto unwrap() & -> T &
     {
-        panic_if(is_error(), "called unwrap() on Err Result");
+        VIKA_PANIC_IF(is_error(), "called unwrap() on Err Result");
         return std::get<T>(storage);
     }
 
     auto unwrap() const & -> const T &
     {
-        panic_if(is_error(), "called unwrap() on Err Result");
+        VIKA_PANIC_IF(is_error(), "called unwrap() on Err Result");
         return std::get<T>(storage);
     }
 
@@ -361,25 +361,25 @@ class [[nodiscard]] Result
     // reference into its storage would dangle as soon as the full expression ends.
     auto unwrap() && -> T
     {
-        panic_if(is_error(), "called unwrap() on Err Result");
+        VIKA_PANIC_IF(is_error(), "called unwrap() on Err Result");
         return std::move(std::get<T>(storage));
     }
 
     auto unwrap_error() & -> E &
     {
-        panic_if(is_ok(), "called unwrap_error() on Ok Result");
+        VIKA_PANIC_IF(is_ok(), "called unwrap_error() on Ok Result");
         return std::get<E>(storage);
     }
 
     auto unwrap_error() const & -> const E &
     {
-        panic_if(is_ok(), "called unwrap_error() on Ok Result");
+        VIKA_PANIC_IF(is_ok(), "called unwrap_error() on Ok Result");
         return std::get<E>(storage);
     }
 
     auto unwrap_error() && -> E
     {
-        panic_if(is_ok(), "called unwrap_error() on Ok Result");
+        VIKA_PANIC_IF(is_ok(), "called unwrap_error() on Ok Result");
         return std::move(std::get<E>(storage));
     }
 
@@ -713,7 +713,7 @@ class HostTensor
             return error(VIKA_SHAPE_ERROR("host tensor extents are empty"));
         }
 
-        const usize count = unwrap_or_return(checked_element_count(extents));
+        const usize count = UNWRAP_OR_RETURN(checked_element_count(extents));
         if (count == 0)
         {
             return error(VIKA_SHAPE_ERROR("host tensor extents contain a zero extent"));
@@ -723,13 +723,13 @@ class HostTensor
 
     static auto zero(const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = unwrap_or_return(Self::checked_size(extents));
+        const usize count = UNWRAP_OR_RETURN(Self::checked_size(extents));
         return ok(HostTensor(std::vector<T>(count, T{}), extents));
     }
 
     static auto empty(const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = unwrap_or_return(Self::checked_size(extents));
+        const usize count = UNWRAP_OR_RETURN(Self::checked_size(extents));
         return ok(HostTensor(std::vector<T>(count), extents));
     }
 
@@ -751,7 +751,7 @@ class HostTensor
 
     static auto copy_from(std::vector<T> data, const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = unwrap_or_return(Self::checked_size(extents));
+        const usize count = UNWRAP_OR_RETURN(Self::checked_size(extents));
         if (std::size(data) != count)
         {
             return error(VIKA_SHAPE_ERROR("host tensor data holds %zu elements but extents describe %zu",
@@ -766,9 +766,9 @@ class HostTensor
 
     HostTensor(std::vector<T> &&data, const Extents &extents) : _data(std::move(data)), _extents(extents)
     {
-        panic_if(_extents.empty(), "Empty extents!");
-        panic_if(size(_extents) == 0, "Extent was 0");
-        panic_if(_data.size() != size(_extents), "data/extents size mismatch");
+        VIKA_PANIC_IF(_extents.empty(), "Empty extents!");
+        VIKA_PANIC_IF(size(_extents) == 0, "Extent was 0");
+        VIKA_PANIC_IF(_data.size() != size(_extents), "data/extents size mismatch");
     }
 
   private:
@@ -811,7 +811,7 @@ class DeviceOwningTensor
   public:
     static auto empty(const Extents &extents) -> Result<Self, Error>
     {
-        const usize bytes = unwrap_or_return(vika::checked_byte_count<T>(extents));
+        const usize bytes = UNWRAP_OR_RETURN(vika::checked_byte_count<T>(extents));
 
         T *ptr = nullptr;
         const auto err = cudaMalloc(&ptr, bytes);
@@ -985,7 +985,7 @@ auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, Error>
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, Error>
 {
-    auto dst = unwrap_or_return(HostTensor<T>::empty(src.to_extents()));
+    auto dst = UNWRAP_OR_RETURN(HostTensor<T>::empty(src.to_extents()));
     const auto err = copy(src, dst);
     if (err.is_error())
     {
@@ -1555,7 +1555,7 @@ auto Error::make(ErrorKind kind, const char *file, i32 line, const char *fmt, ..
 
 auto Error::from_cuda(cudaError_t code, const char *file, i32 line) -> Error
 {
-    panic_if(!is_error(code), "Error::from_cuda called with cudaSuccess");
+    VIKA_PANIC_IF(!is_error(code), "Error::from_cuda called with cudaSuccess");
 
     Error err{};
     err._kind = ErrorKind::Device;
@@ -1573,7 +1573,7 @@ auto Error::describe() const -> std::string
 
 auto Error::crash() const -> void
 {
-    panic("%s", describe().c_str());
+    VIKA_PANIC("%s", describe().c_str());
 }
 
 // =============================================================================
@@ -1674,14 +1674,14 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, De
     const auto feature_count = weights.extent(0);
     const auto neuron_count = weights.extent(1);
 
-    auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensor2f::empty({batch_size, neuron_count}));
 
-    auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty({batch_size, feature_count}));
-    auto d_weights = unwrap_or_return(DeviceOwningTensor2f::empty_like(weights));
-    auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensor2f::empty({batch_size, feature_count}));
+    auto d_weights = UNWRAP_OR_RETURN(DeviceOwningTensor2f::empty_like(weights));
+    auto d_biases = UNWRAP_OR_RETURN(DeviceOwningTensor1f::empty_like(biases));
 
     cudaStream_t stream;
-    return_on_cuda_error(cudaStreamCreate(&stream));
+    VIKA_RETURN_ON_CUDA_ERROR(cudaStreamCreate(&stream));
     return ok<DenseLayer>({
         .outputs = std::move(outputs),
         .weights = std::move(weights),
@@ -1696,10 +1696,10 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, De
 auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
     -> Result<DenseLayer, Error>
 {
-    auto weights = unwrap_or_return(DeviceOwningTensor2f::empty({input_features, neuron_count}));
-    auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
+    auto weights = UNWRAP_OR_RETURN(DeviceOwningTensor2f::empty({input_features, neuron_count}));
+    auto biases = UNWRAP_OR_RETURN(DeviceOwningTensor1f::from(std::vector<f32>(neuron_count, 0.0f)));
 
-    unwrap_or_return(xavier_tensor(weights.view(), seed, input_features, neuron_count).wait());
+    UNWRAP_OR_RETURN(xavier_tensor(weights.view(), seed, input_features, neuron_count).wait());
 
     return with_weights(batch_size, std::move(weights), std::move(biases));
 }
@@ -1759,11 +1759,11 @@ auto DenseLayer::update(DeviceTensorConstView2f d_weights, DeviceTensorConstView
 
 auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, Error>
 {
-    auto outputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
-    auto d_inputs = unwrap_or_return(DeviceOwningTensor2f::empty(extents));
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensor2f::empty(extents));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensor2f::empty(extents));
 
     cudaStream_t stream;
-    return_on_cuda_error(cudaStreamCreate(&stream));
+    VIKA_RETURN_ON_CUDA_ERROR(cudaStreamCreate(&stream));
     return ok(SigmoidLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = stream});
 }
 
@@ -1865,13 +1865,13 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     const usize out_H = window_output_extent(input_height, kH, stride, padding);
     const usize out_W = window_output_extent(input_width, kW, stride, padding);
 
-    auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
-    auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
-    auto d_filters = unwrap_or_return(DeviceOwningTensor4f::empty_like(filters));
-    auto d_biases = unwrap_or_return(DeviceOwningTensor1f::empty_like(biases));
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, C_out}));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, C_in}));
+    auto d_filters = UNWRAP_OR_RETURN(DeviceOwningTensor4f::empty_like(filters));
+    auto d_biases = UNWRAP_OR_RETURN(DeviceOwningTensor1f::empty_like(biases));
 
     cudaStream_t stream;
-    return_on_cuda_error(cudaStreamCreate(&stream));
+    VIKA_RETURN_ON_CUDA_ERROR(cudaStreamCreate(&stream));
     return ok(Conv2DLayer{
         .outputs = std::move(outputs),
         .d_inputs = std::move(d_inputs),
@@ -1888,10 +1888,10 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
 auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
                              usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, Error>
 {
-    auto filters = unwrap_or_return(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
-    auto biases = unwrap_or_return(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
+    auto filters = UNWRAP_OR_RETURN(DeviceOwningTensor4f::empty({kH, kW, C_in, C_out}));
+    auto biases = UNWRAP_OR_RETURN(DeviceOwningTensor1f::from(std::vector<f32>(C_out, 0.0f)));
 
-    unwrap_or_return(xavier_tensor(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
+    UNWRAP_OR_RETURN(xavier_tensor(filters.view(), seed, kH * kW * C_in, kH * kW * C_out).wait());
 
     return with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride, padding);
 }
@@ -1962,12 +1962,12 @@ auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize in
     const usize out_H = window_output_extent(input_height, pool_h, stride, 0);
     const usize out_W = window_output_extent(input_width, pool_w, stride, 0);
 
-    auto outputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
-    auto argmax = unwrap_or_return((DeviceOwningTensor4u::empty({batch_size, out_H, out_W, channels})));
-    auto d_inputs = unwrap_or_return(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, channels}));
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensor4f::empty({batch_size, out_H, out_W, channels}));
+    auto argmax = UNWRAP_OR_RETURN((DeviceOwningTensor4u::empty({batch_size, out_H, out_W, channels})));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensor4f::empty({batch_size, input_height, input_width, channels}));
 
     cudaStream_t stream;
-    return_on_cuda_error(cudaStreamCreate(&stream));
+    VIKA_RETURN_ON_CUDA_ERROR(cudaStreamCreate(&stream));
     return ok(MaxPool2DLayer{
         .outputs = std::move(outputs),
         .argmax = std::move(argmax),
@@ -2011,11 +2011,11 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstView4f &upstream) -> Kernel
 
 auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
 {
-    auto loss = unwrap_or_return(DeviceOwningTensor1f::empty({1}));
-    auto d_inputs = unwrap_or_return(DeviceOwningTensorf::empty(extents));
+    auto loss = UNWRAP_OR_RETURN(DeviceOwningTensor1f::empty({1}));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
     cudaStream_t stream;
-    return_on_cuda_error(cudaStreamCreate(&stream));
+    VIKA_RETURN_ON_CUDA_ERROR(cudaStreamCreate(&stream));
     return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = stream});
 }
 
@@ -2348,7 +2348,7 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         DeviceTensorConstViewf pred_output = input;
         if (!preds.empty())
         {
-            pred_output = unwrap_or_return(forward_jobs.at(preds[0].value).wait());
+            pred_output = UNWRAP_OR_RETURN(forward_jobs.at(preds[0].value).wait());
         }
 
         auto job = std::visit(
@@ -2388,7 +2388,7 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
                 "backward: node %zu has %zu inputs, multi-input nodes are not supported", node_id.value, preds.size()));
         }
 
-        const auto upstream = unwrap_or_return(backward_jobs.at(node_id.value).wait());
+        const auto upstream = UNWRAP_OR_RETURN(backward_jobs.at(node_id.value).wait());
 
         auto d_input_job = std::visit(
             [&upstream](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.backward(upstream); },
@@ -2442,10 +2442,10 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
 auto AdamState::create(const DeviceOwningTensorf &weights, const DeviceOwningTensorf &biases)
     -> Result<AdamState, Error>
 {
-    auto m_w = unwrap_or_return(DeviceOwningTensorf::zero_like(weights));
-    auto v_w = unwrap_or_return(DeviceOwningTensorf::zero_like(weights));
-    auto m_b = unwrap_or_return(DeviceOwningTensorf::zero_like(biases));
-    auto v_b = unwrap_or_return(DeviceOwningTensorf::zero_like(biases));
+    auto m_w = UNWRAP_OR_RETURN(DeviceOwningTensorf::zero_like(weights));
+    auto v_w = UNWRAP_OR_RETURN(DeviceOwningTensorf::zero_like(weights));
+    auto m_b = UNWRAP_OR_RETURN(DeviceOwningTensorf::zero_like(biases));
+    auto v_b = UNWRAP_OR_RETURN(DeviceOwningTensorf::zero_like(biases));
     return ok(AdamState{std::move(m_w), std::move(v_w), std::move(m_b), std::move(v_b)});
 }
 
@@ -2510,8 +2510,8 @@ auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
             continue;
         }
 
-        const auto forward_input = unwrap_or_return(forward_jobs.at(preds[0].value).wait());
-        const auto upstream = unwrap_or_return(backward_jobs.at(node_id.value).wait());
+        const auto forward_input = UNWRAP_OR_RETURN(forward_jobs.at(preds[0].value).wait());
+        const auto upstream = UNWRAP_OR_RETURN(backward_jobs.at(node_id.value).wait());
 
         auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
         if (result.is_error())
