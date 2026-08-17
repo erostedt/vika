@@ -7,7 +7,7 @@
 UTEST(sigmoid, forward)
 {
     using namespace vika;
-    const auto inputs = DeviceOwningTensor2f::from({-2, -1, 0, 1, 2, 3}, {2, 3}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({-2, -1, 0, 1, 2, 3}, {2, 3}).unwrap();
     auto layer = SigmoidLayer::with_extents({2, 3}).unwrap();
     const auto outputs = layer.forward(inputs.const_view()).wait().unwrap();
 
@@ -22,7 +22,7 @@ UTEST(sigmoid, backward)
 {
     using namespace vika;
 
-    const auto upstream_gradient = DeviceOwningTensor2f::from({1.0, 2.0, 3.0, 4.0}, {2, 2}).unwrap();
+    const auto upstream_gradient = DeviceOwningTensorf::from({1.0, 2.0, 3.0, 4.0}, {2, 2}).unwrap();
     auto layer = SigmoidLayer::with_extents({2, 2}).unwrap();
     copy(HostTensor2f::from({0.0, 0.5, 0.7310585786300048793, 1.0}, {2, 2}).unwrap(), layer.outputs).unwrap();
 

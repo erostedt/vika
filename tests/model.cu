@@ -156,7 +156,7 @@ UTEST(model, forward_output_shape)
 
     auto model = graph.compile(x).unwrap();
 
-    const auto gpu_inputs = DeviceOwningTensor4f::empty({batch_size, 8, 8, 1}).unwrap();
+    const auto gpu_inputs = DeviceOwningTensorf::empty({batch_size, 8, 8, 1}).unwrap();
     const auto out = model.forward(gpu_inputs.const_view()).unwrap();
 
     EXPECT_EQ(out.rank, 2u);

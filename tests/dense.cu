@@ -7,9 +7,9 @@
 UTEST(dense, layer_forward)
 {
     using namespace vika;
-    const auto inputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
-    auto weights = DeviceOwningTensor2f::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
-    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    auto weights = DeviceOwningTensorf::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
 
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
     const auto outputs = layer.forward(inputs.const_view()).wait().unwrap();
@@ -28,9 +28,9 @@ UTEST(dense, layer_forward_smaller_batch)
     // (4) while the actual batch (2) is smaller. forward() should slice down to just those 2
     // rows - both in what it computes and in the shape of what it returns - instead of operating
     // on, or reporting, the full capacity.
-    const auto inputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
-    auto weights = DeviceOwningTensor2f::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
-    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    auto weights = DeviceOwningTensorf::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
 
     auto layer = DenseLayer::with_weights(4, std::move(weights), std::move(bias)).unwrap();
     const auto outputs = layer.forward(inputs.const_view()).wait().unwrap();
@@ -45,9 +45,9 @@ UTEST(dense, layer_forward_smaller_batch)
 UTEST(dense, layer_forward_batch_exceeds_capacity)
 {
     using namespace vika;
-    const auto inputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
-    auto weights = DeviceOwningTensor2f::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
-    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    auto weights = DeviceOwningTensorf::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
 
     // Layer only has capacity for 1 sample, but the input batch has 2.
     auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(bias)).unwrap();
@@ -57,9 +57,9 @@ UTEST(dense, layer_forward_batch_exceeds_capacity)
 UTEST(dense, layer_backward)
 {
     using namespace vika;
-    const auto d_outputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
-    auto weights = DeviceOwningTensor2f::from({5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}, {3, 2}).unwrap();
-    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    const auto d_outputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
+    auto weights = DeviceOwningTensorf::from({5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
 
     const auto d_inputs = layer.backward(d_outputs.const_view()).wait().unwrap();
@@ -75,9 +75,9 @@ UTEST(dense, layer_backward)
 UTEST(dense, layer_backward_smaller_batch)
 {
     using namespace vika;
-    const auto d_outputs = DeviceOwningTensor2f::from({1.0f, 2.0f}, {1, 2}).unwrap();
-    auto weights = DeviceOwningTensor2f::from({5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}, {3, 2}).unwrap();
-    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    const auto d_outputs = DeviceOwningTensorf::from({1.0f, 2.0f}, {1, 2}).unwrap();
+    auto weights = DeviceOwningTensorf::from({5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
     // Built with capacity for 2 samples, but only 1 upstream gradient row is actually passed in.
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
 
@@ -94,11 +94,11 @@ UTEST(dense, layer_backward_smaller_batch)
 UTEST(dense, layer_weight_gradients)
 {
     using namespace vika;
-    const auto inputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
-    const auto d_outputs = DeviceOwningTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    const auto d_outputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
 
-    auto weights = DeviceOwningTensor2f::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
-    auto bias = DeviceOwningTensor1f::from({1.0f, 2.0f}).unwrap();
+    auto weights = DeviceOwningTensorf::from({7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {3, 2}).unwrap();
+    auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
 
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
 
@@ -121,16 +121,16 @@ UTEST(dense, layer_weight_gradients)
 UTEST(dense, layer_adam_update)
 {
     using namespace vika;
-    auto weights = DeviceOwningTensor2f::from({0.1f, -0.2f, 0.3f, 0.4f, -0.5f, 0.6f}, {2, 3}).unwrap();
-    auto biases = DeviceOwningTensor1f::from({0.01f, -0.02f, 0.03f}).unwrap();
+    auto weights = DeviceOwningTensorf::from({0.1f, -0.2f, 0.3f, 0.4f, -0.5f, 0.6f}, {2, 3}).unwrap();
+    auto biases = DeviceOwningTensorf::from({0.01f, -0.02f, 0.03f}).unwrap();
 
     auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(biases)).unwrap();
 
     // update() now reads gradients from the layer's own weights.grad/biases.grad via parameters()
     // instead of taking them as arguments, so fixed gradients (standing in for what
     // weight_gradients() would have computed) are fed in by overwriting those buffers directly.
-    layer.weights.grad = DeviceOwningTensor2f::from({0.7f, -0.8f, 0.9f, -1.0f, 1.1f, -1.2f}, {2, 3}).unwrap();
-    layer.biases.grad = DeviceOwningTensor1f::from({0.05f, -0.06f, 0.07f}).unwrap();
+    layer.weights.grad = DeviceOwningTensorf::from({0.7f, -0.8f, 0.9f, -1.0f, 1.1f, -1.2f}, {2, 3}).unwrap();
+    layer.biases.grad = DeviceOwningTensorf::from({0.05f, -0.06f, 0.07f}).unwrap();
 
     const auto parameters = AdamParameters{
         .learning_rate = 0.1f,

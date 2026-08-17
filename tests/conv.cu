@@ -34,8 +34,8 @@ UTEST(conv, forward_valid_stride1_multi_channel)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
-    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer = Conv2DLayer::with_weights(batch, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
     const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
@@ -96,8 +96,8 @@ UTEST(conv, forward_smaller_batch)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
-    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer =
         Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
@@ -133,8 +133,8 @@ UTEST(conv, forward_batch_exceeds_capacity)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
-    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     // Layer only has capacity for 1 sample, but the input batch has 2.
     auto layer = Conv2DLayer::with_weights(1, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
@@ -170,8 +170,8 @@ UTEST(conv, backward_valid_stride1)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
-    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer = Conv2DLayer::with_weights(batch, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
     const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
@@ -264,8 +264,8 @@ UTEST(conv, backward_smaller_batch)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
-    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer =
         Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
