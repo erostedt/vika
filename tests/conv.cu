@@ -232,3 +232,70 @@ UTEST(conv, backward_valid_stride1)
     EXPECT_NEAR(d_weights(0, 0, 1, 1), 6690.4f, 1e-3f);
     EXPECT_NEAR(d_weights(2, 2, 1, 1), 6875.2f, 1e-3f);
 }
+
+UTEST(conv, backward_smaller_batch)
+{
+    using namespace vika;
+    constexpr usize capacity = 2;
+    constexpr usize actual_batch = 1;
+    constexpr usize height = 4;
+    constexpr usize width = 4;
+    constexpr usize channels = 2;
+
+    // Same per-sample values as index n=0 in backward_valid_stride1, but the layer has spare
+    // capacity (2) while the actual upstream batch (1) is smaller. Each output element only
+    // depends on its own sample, so this should reproduce that test's n=0 values exactly - both
+    // in what gets computed and in the shape of what's returned.
+    auto cpu_inputs = HostTensor4f::zero({actual_batch, height, width, channels}).unwrap();
+    for (usize h = 0; h < height; ++h)
+    {
+        for (usize w = 0; w < width; ++w)
+        {
+            for (usize c = 0; c < channels; ++c)
+            {
+                cpu_inputs(0, h, w, c) = static_cast<f32>(c * 100 + h * 10 + w);
+            }
+        }
+    }
+    const auto inputs = upload(cpu_inputs).unwrap();
+
+    constexpr usize kernel_height = 3;
+    constexpr usize kernel_width = 3;
+    constexpr usize out_channels = 2;
+    std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
+    std::iota(std::begin(weights), std::end(weights), 0.0f);
+    auto filters = DeviceOwningTensor4f::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto biases = DeviceOwningTensor1f::from({0, 0}).unwrap();
+    auto layer =
+        Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
+
+    const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
+
+    auto cpu_upstream =
+        HostTensor4f::zero({actual_batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
+    for (usize out_h = 0; out_h < gpu_out.extents[1]; ++out_h)
+    {
+        for (usize out_w = 0; out_w < gpu_out.extents[2]; ++out_w)
+        {
+            for (usize out_c = 0; out_c < gpu_out.extents[3]; ++out_c)
+            {
+                const auto idx = (out_c * gpu_out.extents[1] + out_h) * gpu_out.extents[2] + out_w;
+                cpu_upstream(0, out_h, out_w, out_c) = static_cast<f32>(idx + 1) * 0.1f;
+            }
+        }
+    }
+    const auto upstream = upload(cpu_upstream).unwrap();
+
+    const auto d_inputs = download(layer.backward(upstream.const_view()).wait().unwrap()).unwrap();
+
+    EXPECT_EQ(d_inputs.extent(0), actual_batch);
+    EXPECT_EQ(d_inputs.extent(1), height);
+    EXPECT_EQ(d_inputs.extent(2), width);
+    EXPECT_EQ(d_inputs.extent(3), channels);
+
+    EXPECT_NEAR(d_inputs(0, 0, 0, 0), 0.5f, 1e-4f);
+    EXPECT_NEAR(d_inputs(0, 1, 1, 0), 25.8f, 1e-4f);
+    EXPECT_NEAR(d_inputs(0, 3, 3, 0), 39.2f, 1e-4f);
+    EXPECT_NEAR(d_inputs(0, 0, 0, 1), 1.7f, 1e-4f);
+    EXPECT_NEAR(d_inputs(0, 2, 2, 1), 90.6f, 1e-4f);
+}
