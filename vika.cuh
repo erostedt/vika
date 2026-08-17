@@ -1332,21 +1332,43 @@ struct AdamParameters
 // optimizer step never writes gradients, only reads them, regardless of which overload of
 // parameters() produced this). Layers expose their full parameter list uniformly through
 // parameters() regardless of how many tensors they own, instead of every caller needing to know
-// each layer type's specific field names (weights/biases, filters/biases, ...).
-struct Parameter
+// each layer type's specific field names (weights/biases, filters/biases, ...). Named after
+// DeviceTensorView, for the same reason: this is a view (both fields are views, even though
+// value happens to be mutable), not an owner.
+struct ParameterView
 {
     DeviceTensorViewf value;
     DeviceTensorConstViewf grad;
 };
 
-// Read-only counterpart of Parameter, returned by the const overload of parameters() - a const
-// layer cannot hand out a mutable view of its own value, so callers that only need to inspect
-// parameters (e.g. to discover shapes) use this instead. Must stay in lockstep with Parameter's
-// order/count for a given layer, since AdamState entries are positional.
-struct ConstParameter
+// Read-only counterpart of ParameterView, returned by the const overload of parameters() - a
+// const layer cannot hand out a mutable view of its own value, so callers that only need to
+// inspect parameters (e.g. to discover shapes) use this instead. Must stay in lockstep with
+// ParameterView's order/count for a given layer, since AdamState entries are positional.
+struct ConstParameterView
 {
     DeviceTensorConstViewf value;
     DeviceTensorConstViewf grad;
+};
+
+// Owning counterpart of ParameterView/ConstParameterView, mirroring how DeviceOwningTensor
+// relates to DeviceTensorView: view()/const_view() are the same names and do the same job,
+// just bundling two tensors (a parameter and its gradient) instead of one. This is what a
+// layer actually stores; ParameterView/ConstParameterView are just what parameters() hands out.
+struct OwningParameter
+{
+    DeviceOwningTensorf value;
+    DeviceOwningTensorf grad;
+
+    auto view() -> ParameterView
+    {
+        return {value.view(), grad.const_view()};
+    }
+
+    auto const_view() const -> ConstParameterView
+    {
+        return {value.const_view(), grad.const_view()};
+    }
 };
 
 // Per parameter, not per layer: a layer with N parameters gets N independent AdamStates
@@ -1364,7 +1386,7 @@ struct AdamState
 // (mirroring forward()/backward()/weight_gradients()): the caller decides when to wait, so
 // independent parameters - and independent layers, each on their own stream - can all be
 // in flight before anything blocks.
-auto update_parameters(std::vector<Parameter> &parameters, std::vector<AdamState> &states, cudaStream_t stream,
+auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamState> &states, cudaStream_t stream,
                        const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>;
 
 __global__ auto matmul_kernel(DeviceTensorConstView2f a, DeviceTensorConstView2f b, DeviceTensorView2f out) -> void;
@@ -1442,18 +1464,16 @@ struct DenseLayer
     auto weight_gradients(const DeviceTensorConstView2f &inputs, const DeviceTensorConstView2f &upstream_gradient)
         -> KernelJob<std::tuple<DeviceTensorConstView2f, DeviceTensorConstView1f>>;
 
-    auto parameters() -> std::vector<Parameter>;
-    auto parameters() const -> std::vector<ConstParameter>;
+    auto parameters() -> std::vector<ParameterView>;
+    auto parameters() const -> std::vector<ConstParameterView>;
 
     auto update(std::vector<AdamState> &states, const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>;
 
     DeviceOwningTensor2f outputs;
-    DeviceOwningTensor2f weights;
-    DeviceOwningTensor1f biases;
+    OwningParameter weights;
+    OwningParameter biases;
 
     DeviceOwningTensor2f d_inputs;
-    DeviceOwningTensor2f d_weights;
-    DeviceOwningTensor1f d_biases;
 
     Stream stream;
 };
@@ -1500,17 +1520,15 @@ struct Conv2DLayer
     auto weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
         -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>;
 
-    auto parameters() -> std::vector<Parameter>;
-    auto parameters() const -> std::vector<ConstParameter>;
+    auto parameters() -> std::vector<ParameterView>;
+    auto parameters() const -> std::vector<ConstParameterView>;
 
     auto update(std::vector<AdamState> &states, const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>;
 
     DeviceOwningTensor4f outputs;
     DeviceOwningTensor4f d_inputs;
-    DeviceOwningTensor4f filters;
-    DeviceOwningTensor1f biases;
-    DeviceOwningTensor4f d_filters;
-    DeviceOwningTensor1f d_biases;
+    OwningParameter filters;
+    OwningParameter biases;
 
     usize stride;
     usize padding;
@@ -1865,7 +1883,7 @@ inline auto adam_bias_correction(const AdamParameters &params, usize t) -> std::
     return {correct(params.beta1), correct(params.beta2)};
 }
 
-auto update_parameters(std::vector<Parameter> &parameters, std::vector<AdamState> &states, cudaStream_t stream,
+auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamState> &states, cudaStream_t stream,
                        const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>
 {
     const auto [m_hat_scale, v_hat_scale] = adam_bias_correction(params, t);
@@ -1902,11 +1920,9 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensor2f weights, De
     auto stream = UNWRAP_OR_RETURN(Stream::create());
     return ok<DenseLayer>({
         .outputs = std::move(outputs),
-        .weights = std::move(weights),
-        .biases = std::move(biases),
+        .weights = {std::move(weights), std::move(d_weights)},
+        .biases = {std::move(biases), std::move(d_biases)},
         .d_inputs = std::move(d_inputs),
-        .d_weights = std::move(d_weights),
-        .d_biases = std::move(d_biases),
         .stream = std::move(stream),
     });
 }
@@ -1921,16 +1937,16 @@ auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron
     // second, throwaway one just for initialization.
     auto layer = UNWRAP_OR_RETURN(with_weights(batch_size, std::move(weights), std::move(biases)));
     UNWRAP_OR_RETURN(
-        xavier_tensor(layer.weights.view(), seed, input_features, neuron_count, layer.stream.handle()).wait());
+        xavier_tensor(layer.weights.value.view(), seed, input_features, neuron_count, layer.stream.handle()).wait());
     return ok(std::move(layer));
 }
 
 auto DenseLayer::forward(const DeviceTensorConstView2f &inputs) -> KernelJob<DeviceTensorConstView2f>
 {
-    if (inputs.extents[1] != weights.extent(0))
+    if (inputs.extents[1] != weights.value.extent(0))
     {
         return KernelJob<DeviceTensorConstView2f>::failed(VIKA_SHAPE_ERROR(
-            "dense forward: input has %zu features, layer expects %zu", inputs.extents[1], weights.extent(0)));
+            "dense forward: input has %zu features, layer expects %zu", inputs.extents[1], weights.value.extent(0)));
     }
 
     const usize k = inputs.extents[0];
@@ -1942,22 +1958,22 @@ auto DenseLayer::forward(const DeviceTensorConstView2f &inputs) -> KernelJob<Dev
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     auto matmul_job = launch_kernel(matmul_kernel, sliced_outputs_const, grid, block, stream.handle(), inputs,
-                                    weights.const_view(), sliced_outputs);
+                                    weights.value.const_view(), sliced_outputs);
     if (matmul_job.is_error())
     {
         return matmul_job;
     }
-    return launch_kernel(add_bias, sliced_outputs_const, grid, block, stream.handle(), biases.const_view(),
+    return launch_kernel(add_bias, sliced_outputs_const, grid, block, stream.handle(), biases.value.const_view(),
                          sliced_outputs);
 }
 
 auto DenseLayer::backward(const DeviceTensorConstView2f &upstream_gradient) -> KernelJob<DeviceTensorConstView2f>
 {
-    if (upstream_gradient.extents[1] != weights.extent(1))
+    if (upstream_gradient.extents[1] != weights.value.extent(1))
     {
         return KernelJob<DeviceTensorConstView2f>::failed(
             VIKA_SHAPE_ERROR("dense backward: upstream has %zu features, layer expects %zu",
-                             upstream_gradient.extents[1], weights.extent(1)));
+                             upstream_gradient.extents[1], weights.value.extent(1)));
     }
 
     const usize k = upstream_gradient.extents[0];
@@ -1968,7 +1984,7 @@ auto DenseLayer::backward(const DeviceTensorConstView2f &upstream_gradient) -> K
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     return launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream_gradient,
-                         transposed(weights.const_view()), sliced_d_inputs);
+                         transposed(weights.value.const_view()), sliced_d_inputs);
 }
 
 auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
@@ -1979,11 +1995,11 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
     const u32 N = d_inputs.extent(1);
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    const auto gradients = std::make_tuple(d_weights.const_view(), d_biases.const_view());
+    const auto gradients = std::make_tuple(weights.grad.const_view(), biases.grad.const_view());
 
     // NOTE: Run in separate streams?
     auto matmul_job = launch_kernel(matmul_kernel, gradients, grid, block, stream.handle(), transposed(inputs),
-                                    upstream_gradient, d_weights.view());
+                                    upstream_gradient, weights.grad.view());
     if (matmul_job.is_error())
     {
         return matmul_job;
@@ -1992,24 +2008,18 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstView2f &inputs,
     const auto block_dim = dim3(256);
     const auto grid_dim = dim3((upstream_gradient.extents[1] + block_dim.x - 1) / block_dim.x);
     return launch_kernel(sum_rows, gradients, grid_dim, block_dim, stream.handle(), transposed(upstream_gradient),
-                         d_biases.view());
+                         biases.grad.view());
 }
 
-auto DenseLayer::parameters() -> std::vector<Parameter>
+auto DenseLayer::parameters() -> std::vector<ParameterView>
 {
-    return {
-        {weights.view(), d_weights.const_view()},
-        {biases.view(), d_biases.const_view()},
-    };
+    return {weights.view(), biases.view()};
 }
 
 // Must stay in lockstep with the non-const overload above: same order, same count.
-auto DenseLayer::parameters() const -> std::vector<ConstParameter>
+auto DenseLayer::parameters() const -> std::vector<ConstParameterView>
 {
-    return {
-        {weights.const_view(), d_weights.const_view()},
-        {biases.const_view(), d_biases.const_view()},
-    };
+    return {weights.const_view(), biases.const_view()};
 }
 
 auto DenseLayer::update(std::vector<AdamState> &states, const AdamParameters &params, usize t)
@@ -2142,10 +2152,8 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     return ok(Conv2DLayer{
         .outputs = std::move(outputs),
         .d_inputs = std::move(d_inputs),
-        .filters = std::move(filters),
-        .biases = std::move(biases),
-        .d_filters = std::move(d_filters),
-        .d_biases = std::move(d_biases),
+        .filters = {std::move(filters), std::move(d_filters)},
+        .biases = {std::move(biases), std::move(d_biases)},
         .stride = stride,
         .padding = padding,
         .stream = std::move(stream),
@@ -2162,8 +2170,9 @@ auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_w
     // second, throwaway one just for initialization.
     auto layer = UNWRAP_OR_RETURN(
         with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride, padding));
-    UNWRAP_OR_RETURN(
-        xavier_tensor(layer.filters.view(), seed, kH * kW * C_in, kH * kW * C_out, layer.stream.handle()).wait());
+    UNWRAP_OR_RETURN(xavier_tensor(layer.filters.value.view(), seed, kH * kW * C_in, kH * kW * C_out,
+                                   layer.stream.handle())
+                        .wait());
     return ok(std::move(layer));
 }
 
@@ -2187,7 +2196,7 @@ auto Conv2DLayer::forward(const DeviceTensorConstView4f &inputs) -> KernelJob<De
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C_out);
 
     return launch_kernel(conv_forward, sliced_outputs.const_view(), grid, block, stream.handle(), inputs,
-                         filters.const_view(), biases.const_view(), sliced_outputs, stride, padding);
+                         filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
 }
 
 auto Conv2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob<DeviceTensorConstView4f>
@@ -2210,44 +2219,38 @@ auto Conv2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob
     dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C_in);
 
     return launch_kernel(conv_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
-                         filters.const_view(), sliced_d_inputs, stride, padding);
+                         filters.value.const_view(), sliced_d_inputs, stride, padding);
 }
 
 auto Conv2DLayer::weight_gradients(const DeviceTensorConstView4f &inputs, const DeviceTensorConstView4f &upstream)
     -> KernelJob<std::tuple<DeviceTensorConstView4f, DeviceTensorConstView1f>>
 {
-    const usize filter_count = d_filters.element_count();
-    const usize C_out = d_biases.element_count();
+    const usize filter_count = filters.grad.element_count();
+    const usize C_out = biases.grad.element_count();
     const usize threads = 256;
 
-    const auto gradients = std::make_tuple(d_filters.const_view(), d_biases.const_view());
+    const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
     auto weight_job =
         launch_kernel(conv_weight_gradients, gradients, dim3((filter_count + threads - 1) / threads), dim3(threads),
-                      stream.handle(), inputs, upstream, d_filters.view(), stride, padding);
+                      stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
     if (weight_job.is_error())
     {
         return weight_job;
     }
     return launch_kernel(conv_bias_gradients, gradients, dim3((C_out + threads - 1) / threads), dim3(threads),
-                         stream.handle(), upstream, d_biases.view());
+                         stream.handle(), upstream, biases.grad.view());
 }
 
-auto Conv2DLayer::parameters() -> std::vector<Parameter>
+auto Conv2DLayer::parameters() -> std::vector<ParameterView>
 {
-    return {
-        {filters.view(), d_filters.const_view()},
-        {biases.view(), d_biases.const_view()},
-    };
+    return {filters.view(), biases.view()};
 }
 
 // Must stay in lockstep with the non-const overload above: same order, same count.
-auto Conv2DLayer::parameters() const -> std::vector<ConstParameter>
+auto Conv2DLayer::parameters() const -> std::vector<ConstParameterView>
 {
-    return {
-        {filters.const_view(), d_filters.const_view()},
-        {biases.const_view(), d_biases.const_view()},
-    };
+    return {filters.const_view(), biases.const_view()};
 }
 
 auto Conv2DLayer::update(std::vector<AdamState> &states, const AdamParameters &params, usize t)
@@ -2745,9 +2748,9 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
             using T = std::decay_t<decltype(l)>;
             if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer>)
             {
-                // weight_gradients() writes into the layer's own d_weights/d_biases (or
-                // d_filters/d_biases) buffers; update()'s parameters() reads them back from
-                // there, so nothing needs to be threaded through by hand here.
+                // weight_gradients() writes into the layer's own weights.grad/biases.grad (or
+                // filters.grad/biases.grad) buffers; update()'s parameters() reads them back
+                // from there, so nothing needs to be threaded through by hand here.
                 auto wg_result = l.weight_gradients(forward_input, upstream).wait();
                 if (wg_result.is_error())
                 {
@@ -2782,7 +2785,7 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
     {
         const auto &layer = model.layers[node_id.value];
         auto maybe_params = std::visit(
-            [](const auto &l) -> std::optional<std::vector<ConstParameter>> {
+            [](const auto &l) -> std::optional<std::vector<ConstParameterView>> {
                 using T = std::decay_t<decltype(l)>;
                 if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer>)
                 {

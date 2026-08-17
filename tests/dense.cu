@@ -126,11 +126,11 @@ UTEST(dense, layer_adam_update)
 
     auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(biases)).unwrap();
 
-    // update() now reads gradients from the layer's own d_weights/d_biases via parameters()
+    // update() now reads gradients from the layer's own weights.grad/biases.grad via parameters()
     // instead of taking them as arguments, so fixed gradients (standing in for what
     // weight_gradients() would have computed) are fed in by overwriting those buffers directly.
-    layer.d_weights = DeviceOwningTensor2f::from({0.7f, -0.8f, 0.9f, -1.0f, 1.1f, -1.2f}, {2, 3}).unwrap();
-    layer.d_biases = DeviceOwningTensor1f::from({0.05f, -0.06f, 0.07f}).unwrap();
+    layer.weights.grad = DeviceOwningTensor2f::from({0.7f, -0.8f, 0.9f, -1.0f, 1.1f, -1.2f}, {2, 3}).unwrap();
+    layer.biases.grad = DeviceOwningTensor1f::from({0.05f, -0.06f, 0.07f}).unwrap();
 
     const auto parameters = AdamParameters{
         .learning_rate = 0.1f,
@@ -191,8 +191,8 @@ UTEST(dense, layer_adam_update)
             result.unwrap();
         }
 
-        const auto host_weights = download(layer.weights).unwrap();
-        const auto host_biases = download(layer.biases).unwrap();
+        const auto host_weights = download(layer.weights.value).unwrap();
+        const auto host_biases = download(layer.biases.value).unwrap();
         const auto host_m_weights = download(states[0].m).unwrap();
         const auto host_v_weights = download(states[0].v).unwrap();
         const auto host_m_biases = download(states[1].m).unwrap();
