@@ -1059,6 +1059,11 @@ struct DeviceTensorView
         return ok(DeviceTensorView(data, sliced_extents));
     }
 
+    auto const_view() const -> DeviceTensorView<const T>
+    {
+        return DeviceTensorView<const T>(data, to_extents());
+    }
+
     __host__ __device__ inline usize element_count() const
     {
         usize count = 1;
@@ -2200,10 +2205,9 @@ auto Conv2DLayer::backward(const DeviceTensorConstView4f &upstream) -> KernelJob
 {
     if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
     {
-        return KernelJob<DeviceTensorConstView4f>::failed(
-            VIKA_SHAPE_ERROR("conv2d backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             upstream.rank, upstream.element_count(), outputs.extents().size(),
-                             outputs.element_count()));
+        return KernelJob<DeviceTensorConstView4f>::failed(VIKA_SHAPE_ERROR(
+            "conv2d backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
+            upstream.element_count(), outputs.extents().size(), outputs.element_count()));
     }
 
     const usize k = upstream.extents[0];
