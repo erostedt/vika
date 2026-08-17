@@ -1929,8 +1929,25 @@ auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamS
 auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensorf weights, DeviceOwningTensorf biases)
     -> Result<DenseLayer, Error>
 {
+    if (weights.extents().size() != 2)
+    {
+        return error(VIKA_SHAPE_ERROR("dense: weights must be rank 2 [features, neurons], got rank %zu",
+                                      weights.extents().size()));
+    }
+    if (biases.extents().size() != 1)
+    {
+        return error(
+            VIKA_SHAPE_ERROR("dense: biases must be rank 1 [neurons], got rank %zu", biases.extents().size()));
+    }
+
     const auto feature_count = weights.extent(0);
     const auto neuron_count = weights.extent(1);
+
+    if (biases.extent(0) != neuron_count)
+    {
+        return error(
+            VIKA_SHAPE_ERROR("dense: biases has %zu neurons, weights expects %zu", biases.extent(0), neuron_count));
+    }
 
     auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, neuron_count}));
 
@@ -2173,11 +2190,28 @@ auto Flatten2DLayer::backward(DeviceTensorConstViewf upstream_gradient) const ->
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensorf filters,
                                DeviceOwningTensorf biases, usize stride, usize padding) -> Result<Conv2DLayer, Error>
 {
+    if (filters.extents().size() != 4)
+    {
+        return error(VIKA_SHAPE_ERROR("conv2d: filters must be rank 4 [kH, kW, C_in, C_out], got rank %zu",
+                                      filters.extents().size()));
+    }
+    if (biases.extents().size() != 1)
+    {
+        return error(
+            VIKA_SHAPE_ERROR("conv2d: biases must be rank 1 [C_out], got rank %zu", biases.extents().size()));
+    }
+
     const usize kH = filters.extent(0);
     const usize kW = filters.extent(1);
     const usize C_out = filters.extent(3);
 
     const usize C_in = filters.extent(2);
+
+    if (biases.extent(0) != C_out)
+    {
+        return error(VIKA_SHAPE_ERROR("conv2d: biases has %zu channels, filters expects %zu", biases.extent(0), C_out));
+    }
+
     const usize out_H = window_output_extent(input_height, kH, stride, padding);
     const usize out_W = window_output_extent(input_width, kW, stride, padding);
 
