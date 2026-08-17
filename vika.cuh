@@ -1706,6 +1706,27 @@ struct AdamOptimizer
     static auto from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>;
 };
 
+// One full training step: forward, loss forward+backward, backward, optimizer step. Returns the
+// scalar loss value so callers can log/monitor progress without a separate loss_fn.forward()
+// call of their own, same as every example's training loop already computes for printing.
+//
+// Templated on Loss rather than a variant: MSELoss is the only loss today, but anything sharing
+// its forward(predictions, targets)/backward(predictions, targets) shape (CCE, once it exists)
+// works here unchanged - no reason to invent a LossKind enumeration for a single member.
+template <typename Loss>
+auto train_step(Model &model, Loss &loss_fn, DeviceTensorConstViewf inputs, DeviceTensorConstViewf targets,
+                AdamOptimizer &optimizer, usize t) -> Result<f32, Error>
+{
+    const auto predictions = UNWRAP_OR_RETURN(model.forward(inputs));
+    const auto loss_value = UNWRAP_OR_RETURN(loss_fn.forward(predictions, targets).wait());
+    const auto loss_grad = UNWRAP_OR_RETURN(loss_fn.backward(predictions, targets).wait());
+    UNWRAP_OR_RETURN(model.backward(loss_grad));
+    UNWRAP_OR_RETURN(model.step(optimizer, t));
+
+    const auto loss_cpu = UNWRAP_OR_RETURN(download(loss_value));
+    return ok(loss_cpu[0]);
+}
+
 struct ComputationGraph
 {
     usize batch_size;

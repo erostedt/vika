@@ -30,16 +30,11 @@ int main()
 
     for (usize t = 1; t <= epochs; ++t)
     {
-        const auto out = model.forward(inputs.const_view()).unwrap();
-        const auto loss_view = loss_fn.forward(out, targets.const_view()).wait().unwrap();
-        const auto loss_grad = loss_fn.backward(out, targets.const_view()).wait().unwrap();
-        model.backward(loss_grad).unwrap();
-        model.step(optimizer, t).unwrap();
+        const auto loss = train_step(model, loss_fn, inputs.const_view(), targets.const_view(), optimizer, t).unwrap();
 
         if (t % 1000 == 0)
         {
-            const auto loss_cpu = download(loss_view).unwrap();
-            printf("step %5zu | loss: %.6f\n", t, loss_cpu[0]);
+            printf("step %5zu | loss: %.6f\n", t, loss);
         }
     }
 
