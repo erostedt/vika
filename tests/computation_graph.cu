@@ -146,3 +146,63 @@ UTEST(computation_graph, flatten_shape)
     x = graph.flatten(x).unwrap();
     EXPECT_EXTENTS(graph.nodes[1].output_extents, Extents({4, 288})); // 6*6*8 = 288
 }
+
+UTEST(computation_graph, add_shape)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    auto b = graph.dense(x, 16, 43).unwrap();
+    auto sum = graph.add({a, b}).unwrap();
+
+    EXPECT_EXTENTS(graph.nodes[sum.value].output_extents, Extents({4, 16}));
+    EXPECT_EQ(graph.nodes[sum.value].inputs.size(), 2u);
+    EXPECT_EQ(graph.nodes[sum.value].inputs[0].value, a.value);
+    EXPECT_EQ(graph.nodes[sum.value].inputs[1].value, b.value);
+}
+
+UTEST(computation_graph, add_n_ary)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    auto b = graph.dense(x, 16, 43).unwrap();
+    auto c = graph.dense(x, 16, 44).unwrap();
+    auto sum = graph.add({a, b, c}).unwrap();
+
+    EXPECT_EXTENTS(graph.nodes[sum.value].output_extents, Extents({4, 16}));
+    EXPECT_EQ(graph.nodes[sum.value].inputs.size(), 3u);
+}
+
+UTEST(computation_graph, add_too_few_inputs)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    const auto result = graph.add({a});
+    EXPECT_TRUE(result.is_error());
+}
+
+UTEST(computation_graph, add_invalid_node_id)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    const auto result = graph.add({a, NodeId{99}});
+    EXPECT_TRUE(result.is_error());
+}
+
+UTEST(computation_graph, add_shape_mismatch)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    auto b = graph.dense(x, 8, 43).unwrap();
+    const auto result = graph.add({a, b});
+    EXPECT_TRUE(result.is_error());
+}

@@ -12,7 +12,7 @@ UTEST(dense, layer_forward)
     auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
 
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
-    const auto outputs = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto outputs = layer.forward({inputs.const_view()}).wait().unwrap();
     const auto out = download(outputs).unwrap();
     const std::vector<f32> expected = {59.0f, 66.0f, 140.0f, 156.0f};
 
@@ -33,7 +33,7 @@ UTEST(dense, layer_forward_smaller_batch)
     auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
 
     auto layer = DenseLayer::with_weights(4, std::move(weights), std::move(bias)).unwrap();
-    const auto outputs = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto outputs = layer.forward({inputs.const_view()}).wait().unwrap();
     const auto out = download(outputs).unwrap();
     const std::vector<f32> expected = {59.0f, 66.0f, 140.0f, 156.0f};
 
@@ -51,7 +51,7 @@ UTEST(dense, layer_forward_batch_exceeds_capacity)
 
     // Layer only has capacity for 1 sample, but the input batch has 2.
     auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(bias)).unwrap();
-    ASSERT_TRUE(layer.forward(inputs.const_view()).is_error());
+    ASSERT_TRUE(layer.forward({inputs.const_view()}).is_error());
 }
 
 UTEST(dense, layer_backward)
@@ -62,7 +62,7 @@ UTEST(dense, layer_backward)
     auto bias = DeviceOwningTensorf::from({1.0f, 2.0f}).unwrap();
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
 
-    const auto d_inputs = layer.backward(d_outputs.const_view()).wait().unwrap();
+    const auto d_inputs = layer.backward(d_outputs.const_view())[0].wait().unwrap();
 
     const auto out = download(d_inputs).unwrap();
     const std::vector<f32> expected = {17.0f, 23.0f, 29.0f, 39.0f, 53.0f, 67.0f};
@@ -81,7 +81,7 @@ UTEST(dense, layer_backward_smaller_batch)
     // Built with capacity for 2 samples, but only 1 upstream gradient row is actually passed in.
     auto layer = DenseLayer::with_weights(2, std::move(weights), std::move(bias)).unwrap();
 
-    const auto d_inputs = layer.backward(d_outputs.const_view()).wait().unwrap();
+    const auto d_inputs = layer.backward(d_outputs.const_view())[0].wait().unwrap();
 
     const auto out = download(d_inputs).unwrap();
     const std::vector<f32> expected = {17.0f, 23.0f, 29.0f};

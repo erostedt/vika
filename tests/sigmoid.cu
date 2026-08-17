@@ -9,7 +9,7 @@ UTEST(sigmoid, forward)
     using namespace vika;
     const auto inputs = DeviceOwningTensorf::from({-2, -1, 0, 1, 2, 3}, {2, 3}).unwrap();
     auto layer = SigmoidLayer::with_extents({2, 3}).unwrap();
-    const auto outputs = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto outputs = layer.forward({inputs.const_view()}).wait().unwrap();
 
     const auto out = download(outputs).unwrap();
     const std::vector<f32> expected = {0.11920292202211755, 0.2689414213699951, 0.5,
@@ -26,7 +26,7 @@ UTEST(sigmoid, backward)
     auto layer = SigmoidLayer::with_extents({2, 2}).unwrap();
     copy(HostTensor2f::from({0.0, 0.5, 0.7310585786300048793, 1.0}, {2, 2}).unwrap(), layer.outputs).unwrap();
 
-    const auto outputs = layer.backward(upstream_gradient.const_view()).wait().unwrap();
+    const auto outputs = layer.backward(upstream_gradient.const_view())[0].wait().unwrap();
 
     const auto out = download(outputs).unwrap();
     const std::vector<f32> expected = {0.0, 0.5, 0.5898357997244455576, 0.0};

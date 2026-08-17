@@ -47,17 +47,21 @@
         }                                                                                                              \
     } while (0)
 
-// Works for any enclosing return type with an implicit Err<Error> constructor - both
-// Result<T, Error> and KernelJob<T> qualify, so this covers ordinary Result-returning
-// functions as well as forward()/backward()-style functions returning a KernelJob. No T
-// argument needed: `return error(...)` converts via the return statement itself, to
-// whatever the enclosing function actually declared.
+// Works for any enclosing return type with an implicit Err<Error> constructor - Result<T, Error>
+// and KernelJob<T> directly, and std::vector<KernelJob<T>> (a layer's backward(), which can
+// return one gradient per predecessor) via its initializer-list constructor, since each element
+// of a braced-init-list still converts through KernelJob's implicit Err<Error> constructor.
+// Always braced for that reason - `return {error(...)}` behaves identically to the unbraced
+// `return error(...)` for Result/KernelJob (list-initialization from a single Err<Error> argument
+// just calls the same non-explicit constructor), so one form covers every return shape instead of
+// needing a separate macro for the vector case. No T argument needed either way: the conversion
+// happens via the return statement itself, to whatever the enclosing function actually declared.
 #define UNWRAP_OR_RETURN(expr)                                                                                         \
     ({                                                                                                                 \
         auto _res = (expr);                                                                                            \
         if (_res.is_error())                                                                                           \
         {                                                                                                              \
-            return error(_res.unwrap_error());                                                                         \
+            return {error(_res.unwrap_error())};                                                                       \
         }                                                                                                              \
         std::move(_res.unwrap());                                                                                      \
     })
@@ -1434,11 +1438,13 @@ __global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConst
 __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void;
 
-// accum[i] += delta[i] for every element. Used to sum multiple gradient contributions into one
-// node's upstream when a node has more than one consumer (see accumulate_contributions). Safe to
-// have accum also be one of the buffers a caller reads elsewhere: every thread only ever touches
-// its own index, so there is no cross-element read/write to race.
-__global__ auto accumulate_gradient(DeviceTensorConstViewf delta, DeviceTensorViewf accum) -> void;
+// accum[i] += delta[i] for every element. Two unrelated uses share this: summing multiple
+// gradient contributions into one node's upstream when a node has more than one consumer (see
+// accumulate_contributions), and AddLayer's forward (out = a + b, computed as out = a then
+// accumulate_into(b, out)). Safe to have accum also be one of the buffers a caller reads
+// elsewhere: every thread only ever touches its own index, so there is no cross-element
+// read/write to race.
+__global__ auto accumulate_into(DeviceTensorConstViewf delta, DeviceTensorViewf accum) -> void;
 
 __host__ __device__ auto sigmoid(f32 x) -> f32;
 
@@ -1458,9 +1464,9 @@ struct DenseLayer
     static auto randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
         -> Result<DenseLayer, Error>;
 
-    auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>;
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstViewf>;
+    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     auto weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream_gradient)
         -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
@@ -1483,9 +1489,9 @@ struct SigmoidLayer
 {
     static auto with_extents(const Extents &extents) -> Result<SigmoidLayer, Error>;
 
-    auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>;
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstViewf>;
+    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     DeviceOwningTensorf outputs;
     DeviceOwningTensorf d_inputs;
@@ -1498,9 +1504,9 @@ struct Flatten2DLayer
     // TODO: CHECK RANK SIZE
     static auto with_extents(const Extents &extents) -> Flatten2DLayer;
 
-    auto forward(DeviceTensorConstViewf inputs) const -> KernelJob<DeviceTensorConstViewf>;
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(DeviceTensorConstViewf upstream_gradient) const -> KernelJob<DeviceTensorConstViewf>;
+    auto backward(DeviceTensorConstViewf upstream_gradient) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     Extents extents;
 };
@@ -1514,9 +1520,9 @@ struct Conv2DLayer
     static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
                            usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, Error>;
 
-    auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>;
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(const DeviceTensorConstViewf &upstream) -> KernelJob<DeviceTensorConstViewf>;
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     auto weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream)
         -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
@@ -1542,9 +1548,9 @@ struct MaxPool2DLayer
     static auto with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
                              usize pool_w, usize stride) -> Result<MaxPool2DLayer, Error>;
 
-    auto forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>;
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(const DeviceTensorConstViewf &upstream) -> KernelJob<DeviceTensorConstViewf>;
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     DeviceOwningTensorf outputs;
     DeviceOwningTensoru argmax;
@@ -1553,6 +1559,28 @@ struct MaxPool2DLayer
     usize pool_h;
     usize pool_w;
     usize stride;
+
+    Stream stream;
+};
+
+// N-ary: elementwise sum of every input, all the same shape. backward() needs no workspace or
+// kernel launch at all - d/dx_i(sum) = 1 for every input, so the same upstream gradient flows
+// unchanged to all of them (see AddLayer::backward). forward() does need its own outputs buffer:
+// it can't write into any input's own buffer in place, since another consumer downstream of that
+// input (fan-out) may still need its value unchanged.
+struct AddLayer
+{
+    // input_count must be at least 2 - stored because backward() has no other way to know how
+    // many (identical) gradients to return; nothing about its own signature communicates it.
+    static auto with_extents(const Extents &extents, usize input_count) -> Result<AddLayer, Error>;
+
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
+
+    // input_count jobs out, not one - the same upstream gradient routed to every input.
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+
+    DeviceOwningTensorf outputs;
+    usize input_count;
 
     Stream stream;
 };
@@ -1611,7 +1639,14 @@ struct MaxPool2DSpec
     usize pool_height, pool_width, stride;
 };
 
-using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, MaxPool2DSpec, FlattenSpec>;
+// N-ary: however many inputs Node::inputs holds, elementwise-summed, all the same shape. No
+// count stored here - make_layer already receives one Extents per input (pred_extents.size()),
+// so a separate field would just be a second, could-get-out-of-sync source of the same number.
+struct AddSpec
+{
+};
+
+using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, MaxPool2DSpec, FlattenSpec, AddSpec>;
 
 struct Node
 {
@@ -1622,11 +1657,12 @@ struct Node
 
 struct InputLayer
 {
-    auto forward(DeviceTensorConstViewf input) const -> KernelJob<DeviceTensorConstViewf>;
-    auto backward(DeviceTensorConstViewf upstream) const -> KernelJob<DeviceTensorConstViewf>;
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>;
+    auto backward(DeviceTensorConstViewf upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 };
 
-using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer>;
+using LayerKind =
+    std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer, AddLayer>;
 
 struct Layer
 {
@@ -1741,6 +1777,7 @@ struct ComputationGraph
     auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride, usize padding,
                 std::optional<u32> requested_seed = std::nullopt) -> Result<NodeId, Error>;
     auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, Error>;
+    auto add(std::vector<NodeId> inputs) -> Result<NodeId, Error>;
     auto compile(NodeId output) -> Result<Model, Error>;
 
   private:
@@ -1749,7 +1786,11 @@ struct ComputationGraph
     auto next_seed() -> u32;
 };
 
-auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, Error>;
+// One Extents per predecessor, in Node::inputs order - plural because AddSpec (and future
+// multi-input specs) need more than one. Every existing single-input spec just reads
+// pred_extents[0]; compile() is the only caller and always passes one entry per input.
+auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Extents> &pred_extents)
+    -> Result<Layer, Error>;
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
                   std::vector<AdamState> &states, const AdamParameters &params, usize t) -> Result<Void, Error>;
@@ -1844,6 +1885,22 @@ auto trailing_extents(const Extents &extents) -> Extents
         result.push_back(extents[i]);
     }
     return result;
+}
+
+// Every layer's forward() takes a vector of predecessor views instead of a fixed number of
+// named parameters, so nothing at the type level stops a caller from passing the wrong count -
+// indexing inputs[0]/inputs[1] on a too-short vector would be silent undefined behavior instead
+// of a caught error. Every forward() checks this first, via UNWRAP_OR_RETURN, before touching
+// any element.
+auto check_input_count(const std::vector<DeviceTensorConstViewf> &inputs, usize expected, const char *layer_name)
+    -> Result<Void, Error>
+{
+    if (inputs.size() != expected)
+    {
+        return error(
+            VIKA_SHAPE_ERROR("%s: expects exactly %zu input(s), got %zu", layer_name, expected, inputs.size()));
+    }
+    return ok(Void{});
 }
 
 auto checked_element_count(const Extents &extents) -> Result<usize, Error>
@@ -1957,8 +2014,7 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensorf weights, Dev
     }
     if (biases.extents().size() != 1)
     {
-        return error(
-            VIKA_SHAPE_ERROR("dense: biases must be rank 1 [neurons], got rank %zu", biases.extents().size()));
+        return error(VIKA_SHAPE_ERROR("dense: biases must be rank 1 [neurons], got rank %zu", biases.extents().size()));
     }
 
     const auto feature_count = weights.extent(0);
@@ -2000,16 +2056,19 @@ auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron
     return ok(std::move(layer));
 }
 
-auto DenseLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>
+auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    if (trailing_extents(inputs.to_extents()) != trailing_extents(d_inputs.extents()))
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "dense forward"));
+    const auto &input = inputs[0];
+
+    if (trailing_extents(input.to_extents()) != trailing_extents(d_inputs.extents()))
     {
         return KernelJob<DeviceTensorConstViewf>::failed(
             VIKA_SHAPE_ERROR("dense forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             inputs.rank, inputs.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
+                             input.rank, input.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
     }
 
-    const usize k = inputs.extents[0];
+    const usize k = input.extents[0];
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
     auto sliced_outputs_const = sliced_outputs.const_view();
 
@@ -2017,7 +2076,7 @@ auto DenseLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<Devi
     const u32 N = outputs.extent(1);
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    auto matmul_job = launch_kernel(matmul_kernel, sliced_outputs_const, grid, block, stream.handle(), inputs,
+    auto matmul_job = launch_kernel(matmul_kernel, sliced_outputs_const, grid, block, stream.handle(), input,
                                     weights.value.const_view(), sliced_outputs);
     if (matmul_job.is_error())
     {
@@ -2027,14 +2086,15 @@ auto DenseLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<Devi
                          sliced_outputs);
 }
 
-auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstViewf>
+auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
+    -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     if (trailing_extents(upstream_gradient.to_extents()) != trailing_extents(outputs.extents()))
     {
-        return KernelJob<DeviceTensorConstViewf>::failed(
+        return {KernelJob<DeviceTensorConstViewf>::failed(
             VIKA_SHAPE_ERROR("dense backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
                              upstream_gradient.rank, upstream_gradient.element_count(), outputs.extents().size(),
-                             outputs.element_count()));
+                             outputs.element_count()))};
     }
 
     const usize k = upstream_gradient.extents[0];
@@ -2044,8 +2104,8 @@ auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> Ke
     const u32 N = d_inputs.extent(1);
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    return launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream_gradient,
-                         transposed(weights.value.const_view()), sliced_d_inputs);
+    return {launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream_gradient,
+                          transposed(weights.value.const_view()), sliced_d_inputs)};
 }
 
 auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream_gradient)
@@ -2115,9 +2175,12 @@ auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, 
         SigmoidLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
 }
 
-auto SigmoidLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>
+auto SigmoidLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    const auto input_extents = inputs.to_extents();
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "sigmoid forward"));
+    const auto &input = inputs[0];
+
+    const auto input_extents = input.to_extents();
     if (trailing_extents(input_extents) != trailing_extents(outputs.extents()))
     {
         return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
@@ -2129,29 +2192,30 @@ auto SigmoidLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<De
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     usize threads = 256;
-    usize blocks = (inputs.element_count() + threads - 1) / threads;
+    usize blocks = (input.element_count() + threads - 1) / threads;
 
     return launch_kernel(sigmoid_forward, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                         inputs, sliced_outputs);
+                         input, sliced_outputs);
 }
 
-auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> KernelJob<DeviceTensorConstViewf>
+auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
+    -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     const auto upstream_extents = upstream_gradient.to_extents();
     if (trailing_extents(upstream_extents) != trailing_extents(d_inputs.extents()))
     {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
+        return {KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
             "sigmoid backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
             upstream_extents.size(), element_count(upstream_extents), d_inputs.extents().size(),
-            d_inputs.element_count()));
+            d_inputs.element_count()))};
     }
 
     // Invariant: with_extents allocates both from the same extents.
     if (d_inputs.extents() != outputs.extents())
     {
-        return KernelJob<DeviceTensorConstViewf>::failed(
+        return {KernelJob<DeviceTensorConstViewf>::failed(
             VIKA_SHAPE_ERROR("sigmoid backward: gradient holds %zu elements but outputs hold %zu",
-                             d_inputs.element_count(), outputs.element_count()));
+                             d_inputs.element_count(), outputs.element_count()))};
     }
 
     const usize k = upstream_extents[0];
@@ -2160,8 +2224,8 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient) -> 
     usize threads = 256;
     usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
 
-    return launch_kernel(sigmoid_backward, sliced_d_inputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                         outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs);
+    return {launch_kernel(sigmoid_backward, sliced_d_inputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+                          outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
 }
 
 auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
@@ -2169,9 +2233,13 @@ auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
     return {extents};
 }
 
-auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> KernelJob<DeviceTensorConstViewf>
+auto Flatten2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const
+    -> KernelJob<DeviceTensorConstViewf>
 {
-    const auto input_extents = inputs.to_extents();
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "flatten forward"));
+    const auto &input = inputs[0];
+
+    const auto input_extents = input.to_extents();
     if (input_extents != extents)
     {
         return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
@@ -2179,33 +2247,35 @@ auto Flatten2DLayer::forward(DeviceTensorConstViewf inputs) const -> KernelJob<D
             input_extents.size(), element_count(input_extents), extents.size(), element_count(extents)));
     }
 
-    const auto batch = inputs.extents[0];
+    const auto batch = input.extents[0];
     const usize features =
-        std::accumulate(inputs.extents + 1, inputs.extents + extents.size(), 1ul, std::multiplies<usize>{});
-    return KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(inputs.data, {batch, features}));
+        std::accumulate(input.extents + 1, input.extents + extents.size(), 1ul, std::multiplies<usize>{});
+    return KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(input.data, {batch, features}));
 }
 
-auto InputLayer::forward(DeviceTensorConstViewf input) const -> KernelJob<DeviceTensorConstViewf>
+auto InputLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>
 {
-    return KernelJob<DeviceTensorConstViewf>::ready(input);
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "input forward"));
+    return KernelJob<DeviceTensorConstViewf>::ready(inputs[0]);
 }
 
-auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> KernelJob<DeviceTensorConstViewf>
+auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    return KernelJob<DeviceTensorConstViewf>::ready(upstream);
+    return {KernelJob<DeviceTensorConstViewf>::ready(upstream)};
 }
 
-auto Flatten2DLayer::backward(DeviceTensorConstViewf upstream_gradient) const -> KernelJob<DeviceTensorConstViewf>
+auto Flatten2DLayer::backward(DeviceTensorConstViewf upstream_gradient) const
+    -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     const auto upstream_extents = upstream_gradient.to_extents();
     if (element_count(upstream_extents) != element_count(extents))
     {
-        return KernelJob<DeviceTensorConstViewf>::failed(
+        return {KernelJob<DeviceTensorConstViewf>::failed(
             VIKA_SHAPE_ERROR("flatten backward: upstream holds %zu elements, layer extents hold %zu",
-                             element_count(upstream_extents), element_count(extents)));
+                             element_count(upstream_extents), element_count(extents)))};
     }
 
-    return KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream_gradient.data, extents));
+    return {KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream_gradient.data, extents))};
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensorf filters,
@@ -2218,8 +2288,7 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     }
     if (biases.extents().size() != 1)
     {
-        return error(
-            VIKA_SHAPE_ERROR("conv2d: biases must be rank 1 [C_out], got rank %zu", biases.extents().size()));
+        return error(VIKA_SHAPE_ERROR("conv2d: biases must be rank 1 [C_out], got rank %zu", biases.extents().size()));
     }
 
     const usize kH = filters.extent(0);
@@ -2268,16 +2337,19 @@ auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_w
     return ok(std::move(layer));
 }
 
-auto Conv2DLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>
+auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    if (trailing_extents(inputs.to_extents()) != trailing_extents(d_inputs.extents()))
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "conv2d forward"));
+    const auto &input = inputs[0];
+
+    if (trailing_extents(input.to_extents()) != trailing_extents(d_inputs.extents()))
     {
         return KernelJob<DeviceTensorConstViewf>::failed(
             VIKA_SHAPE_ERROR("conv2d forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             inputs.rank, inputs.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
+                             input.rank, input.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
     }
 
-    const usize k = inputs.extents[0];
+    const usize k = input.extents[0];
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     const usize H_out = outputs.extent(1);
@@ -2287,17 +2359,17 @@ auto Conv2DLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<Dev
     dim3 block(16, 16, 1);
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C_out);
 
-    return launch_kernel(conv_forward, sliced_outputs.const_view(), grid, block, stream.handle(), inputs,
+    return launch_kernel(conv_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
 }
 
-auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> KernelJob<DeviceTensorConstViewf>
+auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
     {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
+        return {KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
             "conv2d backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
-            upstream.element_count(), outputs.extents().size(), outputs.element_count()));
+            upstream.element_count(), outputs.extents().size(), outputs.element_count()))};
     }
 
     const usize k = upstream.extents[0];
@@ -2310,8 +2382,8 @@ auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> KernelJob<
     dim3 block(16, 16, 1);
     dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C_in);
 
-    return launch_kernel(conv_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
-                         filters.value.const_view(), sliced_d_inputs, stride, padding);
+    return {launch_kernel(conv_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
+                          filters.value.const_view(), sliced_d_inputs, stride, padding)};
 }
 
 auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream)
@@ -2389,16 +2461,19 @@ auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize in
     });
 }
 
-auto MaxPool2DLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<DeviceTensorConstViewf>
+auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    if (trailing_extents(inputs.to_extents()) != trailing_extents(d_inputs.extents()))
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "maxpool forward"));
+    const auto &input = inputs[0];
+
+    if (trailing_extents(input.to_extents()) != trailing_extents(d_inputs.extents()))
     {
         return KernelJob<DeviceTensorConstViewf>::failed(
             VIKA_SHAPE_ERROR("maxpool forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             inputs.rank, inputs.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
+                             input.rank, input.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
     }
 
-    const usize k = inputs.extents[0];
+    const usize k = input.extents[0];
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
     auto sliced_argmax = UNWRAP_OR_RETURN(argmax.view().first_n(k));
 
@@ -2409,17 +2484,17 @@ auto MaxPool2DLayer::forward(const DeviceTensorConstViewf &inputs) -> KernelJob<
     dim3 block(16, 16, 1);
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
 
-    return launch_kernel(maxpool_forward, sliced_outputs.const_view(), grid, block, stream.handle(), inputs,
+    return launch_kernel(maxpool_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs, sliced_argmax, pool_h, pool_w, stride);
 }
 
-auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> KernelJob<DeviceTensorConstViewf>
+auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
     {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
+        return {KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
             "maxpool backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
-            upstream.element_count(), outputs.extents().size(), outputs.element_count()));
+            upstream.element_count(), outputs.extents().size(), outputs.element_count()))};
     }
 
     const usize k = upstream.extents[0];
@@ -2434,8 +2509,76 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> KernelJ
     dim3 block(16, 16, 1);
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
 
-    return launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
-                         UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs);
+    return {launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
+                          UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs)};
+}
+
+auto AddLayer::with_extents(const Extents &extents, usize input_count) -> Result<AddLayer, Error>
+{
+    if (input_count < 2)
+    {
+        return error(VIKA_SHAPE_ERROR("add: input_count must be at least 2, got %zu", input_count));
+    }
+
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    return ok(AddLayer{.outputs = std::move(outputs), .input_count = input_count, .stream = std::move(stream)});
+}
+
+auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
+{
+    UNWRAP_OR_RETURN(check_input_count(inputs, input_count, "add forward"));
+
+    for (usize i = 0; i < inputs.size(); ++i)
+    {
+        if (trailing_extents(inputs[i].to_extents()) != trailing_extents(outputs.extents()))
+        {
+            return error(VIKA_SHAPE_ERROR(
+                "add forward: input %zu is rank %zu with %zu elements, layer expects rank %zu with %zu", i,
+                inputs[i].rank, inputs[i].element_count(), outputs.extents().size(), outputs.element_count()));
+        }
+        if (inputs[i].extents[0] != inputs[0].extents[0])
+        {
+            return error(VIKA_SHAPE_ERROR("add forward: input %zu has batch %zu but input 0 has batch %zu", i,
+                                          inputs[i].extents[0], inputs[0].extents[0]));
+        }
+    }
+
+    const usize k = inputs[0].extents[0];
+    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+
+    // out = inputs[0], then accumulate every remaining input into it - see accumulate_into's
+    // doc comment for why this kernel, written for gradient fan-in summing, also does
+    // elementwise add.
+    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpyAsync(sliced_outputs.data, inputs[0].data, inputs[0].byte_count(),
+                                              cudaMemcpyDeviceToDevice, stream.handle()));
+
+    const usize threads = 256;
+    const usize blocks = (inputs[0].element_count() + threads - 1) / threads;
+    for (usize i = 1; i < inputs.size() - 1; ++i)
+    {
+        UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
+                                       stream.handle(), inputs[i], sliced_outputs)
+                             .wait());
+    }
+    return launch_kernel(accumulate_into, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+                         inputs.back(), sliced_outputs);
+}
+
+auto AddLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
+{
+    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
+    {
+        const auto err = VIKA_SHAPE_ERROR(
+            "add backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
+            upstream.element_count(), outputs.extents().size(), outputs.element_count());
+        return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count, KernelJob<DeviceTensorConstViewf>::failed(err));
+    }
+
+    // d/dx_i(sum) = 1 for every input: the same upstream gradient flows unchanged to all of them,
+    // so this is a pure pass-through with no workspace or kernel launch needed, same idea as
+    // InputLayer/Flatten2DLayer's "ready" jobs.
+    return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count, KernelJob<DeviceTensorConstViewf>::ready(upstream));
 }
 
 auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
@@ -2669,7 +2812,40 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     return ok(id);
 }
 
-auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_extents) -> Result<Layer, Error>
+auto ComputationGraph::add(std::vector<NodeId> inputs) -> Result<NodeId, Error>
+{
+    if (inputs.size() < 2)
+    {
+        return error(VIKA_GRAPH_ERROR("add: expects at least 2 inputs, got %zu", inputs.size()));
+    }
+    for (const auto &input : inputs)
+    {
+        if (input.value >= nodes.size())
+        {
+            return error(VIKA_GRAPH_ERROR("add: invalid NodeId"));
+        }
+    }
+
+    const auto &first_extents = nodes[inputs[0].value].output_extents;
+    for (usize i = 1; i < inputs.size(); ++i)
+    {
+        if (nodes[inputs[i].value].output_extents != first_extents)
+        {
+            return error(VIKA_SHAPE_ERROR("add: inputs must have the same shape"));
+        }
+    }
+
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = AddSpec{},
+        .output_extents = first_extents,
+        .inputs = std::move(inputs),
+    });
+    return ok(id);
+}
+
+auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Extents> &pred_extents)
+    -> Result<Layer, Error>
 {
     return std::visit(
         [&](const auto &s) -> Result<Layer, Error> {
@@ -2684,29 +2860,33 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const Extents &pred_ext
             }
             else if constexpr (std::is_same_v<T, DenseSpec>)
             {
-                return DenseLayer::randomized(batch_size, pred_extents.at(1), s.output_features, s.seed)
+                return DenseLayer::randomized(batch_size, pred_extents[0].at(1), s.output_features, s.seed)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, SigmoidSpec>)
             {
-                return SigmoidLayer::with_extents(pred_extents).map(as_trainable);
+                return SigmoidLayer::with_extents(pred_extents[0]).map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, FlattenSpec>)
             {
-                return ok(Layer::trainable(LayerKind{Flatten2DLayer::with_extents(pred_extents)}));
+                return ok(Layer::trainable(LayerKind{Flatten2DLayer::with_extents(pred_extents[0])}));
             }
             else if constexpr (std::is_same_v<T, Conv2DSpec>)
             {
-                return Conv2DLayer::randomized(batch_size, pred_extents.at(1), pred_extents.at(2), s.kernel_height,
-                                               s.kernel_width, pred_extents.at(3), s.channels_out, s.stride, s.padding,
-                                               s.seed)
+                return Conv2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
+                                               s.kernel_height, s.kernel_width, pred_extents[0].at(3), s.channels_out,
+                                               s.stride, s.padding, s.seed)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
             {
-                return MaxPool2DLayer::with_extents(batch_size, pred_extents.at(1), pred_extents.at(2),
-                                                    pred_extents.at(3), s.pool_height, s.pool_width, s.stride)
+                return MaxPool2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
+                                                    pred_extents[0].at(3), s.pool_height, s.pool_width, s.stride)
                     .map(as_trainable);
+            }
+            else if constexpr (std::is_same_v<T, AddSpec>)
+            {
+                return AddLayer::with_extents(pred_extents[0], pred_extents.size()).map(as_trainable);
             }
             else
             {
@@ -2770,7 +2950,12 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         const auto &node = nodes[idx];
         layer_inputs_result.push_back(node.inputs);
 
-        const Extents pred_extents = node.inputs.empty() ? Extents{} : nodes[node.inputs[0].value].output_extents;
+        std::vector<Extents> pred_extents;
+        pred_extents.reserve(node.inputs.size());
+        for (const auto &pred : node.inputs)
+        {
+            pred_extents.push_back(nodes[pred.value].output_extents);
+        }
 
         auto layer_result = make_layer(node.spec, batch_size, pred_extents);
         if (layer_result.is_error())
@@ -2807,20 +2992,23 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
     for (const auto node_id : execution_order)
     {
         const auto &preds = layer_inputs[node_id.value];
-        if (preds.size() > 1)
-        {
-            return error(VIKA_UNSUPPORTED_ERROR("forward: node %zu has %zu inputs, multi-input nodes are not supported",
-                                                node_id.value, preds.size()));
-        }
 
-        DeviceTensorConstViewf pred_output = input;
-        if (!preds.empty())
+        std::vector<DeviceTensorConstViewf> pred_inputs;
+        if (preds.empty())
         {
-            pred_output = UNWRAP_OR_RETURN(forward_jobs[preds[0].value].value().wait());
+            pred_inputs.push_back(input);
+        }
+        else
+        {
+            pred_inputs.reserve(preds.size());
+            for (const auto &pred : preds)
+            {
+                pred_inputs.push_back(UNWRAP_OR_RETURN(forward_jobs[pred.value].value().wait()));
+            }
         }
 
         auto job = std::visit(
-            [&pred_output](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.forward(pred_output); },
+            [&pred_inputs](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.forward(pred_inputs); },
             layers[node_id.value].kind);
 
         forward_jobs[node_id.value] = std::move(job);
@@ -2840,7 +3028,7 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
 // that job's own buffer, owned elsewhere. More than one consumer (a fan-out node) allocates a
 // fresh accumulation buffer, appended to `scratch` to keep it alive for the rest of
 // Model::backward() - the launches reading it are async, so it must outlive this call - and sums
-// every contribution into it with accumulate_gradient. Order of summation is the order jobs were
+// every contribution into it with accumulate_into. Order of summation is the order jobs were
 // pushed, which is execution_order's (deterministic) order - floating-point addition isn't
 // associative, so this keeps repeated backward() calls on the same model bit-for-bit reproducible.
 auto accumulate_contributions(std::vector<KernelJob<DeviceTensorConstViewf>> &jobs,
@@ -2862,7 +3050,7 @@ auto accumulate_contributions(std::vector<KernelJob<DeviceTensorConstViewf>> &jo
     for (usize i = 1; i < jobs.size(); ++i)
     {
         const auto contribution = UNWRAP_OR_RETURN(jobs[i].wait());
-        UNWRAP_OR_RETURN(launch_kernel(accumulate_gradient, accum.const_view(), dim3(blocks), dim3(threads), stream,
+        UNWRAP_OR_RETURN(launch_kernel(accumulate_into, accum.const_view(), dim3(blocks), dim3(threads), stream,
                                        contribution, accum.view())
                              .wait());
     }
@@ -2896,13 +3084,6 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
             continue;
         }
 
-        // Checked before dispatching, so an unsupported node does not launch work first.
-        if (preds.size() > 1)
-        {
-            return error(VIKA_UNSUPPORTED_ERROR(
-                "backward: node %zu has %zu inputs, multi-input nodes are not supported", node_id.value, preds.size()));
-        }
-
         const auto upstream =
             UNWRAP_OR_RETURN(accumulate_contributions(contributions, accumulation_scratch, stream.handle()));
 
@@ -2911,11 +3092,21 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
         // needs the same combined upstream, not the unsummed pieces.
         contributions = {KernelJob<DeviceTensorConstViewf>::ready(upstream)};
 
-        auto d_input_job = std::visit(
-            [&upstream](auto &layer) -> KernelJob<DeviceTensorConstViewf> { return layer.backward(upstream); },
-            layers[node_id.value].kind);
-
-        backward_jobs[preds[0].value].push_back(std::move(d_input_job));
+        // One job per predecessor, in the same order as preds - every layer type returns this
+        // uniformly now (a 1-element vector for every single-input layer), so no per-type
+        // special-casing is needed here regardless of how many inputs a layer takes.
+        auto pred_jobs =
+            std::visit([&upstream](auto &layer) { return layer.backward(upstream); }, layers[node_id.value].kind);
+        if (pred_jobs.size() != preds.size())
+        {
+            return error(
+                VIKA_UNSUPPORTED_ERROR("backward: node %zu's layer returned %zu gradients but has %zu predecessors",
+                                       node_id.value, pred_jobs.size(), preds.size()));
+        }
+        for (usize i = 0; i < preds.size(); ++i)
+        {
+            backward_jobs[preds[i].value].push_back(std::move(pred_jobs[i]));
+        }
     }
 
     return ok(Void{});
@@ -3136,7 +3327,7 @@ __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstView
     }
 }
 
-__global__ auto accumulate_gradient(DeviceTensorConstViewf delta, DeviceTensorViewf accum) -> void
+__global__ auto accumulate_into(DeviceTensorConstViewf delta, DeviceTensorViewf accum) -> void
 {
     const usize i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < accum.element_count())

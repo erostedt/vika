@@ -38,7 +38,7 @@ UTEST(conv, forward_valid_stride1_multi_channel)
     auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer = Conv2DLayer::with_weights(batch, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
-    const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
     const auto out = download(gpu_out).unwrap();
 
     EXPECT_EQ(out.extent(0), batch);
@@ -101,7 +101,7 @@ UTEST(conv, forward_smaller_batch)
     auto layer =
         Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
-    const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
     const auto out = download(gpu_out).unwrap();
 
     EXPECT_EQ(out.extent(0), actual_batch);
@@ -138,7 +138,7 @@ UTEST(conv, forward_batch_exceeds_capacity)
     // Layer only has capacity for 1 sample, but the input batch has 2.
     auto layer = Conv2DLayer::with_weights(1, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
-    ASSERT_TRUE(layer.forward(inputs.const_view()).is_error());
+    ASSERT_TRUE(layer.forward({inputs.const_view()}).is_error());
 }
 
 UTEST(conv, backward_valid_stride1)
@@ -174,7 +174,7 @@ UTEST(conv, backward_valid_stride1)
     auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer = Conv2DLayer::with_weights(batch, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
-    const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
 
     auto cpu_upstream = HostTensor4f::zero({batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
     for (usize n = 0; n < batch; ++n)
@@ -195,7 +195,7 @@ UTEST(conv, backward_valid_stride1)
 
     const auto upstream = upload(cpu_upstream).unwrap();
 
-    const auto d_inputs = download(layer.backward(upstream.const_view()).wait().unwrap()).unwrap();
+    const auto d_inputs = download(layer.backward(upstream.const_view())[0].wait().unwrap()).unwrap();
     const auto [gpu_d_weights, gpu_d_biases] =
         layer.weight_gradients(inputs.const_view(), upstream.const_view()).wait().unwrap();
     const auto d_weights = download(gpu_d_weights).unwrap();
@@ -269,7 +269,7 @@ UTEST(conv, backward_smaller_batch)
     auto layer =
         Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
-    const auto gpu_out = layer.forward(inputs.const_view()).wait().unwrap();
+    const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
 
     auto cpu_upstream =
         HostTensor4f::zero({actual_batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
@@ -286,7 +286,7 @@ UTEST(conv, backward_smaller_batch)
     }
     const auto upstream = upload(cpu_upstream).unwrap();
 
-    const auto d_inputs = download(layer.backward(upstream.const_view()).wait().unwrap()).unwrap();
+    const auto d_inputs = download(layer.backward(upstream.const_view())[0].wait().unwrap()).unwrap();
 
     EXPECT_EQ(d_inputs.extent(0), actual_batch);
     EXPECT_EQ(d_inputs.extent(1), height);

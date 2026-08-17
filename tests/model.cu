@@ -128,10 +128,10 @@ UTEST(model, forward_matches_manual_xor)
     auto dense2 = DenseLayer::randomized(batch_size, 8, 1, seed2).unwrap();
     auto sigmoid2 = SigmoidLayer::with_extents({batch_size, 1}).unwrap();
 
-    const auto out1 = dense1.forward(gpu_inputs.const_view()).wait().unwrap();
-    const auto act1 = sigmoid1.forward(out1).wait().unwrap();
-    const auto out2 = dense2.forward(act1).wait().unwrap();
-    const auto manual_out = sigmoid2.forward(out2).wait().unwrap();
+    const auto out1 = dense1.forward({gpu_inputs.const_view()}).wait().unwrap();
+    const auto act1 = sigmoid1.forward({out1}).wait().unwrap();
+    const auto out2 = dense2.forward({act1}).wait().unwrap();
+    const auto manual_out = sigmoid2.forward({out2}).wait().unwrap();
     const auto manual_cpu = download(manual_out).unwrap();
 
     EXPECT_EQ(graph_cpu.size(), manual_cpu.size());
@@ -203,4 +203,52 @@ UTEST(model, xor_trains_to_convergence)
     EXPECT_TRUE(preds(1, 0) > 0.9f);
     EXPECT_TRUE(preds(2, 0) > 0.9f);
     EXPECT_TRUE(preds(3, 0) < 0.1f);
+}
+
+UTEST(model, branching_add_forward_and_backward)
+{
+    using namespace vika;
+
+    // input -> denseA -\
+    //                    add -> sigmoid -> output
+    // input -> denseB -/
+    constexpr usize batch_size = 2;
+
+    ComputationGraph graph{batch_size};
+    auto x = graph.input({2});
+    auto a = graph.dense(x, 3, 42).unwrap();
+    auto b = graph.dense(x, 3, 43).unwrap();
+    auto sum = graph.add({a, b}).unwrap();
+    auto out = graph.sigmoid(sum).unwrap();
+
+    auto model = graph.compile(out).unwrap();
+
+    const auto cpu_inputs = HostTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f}, {batch_size, 2}).unwrap();
+    const auto gpu_inputs = upload(cpu_inputs).unwrap();
+
+    const auto prediction = model.forward(gpu_inputs.const_view()).unwrap();
+    EXPECT_EQ(prediction.extents[0], batch_size);
+    EXPECT_EQ(prediction.extents[1], 3u);
+
+    auto &dense_a = std::get<DenseLayer>(model.layers[a.value].kind);
+    auto &dense_b = std::get<DenseLayer>(model.layers[b.value].kind);
+    const auto weights_a_before = download(dense_a.weights.value).unwrap();
+    const auto weights_b_before = download(dense_b.weights.value).unwrap();
+
+    const auto cpu_targets = HostTensor2f::zero({batch_size, 3}).unwrap();
+    const auto gpu_targets = upload(cpu_targets).unwrap();
+    auto loss_fn = MSELoss::with_extents({batch_size, 3}).unwrap();
+    const auto loss_grad = loss_fn.backward(prediction, gpu_targets.const_view()).wait().unwrap();
+    model.backward(loss_grad).unwrap();
+
+    auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.1f}).unwrap();
+    model.step(optimizer, 1).unwrap();
+
+    // Both branches must have received a real gradient through the Add node's fan-out - if
+    // backward's routing to preds[0]/preds[1] were swapped, missing, or zeroed, at least one of
+    // these would be unchanged (or both, if routing silently dropped both).
+    const auto weights_a_after = download(dense_a.weights.value).unwrap();
+    const auto weights_b_after = download(dense_b.weights.value).unwrap();
+    EXPECT_FALSE(are_close(weights_a_before, weights_a_after, 1e-8f));
+    EXPECT_FALSE(are_close(weights_b_before, weights_b_after, 1e-8f));
 }
