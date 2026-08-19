@@ -88,24 +88,6 @@ using usize = size_t;
 // Generic Utilities
 // =============================================================================
 
-template <typename T, typename UnaryOperation>
-auto map(const std::vector<T> &in, UnaryOperation op)
-{
-    using namespace std;
-    using out_type = decltype(op(*begin(in)));
-    std::vector<out_type> out;
-    out.reserve(in.size());
-    transform(begin(in), end(in), back_inserter(out), op);
-    return out;
-}
-
-template <typename T, typename Predicate>
-auto all_of(const std::vector<T> &in, Predicate pred) -> bool
-{
-    using namespace std;
-    return all_of(begin(in), end(in), pred);
-}
-
 template <typename T, usize Capacity>
 class FixedVector
 {
@@ -534,18 +516,17 @@ class Error
 #define VIKA_UNSUPPORTED_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Unsupported, __VA_ARGS__)
 #define VIKA_DEVICE_ERROR(code) ::vika::Error::from_cuda((code), __FILE__, __LINE__)
 
-// Like map() (Generic Utilities, above), but for a fallible op (one returning
-// Result<T, Error>): stops at the first failure and propagates it, instead of collecting one
-// Result per element the way map(in, op) naturally would when op is fallible (see wait_on_all,
-// which wants exactly that - every element processed regardless of an earlier one's outcome).
-// Use try_map when continuing after a failure has no value (e.g. further allocations after one
-// fails), map when it does. Lives here rather than beside map() because it needs Result/Error to
-// already be complete types, which they aren't yet at that point in the file.
-//
-// Needs an explicit trailing return type, unlike map(): its two return statements convert
-// through Err<Error> and Ok<vector<T>> respectively, which only unify once a concrete Result<...>
-// target is named - a deduced auto return type requires every return statement to already agree
-// on one type before conversion, which these do not.
+template <typename T, typename UnaryOperation>
+auto map(const std::vector<T> &in, UnaryOperation op)
+{
+    using namespace std;
+    using out_type = decltype(op(*begin(in)));
+    std::vector<out_type> out;
+    out.reserve(in.size());
+    transform(begin(in), end(in), back_inserter(out), op);
+    return out;
+}
+
 template <typename T, typename UnaryOperation>
 auto try_map(const std::vector<T> &in, UnaryOperation op) -> Result<std::vector<decltype(op(in[0]).unwrap())>, Error>
 {
@@ -562,6 +543,13 @@ auto try_map(const std::vector<T> &in, UnaryOperation op) -> Result<std::vector<
         out.push_back(std::move(res.unwrap()));
     }
     return ok(std::move(out));
+}
+
+template <typename T, typename Predicate>
+auto all_of(const std::vector<T> &in, Predicate pred) -> bool
+{
+    using namespace std;
+    return all_of(begin(in), end(in), pred);
 }
 
 template <typename Node>
