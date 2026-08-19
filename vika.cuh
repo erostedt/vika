@@ -656,6 +656,15 @@ inline constexpr auto window_output_extent(usize input, usize window, usize stri
     return (input + 2 * padding - window) / stride + 1;
 }
 
+// Inverse of window_output_extent: the input size a sliding window of the given geometry would
+// need to produce `input` as its own output - i.e. the output size of a ConvTranspose2D, which is
+// exactly a Conv2D run backward (see ConvTranspose2DLayer's own doc comment). Requires
+// stride > 0 and (input - 1) * stride + window >= 2 * padding.
+inline constexpr auto transposed_window_output_extent(usize input, usize window, usize stride, usize padding) -> usize
+{
+    return (input - 1) * stride + window - 2 * padding;
+}
+
 // Validates that every entry in `extents` agrees on every dimension except the last, and returns
 // the concatenated output shape: extents[0] with the last dimension replaced by the sum of every
 // input's last dimension. Shared by ComputationGraph::concat() (validating declared graph shapes)
@@ -1511,6 +1520,34 @@ __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTenso
 // upstream: [N, out_H, out_W, C_out], d_biases: [C_out], 1D grid over C_out
 __global__ auto conv_bias_gradients(DeviceTensorConstViewf upstream, DeviceTensorViewf d_biases) -> void;
 
+// ConvTranspose2D's forward is mathematically dual to Conv2D's backward (conv_backward above): a
+// learned upsampling operation is exactly "run a regular convolution's data-gradient computation
+// forward". Its own backward (conv_transpose_backward) is symmetrically dual to conv_forward, and
+// its bias gradient is identical in shape to conv_bias_gradients (a per-output-channel sum over
+// its own upstream), so that kernel is reused as-is - only weight and data gradients need their
+// own kernels. filters are shaped [kH, kW, C_out, C_in], with C_out/C_in swapped relative to
+// Conv2DLayer's [kH, kW, C_in, C_out], to match: filters(kh, kw, oc, ic) is what conv_backward
+// would have read as filters(kh, kw, ic, oc) had this been a regular Conv2D's data gradient.
+//
+// inputs: [N, H_in, W_in, C_in] (the small tensor), filters: [kH, kW, C_out, C_in],
+// biases: [C_out], out: [N, H_out, W_out, C_out] (the large tensor)
+// grid: (ceil(W_out/bx), ceil(H_out/by), N*C_out), block: (bx, by, 1)
+__global__ auto conv_transpose_forward(DeviceTensorConstViewf inputs, DeviceTensorConstViewf filters,
+                                       DeviceTensorConstViewf biases, DeviceTensorViewf out, usize stride,
+                                       usize padding) -> void;
+
+// upstream: [N, H_out, W_out, C_out] (the large gradient), filters: [kH, kW, C_out, C_in],
+// d_inputs: [N, H_in, W_in, C_in] (the small gradient)
+// grid: (ceil(W_in/bx), ceil(H_in/by), N*C_in), block: (bx, by, 1)
+__global__ auto conv_transpose_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewf filters,
+                                        DeviceTensorViewf d_inputs, usize stride, usize padding) -> void;
+
+// inputs: [N, H_in, W_in, C_in] (this layer's own forward input, the small tensor), upstream:
+// [N, H_out, W_out, C_out] (the large upstream gradient), d_filters: [kH, kW, C_out, C_in]
+// 1D grid over all filter elements
+__global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, DeviceTensorConstViewf upstream,
+                                                DeviceTensorViewf d_filters, usize stride, usize padding) -> void;
+
 // inputs: [N, H, W, C], out: [N, out_H, out_W, C], argmax: [N, out_H, out_W, C]
 // grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
 __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, DeviceTensorViewu argmax,
@@ -1520,6 +1557,20 @@ __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf
 // grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
 __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewu argmax,
                                  DeviceTensorViewf d_inputs) -> void;
+
+// Nearest-neighbor upsampling: out(n, oh, ow, c) = inputs(n, oh/scale, ow/scale, c), i.e. every
+// input pixel is replicated into a scale x scale block of output pixels.
+// inputs: [N, H, W, C], out: [N, H*scale, W*scale, C]
+// grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
+__global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, usize scale) -> void;
+
+// Reverse of upsample2d_forward: unlike maxpool_backward, this needs no atomics and no prior
+// zero-fill of d_inputs - every output pixel maps to exactly one input pixel (no overlap, unlike
+// pooling with stride < window), so gathering is one thread per *input* pixel summing its own
+// scale x scale block of upstream, each writing its own d_inputs slot exactly once.
+// upstream: [N, H*scale, W*scale, C], d_inputs: [N, H, W, C]
+// grid: (ceil(W_in/bx), ceil(H_in/by), N*C), block: (bx, by, 1)
+__global__ auto upsample2d_backward(DeviceTensorConstViewf upstream, DeviceTensorViewf d_inputs, usize scale) -> void;
 
 __global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void;
 __global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 limit) -> void;
@@ -1694,6 +1745,42 @@ struct Conv2DLayer
     Stream stream;
 };
 
+// Learned upsampling - see conv_transpose_forward's doc comment for the duality with Conv2D's
+// backward that this whole layer is built on.
+struct ConvTranspose2DLayer
+{
+    // filters: [kH, kW, C_out, C_in] - C_out/C_in swapped vs Conv2DLayer's [kH, kW, C_in, C_out],
+    // see conv_transpose_forward's doc comment for why.
+    static auto with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensorf filters,
+                             DeviceOwningTensorf biases, usize stride, usize padding)
+        -> Result<ConvTranspose2DLayer, Error>;
+
+    static auto randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
+                           usize C_out, usize stride, usize padding, u32 seed) -> Result<ConvTranspose2DLayer, Error>;
+
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
+
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+
+    auto weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream)
+        -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
+
+    auto parameters() -> std::vector<ParameterView>;
+    auto parameters() const -> std::vector<ConstParameterView>;
+
+    auto update(std::vector<AdamState> &states, const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>;
+
+    DeviceOwningTensorf outputs;
+    DeviceOwningTensorf d_inputs;
+    OwningParameter filters;
+    OwningParameter biases;
+
+    usize stride;
+    usize padding;
+
+    Stream stream;
+};
+
 struct MaxPool2DLayer
 {
     static auto with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
@@ -1710,6 +1797,23 @@ struct MaxPool2DLayer
     usize pool_h;
     usize pool_w;
     usize stride;
+
+    Stream stream;
+};
+
+struct Upsample2DLayer
+{
+    static auto with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize scale)
+        -> Result<Upsample2DLayer, Error>;
+
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
+
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+
+    DeviceOwningTensorf outputs;
+    DeviceOwningTensorf d_inputs;
+
+    usize scale;
 
     Stream stream;
 };
@@ -1831,9 +1935,20 @@ struct Conv2DSpec
     u32 seed;
 };
 
+struct ConvTranspose2DSpec
+{
+    usize kernel_height, kernel_width, channels_out, stride, padding;
+    u32 seed;
+};
+
 struct MaxPool2DSpec
 {
     usize pool_height, pool_width, stride;
+};
+
+struct Upsample2DSpec
+{
+    usize scale;
 };
 
 // N-ary: however many inputs Node::inputs holds, elementwise-summed, all the same shape. No
@@ -1850,8 +1965,8 @@ struct ConcatSpec
 {
 };
 
-using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, SoftmaxSpec, MaxPool2DSpec, FlattenSpec,
-                               AddSpec, ConcatSpec>;
+using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, ConvTranspose2DSpec, SigmoidSpec, SoftmaxSpec,
+                               MaxPool2DSpec, Upsample2DSpec, FlattenSpec, AddSpec, ConcatSpec>;
 
 struct Node
 {
@@ -1866,8 +1981,8 @@ struct InputLayer
     auto backward(DeviceTensorConstViewf upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 };
 
-using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, SoftmaxLayer, Conv2DLayer, MaxPool2DLayer,
-                               Flatten2DLayer, AddLayer, ConcatLayer>;
+using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, SoftmaxLayer, Conv2DLayer, ConvTranspose2DLayer,
+                               MaxPool2DLayer, Upsample2DLayer, Flatten2DLayer, AddLayer, ConcatLayer>;
 
 struct Layer
 {
@@ -1992,7 +2107,10 @@ struct ComputationGraph
     auto flatten(NodeId input) -> Result<NodeId, Error>;
     auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride, usize padding,
                 std::optional<u32> requested_seed = std::nullopt) -> Result<NodeId, Error>;
+    auto conv_transpose2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride,
+                          usize padding, std::optional<u32> requested_seed = std::nullopt) -> Result<NodeId, Error>;
     auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, Error>;
+    auto upsample2d(NodeId input, usize scale) -> Result<NodeId, Error>;
     auto add(std::vector<NodeId> inputs) -> Result<NodeId, Error>;
     auto concat(std::vector<NodeId> inputs) -> Result<NodeId, Error>;
     auto compile(NodeId output) -> Result<Model, Error>;
@@ -2700,6 +2818,162 @@ auto Conv2DLayer::update(std::vector<AdamState> &states, const AdamParameters &p
     return update_parameters(params_list, states, stream.handle(), params, t);
 }
 
+auto ConvTranspose2DLayer::with_weights(usize batch_size, usize input_height, usize input_width,
+                                        DeviceOwningTensorf filters, DeviceOwningTensorf biases, usize stride,
+                                        usize padding) -> Result<ConvTranspose2DLayer, Error>
+{
+    if (filters.extents().size() != 4)
+    {
+        return error(VIKA_SHAPE_ERROR("conv_transpose2d: filters must be rank 4 [kH, kW, C_out, C_in], got rank %zu",
+                                      filters.extents().size()));
+    }
+    if (biases.extents().size() != 1)
+    {
+        return error(
+            VIKA_SHAPE_ERROR("conv_transpose2d: biases must be rank 1 [C_out], got rank %zu", biases.extents().size()));
+    }
+
+    const usize kH = filters.extent(0);
+    const usize kW = filters.extent(1);
+    const usize C_out = filters.extent(2);
+    const usize C_in = filters.extent(3);
+
+    if (biases.extent(0) != C_out)
+    {
+        return error(VIKA_SHAPE_ERROR("conv_transpose2d: biases has %zu channels, filters expects %zu",
+                                      biases.extent(0), C_out));
+    }
+
+    const usize out_H = transposed_window_output_extent(input_height, kH, stride, padding);
+    const usize out_W = transposed_window_output_extent(input_width, kW, stride, padding);
+
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, C_out}));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, C_in}));
+    auto d_filters = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(filters));
+    auto d_biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
+
+    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    return ok(ConvTranspose2DLayer{
+        .outputs = std::move(outputs),
+        .d_inputs = std::move(d_inputs),
+        .filters = {std::move(filters), std::move(d_filters)},
+        .biases = {std::move(biases), std::move(d_biases)},
+        .stride = stride,
+        .padding = padding,
+        .stream = std::move(stream),
+    });
+}
+
+auto ConvTranspose2DLayer::randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW,
+                                      usize C_in, usize C_out, usize stride, usize padding, u32 seed)
+    -> Result<ConvTranspose2DLayer, Error>
+{
+    auto filters = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({kH, kW, C_out, C_in}));
+    auto biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(C_out, 0.0f)));
+
+    // Built first so xavier_tensor can run on the layer's own stream instead of standing up a
+    // second, throwaway one just for initialization.
+    auto layer = UNWRAP_OR_RETURN(
+        with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride, padding));
+    // fan_in/fan_out are about the operation's actual connectivity (kH*kW inputs feeding each
+    // output channel, kH*kW outputs fed by each input channel), not the filters tensor's literal
+    // axis order - same values Conv2DLayer::randomized passes despite the swapped C_out/C_in
+    // layout.
+    UNWRAP_OR_RETURN(
+        xavier_tensor(layer.filters.value.view(), seed, kH * kW * C_in, kH * kW * C_out, layer.stream.handle()).wait());
+    return ok(std::move(layer));
+}
+
+auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs)
+    -> KernelJob<DeviceTensorConstViewf>
+{
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "conv_transpose2d forward"));
+    const auto &input = inputs[0];
+
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(input.to_extents(), d_inputs.extents(), "conv_transpose2d forward", "input"));
+
+    const usize k = input.extents[0];
+    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+
+    const usize H_out = outputs.extent(1);
+    const usize W_out = outputs.extent(2);
+    const usize C_out = outputs.extent(3);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C_out);
+
+    return launch_kernel(conv_transpose_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
+                         filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
+}
+
+auto ConvTranspose2DLayer::backward(const DeviceTensorConstViewf &upstream)
+    -> std::vector<KernelJob<DeviceTensorConstViewf>>
+{
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(upstream.to_extents(), outputs.extents(), "conv_transpose2d backward", "upstream"));
+
+    const usize k = upstream.extents[0];
+    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+
+    const usize H_in = d_inputs.extent(1);
+    const usize W_in = d_inputs.extent(2);
+    const usize C_in = d_inputs.extent(3);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C_in);
+
+    return {launch_kernel(conv_transpose_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
+                          upstream, filters.value.const_view(), sliced_d_inputs, stride, padding)};
+}
+
+auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream)
+    -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>
+{
+    using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
+
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(inputs.to_extents(), d_inputs.extents(), "conv_transpose2d weight_gradients", "input"));
+    UNWRAP_OR_RETURN(check_trailing_extents(upstream.to_extents(), outputs.extents(), "conv_transpose2d weight_gradients",
+                                            "upstream"));
+
+    const usize filter_count = filters.grad.element_count();
+    const usize C_out = biases.grad.element_count();
+    const usize threads = 256;
+
+    const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
+
+    auto weight_job = launch_kernel(conv_transpose_weight_gradients, gradients, dim3((filter_count + threads - 1) / threads),
+                                    dim3(threads), stream.handle(), inputs, upstream, filters.grad.view(), stride,
+                                    padding);
+    if (weight_job.is_error())
+    {
+        return weight_job;
+    }
+    // Identical in shape to Conv2D's own bias gradient - see conv_transpose_forward's doc comment
+    // for why conv_bias_gradients is reused here unchanged rather than getting its own variant.
+    return launch_kernel(conv_bias_gradients, gradients, dim3((C_out + threads - 1) / threads), dim3(threads),
+                         stream.handle(), upstream, biases.grad.view());
+}
+
+auto ConvTranspose2DLayer::parameters() -> std::vector<ParameterView>
+{
+    return {filters.view(), biases.view()};
+}
+
+// Must stay in lockstep with the non-const overload above: same order, same count.
+auto ConvTranspose2DLayer::parameters() const -> std::vector<ConstParameterView>
+{
+    return {filters.const_view(), biases.const_view()};
+}
+
+auto ConvTranspose2DLayer::update(std::vector<AdamState> &states, const AdamParameters &params, usize t)
+    -> std::vector<KernelJob<Void>>
+{
+    auto params_list = parameters();
+    return update_parameters(params_list, states, stream.handle(), params, t);
+}
+
 auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
                                   usize pool_w, usize stride) -> Result<MaxPool2DLayer, Error>
 {
@@ -2762,6 +3036,70 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
 
     return {launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs)};
+}
+
+auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels,
+                                   usize scale) -> Result<Upsample2DLayer, Error>
+{
+    if (scale < 1)
+    {
+        return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
+    }
+
+    auto outputs = UNWRAP_OR_RETURN(
+        DeviceOwningTensorf::empty({batch_size, input_height * scale, input_width * scale, channels}));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, channels}));
+
+    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    return ok(Upsample2DLayer{
+        .outputs = std::move(outputs),
+        .d_inputs = std::move(d_inputs),
+        .scale = scale,
+        .stream = std::move(stream),
+    });
+}
+
+auto Upsample2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
+{
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "upsample2d forward"));
+    const auto &input = inputs[0];
+
+    UNWRAP_OR_RETURN(check_trailing_extents(input.to_extents(), d_inputs.extents(), "upsample2d forward", "input"));
+
+    const usize k = input.extents[0];
+    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+
+    const usize H_out = outputs.extent(1);
+    const usize W_out = outputs.extent(2);
+    const usize C = outputs.extent(3);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
+
+    return launch_kernel(upsample2d_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
+                         sliced_outputs, scale);
+}
+
+auto Upsample2DLayer::backward(const DeviceTensorConstViewf &upstream)
+    -> std::vector<KernelJob<DeviceTensorConstViewf>>
+{
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(upstream.to_extents(), outputs.extents(), "upsample2d backward", "upstream"));
+
+    const usize k = upstream.extents[0];
+    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+
+    const usize H_in = d_inputs.extent(1);
+    const usize W_in = d_inputs.extent(2);
+    const usize C = d_inputs.extent(3);
+
+    dim3 block(16, 16, 1);
+    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C);
+
+    // No zero() first, unlike MaxPool2DLayer::backward - see upsample2d_backward's own doc comment
+    // for why: every d_inputs slot is written exactly once, so there is nothing left over to clear.
+    return {launch_kernel(upsample2d_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
+                          sliced_d_inputs, scale)};
 }
 
 auto AddLayer::with_extents(const Extents &extents, usize input_count) -> Result<AddLayer, Error>
@@ -3158,6 +3496,46 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
     return ok(id);
 }
 
+auto ComputationGraph::conv_transpose2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out,
+                                        usize stride, usize padding, std::optional<u32> requested_seed)
+    -> Result<NodeId, Error>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(VIKA_GRAPH_ERROR("conv_transpose2d: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    if (in_extents.size() != 4)
+    {
+        return error(VIKA_SHAPE_ERROR("conv_transpose2d: input must be rank 4 [N, H, W, C]"));
+    }
+
+    const auto H = in_extents[1];
+    const auto W = in_extents[2];
+
+    if ((H - 1) * stride + kernel_height < 2 * padding)
+    {
+        return error(VIKA_SHAPE_ERROR("conv_transpose2d: padding exceeds (input - 1) * stride + kernel height"));
+    }
+    if ((W - 1) * stride + kernel_width < 2 * padding)
+    {
+        return error(VIKA_SHAPE_ERROR("conv_transpose2d: padding exceeds (input - 1) * stride + kernel width"));
+    }
+
+    const auto out_H = transposed_window_output_extent(H, kernel_height, stride, padding);
+    const auto out_W = transposed_window_output_extent(W, kernel_width, stride, padding);
+
+    const u32 resolved_seed = requested_seed.has_value() ? *requested_seed : next_seed();
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = ConvTranspose2DSpec{kernel_height, kernel_width, channels_out, stride, padding, resolved_seed},
+        .output_extents = {in_extents[0], out_H, out_W, channels_out},
+        .inputs = {input},
+    });
+    return ok(id);
+}
+
 auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride)
     -> Result<NodeId, Error>
 {
@@ -3191,6 +3569,32 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     nodes.push_back(Node{
         .spec = MaxPool2DSpec{pool_height, pool_width, stride},
         .output_extents = {in_extents[0], out_H, out_W, in_extents[3]},
+        .inputs = {input},
+    });
+    return ok(id);
+}
+
+auto ComputationGraph::upsample2d(NodeId input, usize scale) -> Result<NodeId, Error>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(VIKA_GRAPH_ERROR("upsample2d: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    if (in_extents.size() != 4)
+    {
+        return error(VIKA_SHAPE_ERROR("upsample2d: input must be rank 4 [N, H, W, C]"));
+    }
+    if (scale < 1)
+    {
+        return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
+    }
+
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = Upsample2DSpec{scale},
+        .output_extents = {in_extents[0], in_extents[1] * scale, in_extents[2] * scale, in_extents[3]},
         .inputs = {input},
     });
     return ok(id);
@@ -3279,10 +3683,23 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
                                                s.stride, s.padding, s.seed)
                     .map(as_trainable);
             }
+            else if constexpr (std::is_same_v<T, ConvTranspose2DSpec>)
+            {
+                return ConvTranspose2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
+                                                        s.kernel_height, s.kernel_width, pred_extents[0].at(3),
+                                                        s.channels_out, s.stride, s.padding, s.seed)
+                    .map(as_trainable);
+            }
             else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
             {
                 return MaxPool2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                     pred_extents[0].at(3), s.pool_height, s.pool_width, s.stride)
+                    .map(as_trainable);
+            }
+            else if constexpr (std::is_same_v<T, Upsample2DSpec>)
+            {
+                return Upsample2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
+                                                     pred_extents[0].at(3), s.scale)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, AddSpec>)
@@ -3307,7 +3724,8 @@ auto parameters(const Layer &layer) -> std::optional<std::vector<ConstParameterV
     return std::visit(
         [](const auto &l) -> std::optional<std::vector<ConstParameterView>> {
             using T = std::decay_t<decltype(l)>;
-            if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer>)
+            if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer> ||
+                          std::is_same_v<T, ConvTranspose2DLayer>)
             {
                 return l.parameters();
             }
@@ -3552,7 +3970,8 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
     return std::visit(
         [&](auto &l) -> Result<Void, Error> {
             using T = std::decay_t<decltype(l)>;
-            if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer>)
+            if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer> ||
+                          std::is_same_v<T, ConvTranspose2DLayer>)
             {
                 // weight_gradients() writes into the layer's own weights.grad/biases.grad (or
                 // filters.grad/biases.grad) buffers; update()'s parameters() reads them back
@@ -4100,6 +4519,173 @@ __global__ auto conv_bias_gradients(DeviceTensorConstViewf upstream, DeviceTenso
     d_biases[oc] = sum;
 }
 
+__global__ auto conv_transpose_forward(DeviceTensorConstViewf inputs, DeviceTensorConstViewf filters,
+                                       DeviceTensorConstViewf biases, DeviceTensorViewf out, usize stride,
+                                       usize padding) -> void
+{
+    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize oc = blockIdx.z % out.extents[3];
+    const usize n = blockIdx.z / out.extents[3];
+
+    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    {
+        return;
+    }
+
+    const usize kH = filters.extents[0];
+    const usize kW = filters.extents[1];
+    const usize C_in = filters.extents[3];
+    const usize H_in = inputs.extents[1];
+    const usize W_in = inputs.extents[2];
+
+    f32 sum = biases[oc];
+    for (usize kh = 0; kh < kH; ++kh)
+    {
+        for (usize kw = 0; kw < kW; ++kw)
+        {
+            // The input position that maps to (oh, ow) via filter (kh, kw) - same relation
+            // conv_backward uses to go from an output position to an input position, since this
+            // is that exact computation with the roles of "small" and "large" tensor swapped:
+            // ih * stride = oh + padding - kh  (must be a non-negative multiple of stride)
+            if (oh + padding < kh || ow + padding < kw)
+            {
+                continue;
+            }
+            const usize ih_unpadded = oh + padding - kh;
+            const usize iw_unpadded = ow + padding - kw;
+            if (ih_unpadded % stride != 0 || iw_unpadded % stride != 0)
+            {
+                continue;
+            }
+            const usize ih = ih_unpadded / stride;
+            const usize iw = iw_unpadded / stride;
+            if (ih >= H_in || iw >= W_in)
+            {
+                continue;
+            }
+            for (usize ic = 0; ic < C_in; ++ic)
+            {
+                sum += inputs(n, ih, iw, ic) * filters(kh, kw, oc, ic);
+            }
+        }
+    }
+    out(n, oh, ow, oc) = sum;
+}
+
+__global__ auto conv_transpose_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewf filters,
+                                        DeviceTensorViewf d_inputs, usize stride, usize padding) -> void
+{
+    const usize iw = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize ih = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize ic = blockIdx.z % d_inputs.extents[3];
+    const usize n = blockIdx.z / d_inputs.extents[3];
+
+    if (iw >= d_inputs.extents[2] || ih >= d_inputs.extents[1] || n >= d_inputs.extents[0])
+    {
+        return;
+    }
+
+    const usize kH = filters.extents[0];
+    const usize kW = filters.extents[1];
+    const usize C_out = filters.extents[2];
+    const usize H_out = upstream.extents[1];
+    const usize W_out = upstream.extents[2];
+
+    // Same accumulation shape as conv_forward - each output position this input position feeds
+    // is found by sliding the kernel the ordinary (not inverse) way, since backward-of-transpose
+    // is dual to forward-of-conv.
+    f32 sum = 0.0f;
+    for (usize kh = 0; kh < kH; ++kh)
+    {
+        for (usize kw = 0; kw < kW; ++kw)
+        {
+            const usize oh_unpadded = ih * stride + kh;
+            const usize ow_unpadded = iw * stride + kw;
+            if (oh_unpadded >= padding && oh_unpadded - padding < H_out && ow_unpadded >= padding &&
+                ow_unpadded - padding < W_out)
+            {
+                const usize oh = oh_unpadded - padding;
+                const usize ow = ow_unpadded - padding;
+                for (usize oc = 0; oc < C_out; ++oc)
+                {
+                    sum += upstream(n, oh, ow, oc) * filters(kh, kw, oc, ic);
+                }
+            }
+        }
+    }
+    d_inputs(n, ih, iw, ic) = sum;
+}
+
+__global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, DeviceTensorConstViewf upstream,
+                                                DeviceTensorViewf d_filters, usize stride, usize padding) -> void
+{
+    const usize idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= d_filters.element_count())
+    {
+        return;
+    }
+
+    const usize C_in = d_filters.extents[3];
+    const usize C_out = d_filters.extents[2];
+    const usize kW = d_filters.extents[1];
+
+    const usize ic = idx % C_in;
+    const usize oc = (idx / C_in) % C_out;
+    const usize kw = (idx / (C_in * C_out)) % kW;
+    const usize kh = idx / (C_in * C_out * kW);
+
+    const usize N = inputs.extents[0];
+    const usize H_in = inputs.extents[1];
+    const usize W_in = inputs.extents[2];
+    const usize H_out = upstream.extents[1];
+    const usize W_out = upstream.extents[2];
+
+    // Sums over the (oh, ow) positions this filter tap contributes to, mapping each back to its
+    // (ih, iw) source the same way conv_transpose_backward does (this is that same large-to-small
+    // coordinate mapping, not conv_weight_gradients' small-to-large one).
+    f32 sum = 0.0f;
+    for (usize n = 0; n < N; ++n)
+    {
+        for (usize oh = 0; oh < H_out; ++oh)
+        {
+            if (oh + padding < kh)
+            {
+                continue;
+            }
+            const usize ih_unpadded = oh + padding - kh;
+            if (ih_unpadded % stride != 0)
+            {
+                continue;
+            }
+            const usize ih = ih_unpadded / stride;
+            if (ih >= H_in)
+            {
+                continue;
+            }
+            for (usize ow = 0; ow < W_out; ++ow)
+            {
+                if (ow + padding < kw)
+                {
+                    continue;
+                }
+                const usize iw_unpadded = ow + padding - kw;
+                if (iw_unpadded % stride != 0)
+                {
+                    continue;
+                }
+                const usize iw = iw_unpadded / stride;
+                if (iw >= W_in)
+                {
+                    continue;
+                }
+                sum += inputs(n, ih, iw, ic) * upstream(n, oh, ow, oc);
+            }
+        }
+    }
+    d_filters(kh, kw, oc, ic) = sum;
+}
+
 __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, DeviceTensorViewu argmax,
                                 usize pool_h, usize pool_w, usize stride) -> void
 {
@@ -4166,41 +4752,53 @@ __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorCo
     atomicAdd(&d_inputs(n, ih, iw, c), upstream(n, oh, ow, c));
 }
 
+__global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, usize scale) -> void
+{
+    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize c = blockIdx.z % out.extents[3];
+    const usize n = blockIdx.z / out.extents[3];
+
+    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    {
+        return;
+    }
+
+    out(n, oh, ow, c) = inputs(n, oh / scale, ow / scale, c);
+}
+
+__global__ auto upsample2d_backward(DeviceTensorConstViewf upstream, DeviceTensorViewf d_inputs, usize scale) -> void
+{
+    const usize iw = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize ih = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize c = blockIdx.z % d_inputs.extents[3];
+    const usize n = blockIdx.z / d_inputs.extents[3];
+
+    if (iw >= d_inputs.extents[2] || ih >= d_inputs.extents[1] || n >= d_inputs.extents[0])
+    {
+        return;
+    }
+
+    f32 sum = 0.0f;
+    for (usize dh = 0; dh < scale; ++dh)
+    {
+        for (usize dw = 0; dw < scale; ++dw)
+        {
+            sum += upstream(n, ih * scale + dh, iw * scale + dw, c);
+        }
+    }
+    d_inputs(n, ih, iw, c) = sum;
+}
+
 }; // namespace vika
 #endif
 
 // TODO (ecrt):
-// - Softmax Forward
-// - Softmax Backward
-// - Softmax Layer
-//
-// - CategoricalCrossEntropy Forward
-// - CategoricalCrossEntropy Backward
-// - CategoricalCrossEntropy Layer
-//
-// - Upsampling Forward
-// - Upsampling Backward
-// - Upsampling Layer
-//
-// - Concatenate Forward
-// - Concatenate Backward
-// - Concatenate Layer
-//
-// - Add Forward
-// - Add Backward
-// - Add Layer
-//
-// - ConvTranspose Forward
-// - ConvTranspose Backward
-// - ConvTranspose Layer
-//
 // - Tiled matmul
 //
 // - Pick device?
 // - Sequential model
-// - Multi-input
 // - Multi-output
 // - unet
 // - Save weights
 // - Load weights
-// - Bake in loss into model
