@@ -639,17 +639,15 @@ inline auto concat_output_extents(const std::vector<Extents> &extents) -> Result
     {
         if (extents[i].size() != rank)
         {
-            return error(
-                VIKA_SHAPE_ERROR("concat: input %zu is rank %zu, expected rank %zu matching input 0", i,
-                                 extents[i].size(), rank));
+            return error(VIKA_SHAPE_ERROR("concat: input %zu is rank %zu, expected rank %zu matching input 0", i,
+                                          extents[i].size(), rank));
         }
         for (usize d = 0; d + 1 < rank; ++d)
         {
             if (extents[i][d] != extents[0][d])
             {
-                return error(VIKA_SHAPE_ERROR(
-                    "concat: input %zu's dimension %zu is %zu, expected %zu matching input 0", i, d, extents[i][d],
-                    extents[0][d]));
+                return error(VIKA_SHAPE_ERROR("concat: input %zu's dimension %zu is %zu, expected %zu matching input 0",
+                                              i, d, extents[i][d], extents[0][d]));
             }
         }
         total_last_dim += extents[i][rank - 1];
@@ -2654,13 +2652,15 @@ auto AddLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<K
         const auto err = VIKA_SHAPE_ERROR(
             "add backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
             upstream.element_count(), outputs.extents().size(), outputs.element_count());
-        return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count, KernelJob<DeviceTensorConstViewf>::failed(err));
+        return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count,
+                                                              KernelJob<DeviceTensorConstViewf>::failed(err));
     }
 
     // d/dx_i(sum) = 1 for every input: the same upstream gradient flows unchanged to all of them,
     // so this is a pure pass-through with no workspace or kernel launch needed, same idea as
     // InputLayer/Flatten2DLayer's "ready" jobs.
-    return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count, KernelJob<DeviceTensorConstViewf>::ready(upstream));
+    return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count,
+                                                          KernelJob<DeviceTensorConstViewf>::ready(upstream));
 }
 
 auto ConcatLayer::with_extents(const std::vector<Extents> &input_extents) -> Result<ConcatLayer, Error>
@@ -2676,8 +2676,7 @@ auto ConcatLayer::with_extents(const std::vector<Extents> &input_extents) -> Res
     }
 
     auto stream = UNWRAP_OR_RETURN(Stream::create());
-    return ok(
-        ConcatLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
+    return ok(ConcatLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
 }
 
 auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
@@ -2724,9 +2723,10 @@ auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
     if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
     {
         const auto err = VIKA_SHAPE_ERROR(
-            "concat backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            upstream.rank, upstream.element_count(), outputs.extents().size(), outputs.element_count());
-        return std::vector<KernelJob<DeviceTensorConstViewf>>(d_inputs.size(), KernelJob<DeviceTensorConstViewf>::failed(err));
+            "concat backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
+            upstream.element_count(), outputs.extents().size(), outputs.element_count());
+        return std::vector<KernelJob<DeviceTensorConstViewf>>(d_inputs.size(),
+                                                              KernelJob<DeviceTensorConstViewf>::failed(err));
     }
 
     const usize k = upstream.extents[0];
