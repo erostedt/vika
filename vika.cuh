@@ -1078,6 +1078,34 @@ auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, 
     return ok(Void{});
 }
 
+// Device-to-device, async on the given stream - unlike the host<->device overloads above, which
+// are synchronous. Views, not owning tensors: every caller with a device-to-device copy to make
+// (AddLayer::forward, Model::accumulate_output_gradient) already only has a view in hand, either
+// sliced via first_n() or handed back from a KernelJob, never an owning tensor to copy whole.
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto copy(DeviceTensorView<const T> src, DeviceTensorView<T> dst, cudaStream_t stream) -> Result<Void, Error>
+{
+    if (src.to_extents() != dst.to_extents())
+    {
+        return error(VIKA_SHAPE_ERROR("copy device -> device: source holds %zu elements, destination holds %zu",
+                                      src.element_count(), dst.element_count()));
+    }
+
+    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpyAsync(dst.data, src.data, src.byte_count(), cudaMemcpyDeviceToDevice, stream));
+    return ok(Void{});
+}
+
+// Async zero-fill on the given stream, checked like every launch in the file - unlike the two
+// bare cudaMemsetAsync calls this replaces (MaxPool2DLayer::backward resetting d_inputs before
+// scatter-writing into it, MSELoss::forward resetting its running loss scalar), which ignored
+// cudaMemsetAsync's return value entirely.
+template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
+auto zero(DeviceTensorView<T> dst, cudaStream_t stream) -> Result<Void, Error>
+{
+    VIKA_RETURN_ON_CUDA_ERROR(cudaMemsetAsync(dst.data, 0, dst.byte_count(), stream));
+    return ok(Void{});
+}
+
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, Error>
 {
@@ -2619,7 +2647,7 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
     const usize W_out = upstream.extents[2];
     const usize C = d_inputs.extent(3);
 
-    cudaMemsetAsync(d_inputs.data(), 0, d_inputs.byte_count(), stream.handle());
+    UNWRAP_OR_RETURN(zero(d_inputs.view(), stream.handle()));
 
     dim3 block(16, 16, 1);
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
@@ -2661,8 +2689,7 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
     // out = inputs[0], then accumulate every remaining input into it - see accumulate_into's
     // doc comment for why this kernel, written for gradient fan-in summing, also does
     // elementwise add.
-    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpyAsync(sliced_outputs.data, inputs[0].data, inputs[0].byte_count(),
-                                              cudaMemcpyDeviceToDevice, stream.handle()));
+    UNWRAP_OR_RETURN(copy(inputs[0], sliced_outputs, stream.handle()));
 
     const usize threads = 256;
     const usize blocks = (inputs[0].element_count() + threads - 1) / threads;
@@ -2807,7 +2834,7 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
         check_trailing_extents(predictions.to_extents(), d_inputs.extents(), "mse forward", "predictions"));
     UNWRAP_OR_RETURN(check_trailing_extents(targets.to_extents(), d_inputs.extents(), "mse forward", "targets"));
 
-    cudaMemsetAsync(loss.data(), 0, sizeof(f32), stream.handle());
+    UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
 
     const usize n = predictions.element_count();
     const usize threads = 256;
@@ -3275,8 +3302,7 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
     const usize k = first.extents[0];
     auto sliced_accum = UNWRAP_OR_RETURN(d_outputs[node_id.value]->view().first_n(k));
 
-    VIKA_RETURN_ON_CUDA_ERROR(
-        cudaMemcpyAsync(sliced_accum.data, first.data, first.byte_count(), cudaMemcpyDeviceToDevice, stream.handle()));
+    UNWRAP_OR_RETURN(copy(first, sliced_accum, stream.handle()));
 
     const usize threads = 256;
     const usize blocks = (first.element_count() + threads - 1) / threads;
