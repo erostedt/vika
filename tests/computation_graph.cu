@@ -186,6 +186,55 @@ UTEST(computation_graph, add_too_few_inputs)
     EXPECT_TRUE(result.is_error());
 }
 
+UTEST(computation_graph, concat_shape)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    auto b = graph.dense(x, 8, 43).unwrap();
+    auto joined = graph.concat({a, b}).unwrap();
+
+    EXPECT_EXTENTS(graph.nodes[joined.value].output_extents, Extents({4, 24}));
+    EXPECT_EQ(graph.nodes[joined.value].inputs.size(), 2u);
+    EXPECT_EQ(graph.nodes[joined.value].inputs[0].value, a.value);
+    EXPECT_EQ(graph.nodes[joined.value].inputs[1].value, b.value);
+}
+
+UTEST(computation_graph, concat_n_ary)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    auto b = graph.dense(x, 8, 43).unwrap();
+    auto c = graph.dense(x, 4, 44).unwrap();
+    auto joined = graph.concat({a, b, c}).unwrap();
+
+    EXPECT_EXTENTS(graph.nodes[joined.value].output_extents, Extents({4, 28}));
+    EXPECT_EQ(graph.nodes[joined.value].inputs.size(), 3u);
+}
+
+UTEST(computation_graph, concat_invalid_node_id)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8});
+    auto a = graph.dense(x, 16, 42).unwrap();
+    const auto result = graph.concat({a, NodeId{99}});
+    EXPECT_TRUE(result.is_error());
+}
+
+UTEST(computation_graph, concat_rank_mismatch)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8, 8, 1});
+    auto flat = graph.flatten(x).unwrap();
+    const auto result = graph.concat({x, flat}); // rank 4 vs rank 2
+    EXPECT_TRUE(result.is_error());
+}
+
 UTEST(computation_graph, add_invalid_node_id)
 {
     using namespace vika;

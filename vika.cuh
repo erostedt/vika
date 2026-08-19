@@ -620,6 +620,46 @@ inline constexpr auto window_output_extent(usize input, usize window, usize stri
     return (input + 2 * padding - window) / stride + 1;
 }
 
+// Validates that every entry in `extents` agrees on every dimension except the last, and returns
+// the concatenated output shape: extents[0] with the last dimension replaced by the sum of every
+// input's last dimension. Shared by ComputationGraph::concat() (validating declared graph shapes)
+// and ConcatLayer::with_extents() (validating actual constructed shapes - layers are first-class
+// and must defend themselves even when used standalone, same reason Dense/Conv2D validate at both
+// their graph builder and their factory).
+inline auto concat_output_extents(const std::vector<Extents> &extents) -> Result<Extents, Error>
+{
+    if (extents.size() < 2)
+    {
+        return error(VIKA_SHAPE_ERROR("concat: expects at least 2 inputs, got %zu", extents.size()));
+    }
+
+    const auto rank = extents[0].size();
+    usize total_last_dim = 0;
+    for (usize i = 0; i < extents.size(); ++i)
+    {
+        if (extents[i].size() != rank)
+        {
+            return error(
+                VIKA_SHAPE_ERROR("concat: input %zu is rank %zu, expected rank %zu matching input 0", i,
+                                 extents[i].size(), rank));
+        }
+        for (usize d = 0; d + 1 < rank; ++d)
+        {
+            if (extents[i][d] != extents[0][d])
+            {
+                return error(VIKA_SHAPE_ERROR(
+                    "concat: input %zu's dimension %zu is %zu, expected %zu matching input 0", i, d, extents[i][d],
+                    extents[0][d]));
+            }
+        }
+        total_last_dim += extents[i][rank - 1];
+    }
+
+    Extents output_extents = extents[0];
+    output_extents[rank - 1] = total_last_dim;
+    return ok(output_extents);
+}
+
 // =============================================================================
 // Host Tensors
 // =============================================================================
@@ -1446,6 +1486,17 @@ __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
 // read/write to race.
 __global__ auto accumulate_into(DeviceTensorConstViewf delta, DeviceTensorViewf accum) -> void;
 
+// Copies `src` into a column-offset slice of `dst` along the last axis - Concat's forward, one
+// launch per input. Both tensors are treated as flattened [rows, width] regardless of actual
+// rank: row-major storage makes the last axis contiguous, so every other dimension (including
+// batch) just stacks as more rows. One thread per src element (src is the narrow side).
+__global__ auto concat_copy(DeviceTensorConstViewf src, DeviceTensorViewf dst, usize dst_col_offset) -> void;
+
+// Reverse of concat_copy: copies a column-offset slice of `src` (the wide upstream gradient) into
+// `dst` (one input's own narrow d_input buffer) - Concat's backward, one launch per input. One
+// thread per dst element (dst is the narrow side here, unlike concat_copy's src).
+__global__ auto concat_split(DeviceTensorConstViewf src, usize src_col_offset, DeviceTensorViewf dst) -> void;
+
 __host__ __device__ auto sigmoid(f32 x) -> f32;
 
 auto uniform_tensor(DeviceTensorViewf tensor, u32 seed, cudaStream_t stream) -> KernelJob<Void>;
@@ -1585,6 +1636,28 @@ struct AddLayer
     Stream stream;
 };
 
+// N-ary, joins along the last axis only. Unlike AddLayer, genuinely needs a kernel launch in
+// both directions (concat_copy/concat_split) - concatenation is a strided row/column copy, not
+// elementwise, so nothing here can reuse an existing kernel the way Add's forward did. Also
+// unlike AddLayer, backward doesn't return the same view N times: it must produce N distinct
+// buffers (one per original input, each that input's own shape), so this layer owns d_inputs as
+// a vector of owning tensors instead of a single shared one.
+struct ConcatLayer
+{
+    static auto with_extents(const std::vector<Extents> &input_extents) -> Result<ConcatLayer, Error>;
+
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
+
+    // One job per input, each from its own d_inputs[i] buffer - unlike AddLayer's identical jobs,
+    // these differ (each is a different slice of upstream, split back to its own input's shape).
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+
+    DeviceOwningTensorf outputs;
+    std::vector<DeviceOwningTensorf> d_inputs;
+
+    Stream stream;
+};
+
 struct MSELoss
 {
     static auto with_extents(const Extents &extents) -> Result<MSELoss, Error>;
@@ -1646,7 +1719,15 @@ struct AddSpec
 {
 };
 
-using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, MaxPool2DSpec, FlattenSpec, AddSpec>;
+// N-ary, joined along the last axis only. No count or shape info stored here either, for the
+// same reason as AddSpec: make_layer already gets one Extents per input (pred_extents), so a
+// second copy of that information here would just be a could-get-out-of-sync duplicate.
+struct ConcatSpec
+{
+};
+
+using LayerSpec =
+    std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, MaxPool2DSpec, FlattenSpec, AddSpec, ConcatSpec>;
 
 struct Node
 {
@@ -1661,8 +1742,8 @@ struct InputLayer
     auto backward(DeviceTensorConstViewf upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 };
 
-using LayerKind =
-    std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer, AddLayer>;
+using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer,
+                               AddLayer, ConcatLayer>;
 
 struct Layer
 {
@@ -1778,6 +1859,7 @@ struct ComputationGraph
                 std::optional<u32> requested_seed = std::nullopt) -> Result<NodeId, Error>;
     auto maxpool2d(NodeId input, usize pool_height, usize pool_width, usize stride) -> Result<NodeId, Error>;
     auto add(std::vector<NodeId> inputs) -> Result<NodeId, Error>;
+    auto concat(std::vector<NodeId> inputs) -> Result<NodeId, Error>;
     auto compile(NodeId output) -> Result<Model, Error>;
 
   private:
@@ -2581,6 +2663,100 @@ auto AddLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<K
     return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count, KernelJob<DeviceTensorConstViewf>::ready(upstream));
 }
 
+auto ConcatLayer::with_extents(const std::vector<Extents> &input_extents) -> Result<ConcatLayer, Error>
+{
+    const auto output_extents = UNWRAP_OR_RETURN(concat_output_extents(input_extents));
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(output_extents));
+
+    std::vector<DeviceOwningTensorf> d_inputs;
+    d_inputs.reserve(input_extents.size());
+    for (const auto &extents : input_extents)
+    {
+        d_inputs.push_back(UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents)));
+    }
+
+    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    return ok(
+        ConcatLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
+}
+
+auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
+{
+    UNWRAP_OR_RETURN(check_input_count(inputs, d_inputs.size(), "concat forward"));
+
+    for (usize i = 0; i < inputs.size(); ++i)
+    {
+        if (trailing_extents(inputs[i].to_extents()) != trailing_extents(d_inputs[i].extents()))
+        {
+            return error(VIKA_SHAPE_ERROR(
+                "concat forward: input %zu is rank %zu with %zu elements, layer expects rank %zu with %zu", i,
+                inputs[i].rank, inputs[i].element_count(), d_inputs[i].extents().size(), d_inputs[i].element_count()));
+        }
+        if (inputs[i].extents[0] != inputs[0].extents[0])
+        {
+            return error(VIKA_SHAPE_ERROR("concat forward: input %zu has batch %zu but input 0 has batch %zu", i,
+                                          inputs[i].extents[0], inputs[0].extents[0]));
+        }
+    }
+
+    const usize k = inputs[0].extents[0];
+    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+
+    const usize threads = 256;
+    usize col_offset = 0;
+    for (usize i = 0; i < inputs.size() - 1; ++i)
+    {
+        const usize blocks = (inputs[i].element_count() + threads - 1) / threads;
+        UNWRAP_OR_RETURN(launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
+                                       stream.handle(), inputs[i], sliced_outputs, col_offset)
+                             .wait());
+        col_offset += inputs[i].extents[inputs[i].rank - 1];
+    }
+
+    const auto &last_input = inputs.back();
+    const usize blocks = (last_input.element_count() + threads - 1) / threads;
+    return launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+                         last_input, sliced_outputs, col_offset);
+}
+
+auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
+{
+    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
+    {
+        const auto err = VIKA_SHAPE_ERROR(
+            "concat backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
+            upstream.rank, upstream.element_count(), outputs.extents().size(), outputs.element_count());
+        return std::vector<KernelJob<DeviceTensorConstViewf>>(d_inputs.size(), KernelJob<DeviceTensorConstViewf>::failed(err));
+    }
+
+    const usize k = upstream.extents[0];
+    const usize threads = 256;
+    std::vector<KernelJob<DeviceTensorConstViewf>> jobs;
+    jobs.reserve(d_inputs.size());
+
+    usize col_offset = 0;
+    for (auto &d_input : d_inputs)
+    {
+        auto sliced_result = d_input.view().first_n(k);
+        if (sliced_result.is_error())
+        {
+            // Every d_inputs[i] was allocated with the same batch capacity, so this can only
+            // happen if that invariant was somehow broken - fail every job uniformly rather than
+            // return a shorter vector than d_inputs.size().
+            return std::vector<KernelJob<DeviceTensorConstViewf>>(
+                d_inputs.size(), KernelJob<DeviceTensorConstViewf>::failed(sliced_result.unwrap_error()));
+        }
+        auto sliced_d_input = sliced_result.unwrap();
+
+        const usize blocks = (sliced_d_input.element_count() + threads - 1) / threads;
+        jobs.push_back(launch_kernel(concat_split, sliced_d_input.const_view(), dim3(blocks), dim3(threads),
+                                     stream.handle(), upstream, col_offset, sliced_d_input));
+
+        col_offset += sliced_d_input.extents[sliced_d_input.rank - 1];
+    }
+    return jobs;
+}
+
 auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
 {
     auto loss = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
@@ -2844,6 +3020,33 @@ auto ComputationGraph::add(std::vector<NodeId> inputs) -> Result<NodeId, Error>
     return ok(id);
 }
 
+auto ComputationGraph::concat(std::vector<NodeId> inputs) -> Result<NodeId, Error>
+{
+    for (const auto &input : inputs)
+    {
+        if (input.value >= nodes.size())
+        {
+            return error(VIKA_GRAPH_ERROR("concat: invalid NodeId"));
+        }
+    }
+
+    std::vector<Extents> input_extents;
+    input_extents.reserve(inputs.size());
+    for (const auto &input : inputs)
+    {
+        input_extents.push_back(nodes[input.value].output_extents);
+    }
+    const auto output_extents = UNWRAP_OR_RETURN(concat_output_extents(input_extents));
+
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = ConcatSpec{},
+        .output_extents = output_extents,
+        .inputs = std::move(inputs),
+    });
+    return ok(id);
+}
+
 auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Extents> &pred_extents)
     -> Result<Layer, Error>
 {
@@ -2887,6 +3090,10 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, AddSpec>)
             {
                 return AddLayer::with_extents(pred_extents[0], pred_extents.size()).map(as_trainable);
+            }
+            else if constexpr (std::is_same_v<T, ConcatSpec>)
+            {
+                return ConcatLayer::with_extents(pred_extents).map(as_trainable);
             }
             else
             {
@@ -3334,6 +3541,34 @@ __global__ auto accumulate_into(DeviceTensorConstViewf delta, DeviceTensorViewf 
     {
         accum[i] += delta[i];
     }
+}
+
+__global__ auto concat_copy(DeviceTensorConstViewf src, DeviceTensorViewf dst, usize dst_col_offset) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= src.element_count())
+    {
+        return;
+    }
+    const usize src_width = src.extents[src.rank - 1];
+    const usize dst_width = dst.extents[dst.rank - 1];
+    const usize row = i / src_width;
+    const usize col = i % src_width;
+    dst[row * dst_width + dst_col_offset + col] = src[i];
+}
+
+__global__ auto concat_split(DeviceTensorConstViewf src, usize src_col_offset, DeviceTensorViewf dst) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= dst.element_count())
+    {
+        return;
+    }
+    const usize src_width = src.extents[src.rank - 1];
+    const usize dst_width = dst.extents[dst.rank - 1];
+    const usize row = i / dst_width;
+    const usize col = i % dst_width;
+    dst[i] = src[row * src_width + src_col_offset + col];
 }
 
 __global__ auto sum_rows(DeviceTensorConstViewf matrix, DeviceTensorViewf out) -> void
