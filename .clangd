@@ -8,3 +8,4 @@ CompileFlags:
     - "--compiler-options=*"
   Add:
     - "--cuda-gpu-arch=sm_86"
+    - "-DVIKA_IMPLEMENTATION"
