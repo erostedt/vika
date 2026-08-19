@@ -99,6 +99,13 @@ auto map(const std::vector<T> &in, UnaryOperation op)
     return out;
 }
 
+template <typename T, typename Predicate>
+auto all_of(const std::vector<T> &in, Predicate pred) -> bool
+{
+    using namespace std;
+    return all_of(begin(in), end(in), pred);
+}
+
 template <typename T, usize Capacity>
 class FixedVector
 {
@@ -3036,21 +3043,15 @@ auto ComputationGraph::add(std::vector<NodeId> inputs) -> Result<NodeId, Error>
     {
         return error(VIKA_GRAPH_ERROR("add: expects at least 2 inputs, got %zu", inputs.size()));
     }
-    for (const auto &input : inputs)
+    if (!all_of(inputs, [&](const NodeId &n) { return n.value < nodes.size(); }))
     {
-        if (input.value >= nodes.size())
-        {
-            return error(VIKA_GRAPH_ERROR("add: invalid NodeId"));
-        }
+        return error(VIKA_GRAPH_ERROR("add: invalid NodeId"));
     }
 
     const auto &first_extents = nodes[inputs[0].value].output_extents;
-    for (usize i = 1; i < inputs.size(); ++i)
+    if (!all_of(inputs, [&](const NodeId &n) { return nodes[n.value].output_extents == first_extents; }))
     {
-        if (nodes[inputs[i].value].output_extents != first_extents)
-        {
-            return error(VIKA_SHAPE_ERROR("add: inputs must have the same shape"));
-        }
+        return error(VIKA_SHAPE_ERROR("add: inputs must have the same shape"));
     }
 
     const NodeId id{nodes.size()};
@@ -3064,12 +3065,9 @@ auto ComputationGraph::add(std::vector<NodeId> inputs) -> Result<NodeId, Error>
 
 auto ComputationGraph::concat(std::vector<NodeId> inputs) -> Result<NodeId, Error>
 {
-    for (const auto &input : inputs)
+    if (!all_of(inputs, [&](const NodeId &n) { return n.value < nodes.size(); }))
     {
-        if (input.value >= nodes.size())
-        {
-            return error(VIKA_GRAPH_ERROR("concat: invalid NodeId"));
-        }
+        return error(VIKA_GRAPH_ERROR("concat: invalid NodeId"));
     }
 
     const auto input_extents = map(inputs, [&](const NodeId &input) { return nodes[input.value].output_extents; });
