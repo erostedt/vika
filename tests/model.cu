@@ -300,3 +300,70 @@ UTEST(model, branching_concat_forward_and_backward)
     EXPECT_FALSE(are_close(weights_a_before, weights_a_after, 1e-8f));
     EXPECT_FALSE(are_close(weights_b_before, weights_b_after, 1e-8f));
 }
+
+UTEST(model, fan_in_accumulation_across_multiple_backward_calls)
+{
+    using namespace vika;
+
+    // input -> trunk -\
+    //                   add -> sigmoid -> output
+    //          trunk -/
+    //
+    // trunk's output has two consumers (branch_a, branch_b), and trunk itself has its own
+    // predecessor (input) - unlike the branching tests above, where the fan-out point is the
+    // input node itself. Model::backward skips accumulation entirely for any node with
+    // preds.empty() (nothing further upstream to propagate to), and the input node always has
+    // empty preds - so this is the only test that actually exercises
+    // Model::accumulate_output_gradient's jobs.size() > 1 path, and the only one that calls
+    // backward() more than once, to exercise reusing the same pre-allocated accumulation buffer
+    // across repeated calls rather than just a single one.
+    constexpr usize batch_size = 4;
+
+    ComputationGraph graph{batch_size};
+    auto x = graph.input({2});
+    auto trunk = graph.dense(x, 4, 42).unwrap();
+    auto branch_a = graph.dense(trunk, 3, 43).unwrap();
+    auto branch_b = graph.dense(trunk, 3, 44).unwrap();
+    auto sum = graph.add({branch_a, branch_b}).unwrap();
+    auto out = graph.sigmoid(sum).unwrap();
+
+    auto model = graph.compile(out).unwrap();
+
+    const auto cpu_inputs =
+        HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_targets = HostTensor2f::zero({batch_size, 3}).unwrap();
+    const auto gpu_inputs = upload(cpu_inputs).unwrap();
+    const auto gpu_targets = upload(cpu_targets).unwrap();
+
+    auto loss_fn = MSELoss::with_extents({batch_size, 3}).unwrap();
+    auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.1f}).unwrap();
+
+    auto &dense_trunk = std::get<DenseLayer>(model.layers[trunk.value].kind);
+    const auto trunk_weights_before = download(dense_trunk.weights.value).unwrap();
+
+    f32 initial_loss = 0.0f;
+    f32 final_loss = 0.0f;
+    for (usize step = 1; step <= 50; ++step)
+    {
+        const auto prediction = model.forward(gpu_inputs.const_view()).unwrap();
+        const auto loss_view = loss_fn.forward(prediction, gpu_targets.const_view()).wait().unwrap();
+        const auto loss_grad = loss_fn.backward(prediction, gpu_targets.const_view()).wait().unwrap();
+        model.backward(loss_grad).unwrap();
+        model.step(optimizer, step).unwrap();
+
+        const auto loss_cpu = download(loss_view).unwrap();
+        if (step == 1)
+        {
+            initial_loss = loss_cpu[0];
+        }
+        final_loss = loss_cpu[0];
+    }
+
+    // trunk only ever receives a gradient by summing branch_a's and branch_b's contributions in
+    // accumulate_output_gradient - if that summing were wrong, or the reused accumulation buffer
+    // got corrupted across repeated calls, trunk's weights would either not move or move
+    // incorrectly, and loss wouldn't reliably decrease over 50 steps of reusing the same buffer.
+    const auto trunk_weights_after = download(dense_trunk.weights.value).unwrap();
+    EXPECT_FALSE(are_close(trunk_weights_before, trunk_weights_after, 1e-8f));
+    EXPECT_TRUE(final_loss < initial_loss);
+}

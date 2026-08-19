@@ -2043,6 +2043,23 @@ auto check_input_count(const std::vector<DeviceTensorConstViewf> &inputs, usize 
     return ok(Void{});
 }
 
+// Every layer's forward()/backward()/weight_gradients() takes a runtime tensor whose leading
+// (batch) dimension is expected to vary from call to call, but whose every other dimension must
+// match what the layer was built for - checked via trailing_extents() rather than a full
+// comparison for exactly that reason. `context` and `name` reproduce what every call site used to
+// spell out by hand (e.g. "dense forward", "input").
+auto check_trailing_extents(const Extents &actual, const Extents &expected, const char *context, const char *name)
+    -> Result<Void, Error>
+{
+    if (trailing_extents(actual) != trailing_extents(expected))
+    {
+        return error(VIKA_SHAPE_ERROR("%s: %s is rank %zu with %zu elements, layer expects rank %zu with %zu", context,
+                                      name, actual.size(), element_count(actual), expected.size(),
+                                      element_count(expected)));
+    }
+    return ok(Void{});
+}
+
 auto checked_element_count(const Extents &extents) -> Result<usize, Error>
 {
     usize count = 1;
@@ -2125,6 +2142,18 @@ inline auto adam_bias_correction(const AdamParameters &params, usize t) -> std::
 auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamState> &states, cudaStream_t stream,
                        const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>
 {
+    if (states.size() != parameters.size())
+    {
+        // states[i] is indexed in lockstep with parameters[i] below, with nothing structural
+        // tying the two together - states comes from AdamOptimizer::from_model, built once at
+        // construction from the const parameters() overload, while parameters here comes from
+        // the non-const overload called fresh every step. If a layer's two overloads ever drift
+        // out of sync (a parameter added to one but not the other), this is the one place both
+        // vectors meet, so it's the one place that can catch it before indexing off the end.
+        return {error(VIKA_UNSUPPORTED_ERROR("update_parameters: %zu states but %zu parameters", states.size(),
+                                             parameters.size()))};
+    }
+
     const auto [m_hat_scale, v_hat_scale] = adam_bias_correction(params, t);
     const usize threads = 256;
 
@@ -2201,12 +2230,7 @@ auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> K
     UNWRAP_OR_RETURN(check_input_count(inputs, 1, "dense forward"));
     const auto &input = inputs[0];
 
-    if (trailing_extents(input.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(
-            VIKA_SHAPE_ERROR("dense forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             input.rank, input.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(input.to_extents(), d_inputs.extents(), "dense forward", "input"));
 
     const usize k = input.extents[0];
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
@@ -2229,13 +2253,8 @@ auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> K
 auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    if (trailing_extents(upstream_gradient.to_extents()) != trailing_extents(outputs.extents()))
-    {
-        return {KernelJob<DeviceTensorConstViewf>::failed(
-            VIKA_SHAPE_ERROR("dense backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             upstream_gradient.rank, upstream_gradient.element_count(), outputs.extents().size(),
-                             outputs.element_count()))};
-    }
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(upstream_gradient.to_extents(), outputs.extents(), "dense backward", "upstream"));
 
     const usize k = upstream_gradient.extents[0];
     auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -2253,19 +2272,10 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    if (trailing_extents(inputs.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return Job::failed(VIKA_SHAPE_ERROR(
-            "dense weight_gradients: input is rank %zu with %zu elements, layer expects rank %zu with %zu", inputs.rank,
-            inputs.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
-    if (trailing_extents(upstream_gradient.to_extents()) != trailing_extents(outputs.extents()))
-    {
-        return Job::failed(VIKA_SHAPE_ERROR(
-            "dense weight_gradients: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            upstream_gradient.rank, upstream_gradient.element_count(), outputs.extents().size(),
-            outputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(inputs.to_extents(), d_inputs.extents(), "dense weight_gradients", "input"));
+    UNWRAP_OR_RETURN(check_trailing_extents(upstream_gradient.to_extents(), outputs.extents(), "dense weight_gradients",
+                                            "upstream"));
 
     // Grid must cover weights.grad's own shape (feature_count x neuron_count) - the tensor the
     // matmul below actually writes - not d_inputs' (batch_capacity x feature_count). Sizing from
@@ -2325,12 +2335,7 @@ auto SigmoidLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
     const auto &input = inputs[0];
 
     const auto input_extents = input.to_extents();
-    if (trailing_extents(input_extents) != trailing_extents(outputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "sigmoid forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            input_extents.size(), element_count(input_extents), outputs.extents().size(), outputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(input_extents, outputs.extents(), "sigmoid forward", "input"));
 
     const usize k = input_extents[0];
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
@@ -2346,13 +2351,7 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     const auto upstream_extents = upstream_gradient.to_extents();
-    if (trailing_extents(upstream_extents) != trailing_extents(d_inputs.extents()))
-    {
-        return {KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "sigmoid backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            upstream_extents.size(), element_count(upstream_extents), d_inputs.extents().size(),
-            d_inputs.element_count()))};
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(upstream_extents, d_inputs.extents(), "sigmoid backward", "upstream"));
 
     // Invariant: with_extents allocates both from the same extents.
     if (d_inputs.extents() != outputs.extents())
@@ -2486,12 +2485,7 @@ auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     UNWRAP_OR_RETURN(check_input_count(inputs, 1, "conv2d forward"));
     const auto &input = inputs[0];
 
-    if (trailing_extents(input.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(
-            VIKA_SHAPE_ERROR("conv2d forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             input.rank, input.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(input.to_extents(), d_inputs.extents(), "conv2d forward", "input"));
 
     const usize k = input.extents[0];
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
@@ -2509,12 +2503,7 @@ auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
 
 auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
-    {
-        return {KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "conv2d backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
-            upstream.element_count(), outputs.extents().size(), outputs.element_count()))};
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(upstream.to_extents(), outputs.extents(), "conv2d backward", "upstream"));
 
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -2535,18 +2524,10 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    if (trailing_extents(inputs.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return Job::failed(VIKA_SHAPE_ERROR(
-            "conv2d weight_gradients: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            inputs.rank, inputs.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
-    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
-    {
-        return Job::failed(VIKA_SHAPE_ERROR(
-            "conv2d weight_gradients: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            upstream.rank, upstream.element_count(), outputs.extents().size(), outputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(inputs.to_extents(), d_inputs.extents(), "conv2d weight_gradients", "input"));
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(upstream.to_extents(), outputs.extents(), "conv2d weight_gradients", "upstream"));
 
     const usize filter_count = filters.grad.element_count();
     const usize C_out = biases.grad.element_count();
@@ -2610,12 +2591,7 @@ auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
     UNWRAP_OR_RETURN(check_input_count(inputs, 1, "maxpool forward"));
     const auto &input = inputs[0];
 
-    if (trailing_extents(input.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(
-            VIKA_SHAPE_ERROR("maxpool forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-                             input.rank, input.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(input.to_extents(), d_inputs.extents(), "maxpool forward", "input"));
 
     const usize k = input.extents[0];
     auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
@@ -2634,12 +2610,7 @@ auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
 
 auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
-    {
-        return {KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "maxpool backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
-            upstream.element_count(), outputs.extents().size(), outputs.element_count()))};
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(upstream.to_extents(), outputs.extents(), "maxpool backward", "upstream"));
 
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -2675,12 +2646,8 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
 
     for (usize i = 0; i < inputs.size(); ++i)
     {
-        if (trailing_extents(inputs[i].to_extents()) != trailing_extents(outputs.extents()))
-        {
-            return error(VIKA_SHAPE_ERROR(
-                "add forward: input %zu is rank %zu with %zu elements, layer expects rank %zu with %zu", i,
-                inputs[i].rank, inputs[i].element_count(), outputs.extents().size(), outputs.element_count()));
-        }
+        UNWRAP_OR_RETURN(check_trailing_extents(inputs[i].to_extents(), outputs.extents(), "add forward",
+                                                ("input " + std::to_string(i)).c_str()));
         if (inputs[i].extents[0] != inputs[0].extents[0])
         {
             return error(VIKA_SHAPE_ERROR("add forward: input %zu has batch %zu but input 0 has batch %zu", i,
@@ -2721,13 +2688,11 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
 
 auto AddLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
+    const auto check = check_trailing_extents(upstream.to_extents(), outputs.extents(), "add backward", "upstream");
+    if (check.is_error())
     {
-        const auto err = VIKA_SHAPE_ERROR(
-            "add backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
-            upstream.element_count(), outputs.extents().size(), outputs.element_count());
-        return std::vector<KernelJob<DeviceTensorConstViewf>>(input_count,
-                                                              KernelJob<DeviceTensorConstViewf>::failed(err));
+        return std::vector<KernelJob<DeviceTensorConstViewf>>(
+            input_count, KernelJob<DeviceTensorConstViewf>::failed(check.unwrap_error()));
     }
 
     // d/dx_i(sum) = 1 for every input: the same upstream gradient flows unchanged to all of them,
@@ -2754,12 +2719,8 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
 
     for (usize i = 0; i < inputs.size(); ++i)
     {
-        if (trailing_extents(inputs[i].to_extents()) != trailing_extents(d_inputs[i].extents()))
-        {
-            return error(VIKA_SHAPE_ERROR(
-                "concat forward: input %zu is rank %zu with %zu elements, layer expects rank %zu with %zu", i,
-                inputs[i].rank, inputs[i].element_count(), d_inputs[i].extents().size(), d_inputs[i].element_count()));
-        }
+        UNWRAP_OR_RETURN(check_trailing_extents(inputs[i].to_extents(), d_inputs[i].extents(), "concat forward",
+                                                ("input " + std::to_string(i)).c_str()));
         if (inputs[i].extents[0] != inputs[0].extents[0])
         {
             return error(VIKA_SHAPE_ERROR("concat forward: input %zu has batch %zu but input 0 has batch %zu", i,
@@ -2778,8 +2739,8 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
         // safe: same stream already serializes these launches, and a runtime failure (as opposed
         // to a bad launch config) still surfaces on whichever job the caller eventually waits on.
         const usize blocks = (inputs[i].element_count() + threads - 1) / threads;
-        auto job = launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
-                                 stream.handle(), inputs[i], sliced_outputs, col_offset);
+        auto job = launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+                                 inputs[i], sliced_outputs, col_offset);
         if (job.is_error())
         {
             return job;
@@ -2795,13 +2756,11 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
 
 auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    if (trailing_extents(upstream.to_extents()) != trailing_extents(outputs.extents()))
+    const auto check = check_trailing_extents(upstream.to_extents(), outputs.extents(), "concat backward", "upstream");
+    if (check.is_error())
     {
-        const auto err = VIKA_SHAPE_ERROR(
-            "concat backward: upstream is rank %zu with %zu elements, layer expects rank %zu with %zu", upstream.rank,
-            upstream.element_count(), outputs.extents().size(), outputs.element_count());
-        return std::vector<KernelJob<DeviceTensorConstViewf>>(d_inputs.size(),
-                                                              KernelJob<DeviceTensorConstViewf>::failed(err));
+        return std::vector<KernelJob<DeviceTensorConstViewf>>(
+            d_inputs.size(), KernelJob<DeviceTensorConstViewf>::failed(check.unwrap_error()));
     }
 
     const usize k = upstream.extents[0];
@@ -2844,18 +2803,9 @@ auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
 auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    if (trailing_extents(predictions.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "mse forward: predictions is rank %zu with %zu elements, layer expects rank %zu with %zu", predictions.rank,
-            predictions.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
-    if (trailing_extents(targets.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "mse forward: targets is rank %zu with %zu elements, layer expects rank %zu with %zu", targets.rank,
-            targets.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(predictions.to_extents(), d_inputs.extents(), "mse forward", "predictions"));
+    UNWRAP_OR_RETURN(check_trailing_extents(targets.to_extents(), d_inputs.extents(), "mse forward", "targets"));
 
     cudaMemsetAsync(loss.data(), 0, sizeof(f32), stream.handle());
 
@@ -2868,18 +2818,9 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
 auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    if (trailing_extents(predictions.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "mse backward: predictions is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            predictions.rank, predictions.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
-    if (trailing_extents(targets.to_extents()) != trailing_extents(d_inputs.extents()))
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "mse backward: targets is rank %zu with %zu elements, layer expects rank %zu with %zu", targets.rank,
-            targets.element_count(), d_inputs.extents().size(), d_inputs.element_count()));
-    }
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(predictions.to_extents(), d_inputs.extents(), "mse backward", "predictions"));
+    UNWRAP_OR_RETURN(check_trailing_extents(targets.to_extents(), d_inputs.extents(), "mse backward", "targets"));
 
     const usize k = predictions.extents[0];
     auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -3334,8 +3275,8 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
     const usize k = first.extents[0];
     auto sliced_accum = UNWRAP_OR_RETURN(d_outputs[node_id.value]->view().first_n(k));
 
-    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpyAsync(sliced_accum.data, first.data, first.byte_count(),
-                                              cudaMemcpyDeviceToDevice, stream.handle()));
+    VIKA_RETURN_ON_CUDA_ERROR(
+        cudaMemcpyAsync(sliced_accum.data, first.data, first.byte_count(), cudaMemcpyDeviceToDevice, stream.handle()));
 
     const usize threads = 256;
     const usize blocks = (first.element_count() + threads - 1) / threads;
