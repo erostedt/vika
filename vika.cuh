@@ -1526,8 +1526,8 @@ __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
 
 // accum[i] += delta[i] for every element. Two unrelated uses share this: summing multiple
 // gradient contributions into one node's upstream when a node has more than one consumer (see
-// accumulate_contributions), and AddLayer's forward (out = a + b, computed as out = a then
-// accumulate_into(b, out)). Safe to have accum also be one of the buffers a caller reads
+// Model::accumulate_output_gradient), and AddLayer's forward (out = a + b, computed as out = a
+// then accumulate_into(b, out)). Safe to have accum also be one of the buffers a caller reads
 // elsewhere: every thread only ever touches its own index, so there is no cross-element
 // read/write to race.
 __global__ auto accumulate_into(DeviceTensorConstViewf delta, DeviceTensorViewf accum) -> void;
@@ -1838,26 +1838,36 @@ struct Model
     // consumer that has run so far, in the order they ran. A node with a single consumer (the
     // common case today) ends up with exactly one entry; a node with several consumers collects
     // one from each, to be summed rather than have the last one silently overwrite the rest (see
-    // accumulate_contributions). Zero entries by the time a node's own turn comes up means either
+    // accumulate_output_gradient). Zero entries by the time a node's own turn comes up means either
     // it's never been visited, or - just as validly - it has no consumer reachable from
     // output_node at all (a dead branch left over from a fan-out that was never merged back in);
     // backward() treats that as nothing to propagate, not an error.
     std::vector<std::vector<KernelJob<DeviceTensorConstViewf>>> backward_jobs;
 
-    // Owns every buffer accumulate_contributions allocates during a backward() call. Has to
-    // outlive backward() itself, not just the call: step() re-reads backward_jobs afterwards to
-    // get the same upstream gradient for weight_gradients(), so an accumulated (multi-consumer)
-    // node's buffer must still be alive then. Cleared at the start of the next backward() call.
-    std::vector<DeviceOwningTensorf> accumulation_scratch;
+    // Gradient of the loss w.r.t. each node's output, indexed like forward_jobs/backward_jobs -
+    // same quantity every node has, but only given real storage where it actually needs summing.
+    // nullopt for any node with at most one consumer (most of the graph): there, the value
+    // already lives in that sole consumer's own job/buffer, so accumulate_output_gradient()
+    // returns it directly instead of allocating a redundant copy. Populated once at compile()
+    // time for every node with more than one consumer, and never touched again afterward except
+    // to be sliced via first_n(k), same as every layer's own outputs/d_inputs -
+    // accumulate_output_gradient() only ever reads these; a training step never calls cudaMalloc.
+    std::vector<std::optional<DeviceOwningTensorf>> d_outputs;
 
     // Not any one layer's stream - Flatten2DLayer/InputLayer don't have one, since they launch no
     // kernels of their own - so graph-level bookkeeping that isn't tied to a specific layer (like
-    // accumulate_contributions) needs a stream to call its own.
+    // accumulate_output_gradient) needs a stream to call its own.
     Stream stream;
 
     auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>;
     auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>;
     auto step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>;
+
+    // The (possibly summed) gradient of the loss w.r.t. node_id's output - what gets fed to that
+    // node's own layer.backward(). Exactly one consumer is a plain wait, no allocation or launch:
+    // see d_outputs' own comment for why. More than one accumulates into d_outputs[node_id],
+    // which by then is guaranteed to already hold a value.
+    auto accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>;
 };
 
 struct AdamOptimizer
@@ -2691,9 +2701,19 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
     const usize blocks = (inputs[0].element_count() + threads - 1) / threads;
     for (usize i = 1; i < inputs.size() - 1; ++i)
     {
-        UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
-                                       stream.handle(), inputs[i], sliced_outputs)
-                             .wait());
+        // Checked, not waited: every launch here shares one stream, which already serializes
+        // them in submission order with no host-side sync needed. is_error() only inspects the
+        // launch-time result already captured by launch_kernel (cudaGetLastError right after
+        // <<<>>>) - cheap, and the only way to catch a bad launch config, since that error is
+        // consumed immediately and won't reappear on a later wait(). A runtime failure inside the
+        // kernel itself, if any, still surfaces correctly on whichever job the caller eventually
+        // waits on, since cudaStreamSynchronize reports the stream's accumulated status.
+        auto job = launch_kernel(accumulate_into, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
+                                 stream.handle(), inputs[i], sliced_outputs);
+        if (job.is_error())
+        {
+            return job;
+        }
     }
     return launch_kernel(accumulate_into, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
                          inputs.back(), sliced_outputs);
@@ -2754,10 +2774,16 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     usize col_offset = 0;
     for (usize i = 0; i < inputs.size() - 1; ++i)
     {
+        // Checked, not waited - see the identical comment in AddLayer::forward for why this is
+        // safe: same stream already serializes these launches, and a runtime failure (as opposed
+        // to a bad launch config) still surfaces on whichever job the caller eventually waits on.
         const usize blocks = (inputs[i].element_count() + threads - 1) / threads;
-        UNWRAP_OR_RETURN(launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
-                                       stream.handle(), inputs[i], sliced_outputs, col_offset)
-                             .wait());
+        auto job = launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
+                                 stream.handle(), inputs[i], sliced_outputs, col_offset);
+        if (job.is_error())
+        {
+            return job;
+        }
         col_offset += inputs[i].extents[inputs[i].rank - 1];
     }
 
@@ -3222,6 +3248,20 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
 
     auto execution_order = map(topo_order, [](usize idx) { return NodeId{idx}; });
 
+    // Pre-allocated here, once, for every node with more than one consumer (adj[idx] - built
+    // above for the topological sort - is already exactly "who consumes idx", so this is free
+    // information, not a second pass over the graph). accumulate_output_gradient() only ever
+    // reads these buffers, never allocates - the whole point of doing it here instead of lazily
+    // on first use in backward() is that a training step never touches cudaMalloc at all.
+    std::vector<std::optional<DeviceOwningTensorf>> d_outputs(nodes.size());
+    for (usize idx = 0; idx < nodes.size(); ++idx)
+    {
+        if (adj[idx].size() > 1)
+        {
+            d_outputs[idx] = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(nodes[idx].output_extents));
+        }
+    }
+
     auto stream = UNWRAP_OR_RETURN(Stream::create());
     return ok(Model{
         .batch_size = batch_size,
@@ -3230,6 +3270,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         .execution_order = std::move(execution_order),
         .input_node = input_node,
         .output_node = output,
+        .d_outputs = std::move(d_outputs),
         .stream = std::move(stream),
     });
 }
@@ -3269,41 +3310,44 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
     return ok(result.unwrap());
 }
 
-// Waits every contribution in `jobs` (in the order they were pushed) and combines them into the
-// single upstream gradient a node's own backward() needs. Exactly one consumer - the common case
-// today - is a plain wait with no extra allocation or kernel launch: the view already lives in
-// that job's own buffer, owned elsewhere. More than one consumer (a fan-out node) allocates a
-// fresh accumulation buffer, appended to `scratch` to keep it alive for the rest of
-// Model::backward() - the launches reading it are async, so it must outlive this call - and sums
-// every contribution into it with accumulate_into. Order of summation is the order jobs were
-// pushed, which is execution_order's (deterministic) order - floating-point addition isn't
-// associative, so this keeps repeated backward() calls on the same model bit-for-bit reproducible.
-auto accumulate_contributions(std::vector<KernelJob<DeviceTensorConstViewf>> &jobs,
-                              std::vector<DeviceOwningTensorf> &scratch, cudaStream_t stream)
-    -> Result<DeviceTensorConstViewf, Error>
+// Order of summation is the order jobs were pushed, which is execution_order's (deterministic)
+// order - floating-point addition isn't associative, so this keeps repeated backward() calls on
+// the same model bit-for-bit reproducible.
+auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>
 {
-    const auto first = UNWRAP_OR_RETURN(jobs[0].wait());
+    auto &jobs = backward_jobs[node_id.value];
+    if (jobs.empty())
+    {
+        // backward()'s own loop treats this as an expected, silent no-op (a dead branch with no
+        // consumer reachable from output_node) and never calls this far for such a node - but
+        // this method is public and has no way to know that context, so a direct standalone call
+        // here must fail loudly instead of indexing jobs[0] on an empty vector.
+        return error(
+            VIKA_GRAPH_ERROR("accumulate_output_gradient: node %zu has no gradient contributions yet", node_id.value));
+    }
     if (jobs.size() == 1)
     {
-        return ok(first);
+        return jobs[0].wait();
     }
 
-    auto accum = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(first.to_extents()));
-    VIKA_RETURN_ON_CUDA_ERROR(
-        cudaMemcpyAsync(accum.data(), first.data, first.byte_count(), cudaMemcpyDeviceToDevice, stream));
+    const auto first = UNWRAP_OR_RETURN(jobs[0].wait());
+    const usize k = first.extents[0];
+    auto sliced_accum = UNWRAP_OR_RETURN(d_outputs[node_id.value]->view().first_n(k));
+
+    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpyAsync(sliced_accum.data, first.data, first.byte_count(),
+                                              cudaMemcpyDeviceToDevice, stream.handle()));
 
     const usize threads = 256;
     const usize blocks = (first.element_count() + threads - 1) / threads;
     for (usize i = 1; i < jobs.size(); ++i)
     {
         const auto contribution = UNWRAP_OR_RETURN(jobs[i].wait());
-        UNWRAP_OR_RETURN(launch_kernel(accumulate_into, accum.const_view(), dim3(blocks), dim3(threads), stream,
-                                       contribution, accum.view())
+        UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_accum.const_view(), dim3(blocks), dim3(threads),
+                                       stream.handle(), contribution, sliced_accum)
                              .wait());
     }
 
-    scratch.push_back(std::move(accum));
-    return ok(scratch.back().const_view());
+    return ok(sliced_accum.const_view());
 }
 
 auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
@@ -3311,7 +3355,6 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
     backward_jobs.clear();
     backward_jobs.resize(layers.size());
     backward_jobs[output_node.value].push_back(KernelJob<DeviceTensorConstViewf>::ready(loss_grad));
-    accumulation_scratch.clear();
 
     for (auto it = execution_order.rbegin(); it != execution_order.rend(); ++it)
     {
@@ -3331,8 +3374,7 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
             continue;
         }
 
-        const auto upstream =
-            UNWRAP_OR_RETURN(accumulate_contributions(contributions, accumulation_scratch, stream.handle()));
+        const auto upstream = UNWRAP_OR_RETURN(accumulate_output_gradient(node_id));
 
         // Collapse to the single already-accumulated value, in place of the raw per-consumer
         // contributions - step() re-reads this node's slot afterwards for weight_gradients() and
