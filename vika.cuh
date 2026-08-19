@@ -634,6 +634,11 @@ inline auto concat_output_extents(const std::vector<Extents> &extents) -> Result
     }
 
     const auto rank = extents[0].size();
+    if (rank == 0)
+    {
+        return error(VIKA_SHAPE_ERROR("concat: inputs must be at least rank 1, got rank 0"));
+    }
+
     usize total_last_dim = 0;
     for (usize i = 0; i < extents.size(); ++i)
     {
@@ -2207,8 +2212,12 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
             outputs.element_count()));
     }
 
-    const u32 M = d_inputs.extent(0);
-    const u32 N = d_inputs.extent(1);
+    // Grid must cover weights.grad's own shape (feature_count x neuron_count) - the tensor the
+    // matmul below actually writes - not d_inputs' (batch_capacity x feature_count). Sizing from
+    // the wrong tensor silently under-covers weights.grad whenever feature_count or neuron_count
+    // exceeds batch_capacity, leaving stale data in the uncovered elements.
+    const u32 M = weights.grad.extent(0);
+    const u32 N = weights.grad.extent(1);
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     const auto gradients = std::make_tuple(weights.grad.const_view(), biases.grad.const_view());
@@ -3306,6 +3315,15 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
             std::visit([&upstream](auto &layer) { return layer.backward(upstream); }, layers[node_id.value].kind);
         if (pred_jobs.size() != preds.size())
         {
+            // The count can only be known by actually calling backward() - a layer's arity isn't
+            // visible to Model ahead of dispatch - so by this point the (buggy) layer's async
+            // work is already launched. Wait on all of it, discarding the results we're already
+            // erroring out over anyway, so nothing is left in flight racing with whatever the
+            // caller does after this function returns.
+            for (auto &job : pred_jobs)
+            {
+                static_cast<void>(job.wait());
+            }
             return error(
                 VIKA_UNSUPPORTED_ERROR("backward: node %zu's layer returned %zu gradients but has %zu predecessors",
                                        node_id.value, pred_jobs.size(), preds.size()));

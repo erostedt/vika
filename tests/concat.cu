@@ -87,6 +87,15 @@ UTEST(concat, layer_forward_shape_mismatch)
     ASSERT_TRUE(layer.forward({a.const_view(), wrong_b.const_view()}).is_error());
 }
 
+UTEST(concat, with_extents_rank_zero)
+{
+    using namespace vika;
+    // Both inputs are rank 0 (Extents{}) - passes the size() < 2 guard (there are 2 entries) but
+    // has no last axis to concat along or compute an offset into. rank - 1 on the unsigned rank
+    // must be guarded explicitly, not left to underflow.
+    ASSERT_TRUE(ConcatLayer::with_extents({Extents{}, Extents{}}).is_error());
+}
+
 UTEST(concat, with_extents_rank_mismatch)
 {
     using namespace vika;

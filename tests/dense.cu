@@ -91,6 +91,44 @@ UTEST(dense, layer_backward_smaller_batch)
     ASSERT_TRUE(are_close(out, expected, 1e-5f));
 }
 
+UTEST(dense, layer_weight_gradients_grid_coverage)
+{
+    using namespace vika;
+    // feature_count and neuron_count both exceed a single 16x16 block, and both exceed
+    // batch_size - the exact condition under which weight_gradients() used to size its launch
+    // grid from d_inputs' shape (batch_capacity x feature_count) instead of weights.grad's own
+    // shape (feature_count x neuron_count), silently leaving rows/columns beyond the wrong
+    // grid's coverage unwritten. All-ones inputs/upstream make every entry of the expected
+    // gradient identical (batch_size), so any uncovered element is immediately visible.
+    constexpr usize batch_size = 2;
+    constexpr usize feature_count = 17;
+    constexpr usize neuron_count = 17;
+
+    const auto inputs =
+        DeviceOwningTensorf::from(std::vector<f32>(batch_size * feature_count, 1.0f), {batch_size, feature_count})
+            .unwrap();
+    const auto d_outputs =
+        DeviceOwningTensorf::from(std::vector<f32>(batch_size * neuron_count, 1.0f), {batch_size, neuron_count})
+            .unwrap();
+
+    auto weights =
+        DeviceOwningTensorf::empty({feature_count, neuron_count}).unwrap();
+    auto bias = DeviceOwningTensorf::empty({neuron_count}).unwrap();
+    auto layer = DenseLayer::with_weights(batch_size, std::move(weights), std::move(bias)).unwrap();
+
+    const auto [d_weights, d_biases] =
+        layer.weight_gradients(inputs.const_view(), d_outputs.const_view()).wait().unwrap();
+
+    const auto d_weights_cpu = download(d_weights).unwrap();
+    const auto d_biases_cpu = download(d_biases).unwrap();
+
+    const std::vector<f32> expected_d_weights(feature_count * neuron_count, static_cast<f32>(batch_size));
+    const std::vector<f32> expected_d_biases(neuron_count, static_cast<f32>(batch_size));
+
+    ASSERT_TRUE(are_close(d_weights_cpu, expected_d_weights, 1e-5f));
+    ASSERT_TRUE(are_close(d_biases_cpu, expected_d_biases, 1e-5f));
+}
+
 UTEST(dense, layer_weight_gradients)
 {
     using namespace vika;
