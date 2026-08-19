@@ -530,8 +530,8 @@ auto map(const std::vector<T> &in, UnaryOperation op)
 template <typename T, typename UnaryOperation>
 auto try_map(const std::vector<T> &in, UnaryOperation op) -> Result<std::vector<decltype(op(in[0]).unwrap())>, Error>
 {
-    using OutT = decltype(op(in[0]).unwrap());
-    std::vector<OutT> out;
+    using out_type = decltype(op(in[0]).unwrap());
+    std::vector<out_type> out;
     out.reserve(in.size());
     for (const auto &item : in)
     {
@@ -1527,6 +1527,20 @@ __global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out)
 __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream_gradient,
                                  DeviceTensorViewf out) -> void;
 
+// Normalizes along the last axis only - both tensors treated as flattened [rows, width]
+// regardless of actual rank, same convention as concat_copy/concat_split, since row-major storage
+// makes the last axis the contiguous one to reduce over. One thread per row (not per element):
+// each row's max/sum/normalize all depend on every other element in that same row, so there is
+// nothing to parallelize below row granularity without a shared-memory reduction, which nothing
+// else in this file uses either (see sum_rows' identical one-thread-per-row shape).
+__global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf out) -> void;
+
+// outputs: this layer's own forward() result (the softmax probabilities), not its input - the
+// Jacobian-vector product only needs y, never the pre-softmax input. d_input_i = y_i * (upstream_i
+// - dot), where dot = sum_j(y_j * upstream_j) over the same row.
+__global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorConstViewf upstream_gradient,
+                                 DeviceTensorViewf out) -> void;
+
 __global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f32 v_hat_scale,
                             DeviceTensorConstViewf d_weights, DeviceTensorViewf weights, DeviceTensorViewf m_weights,
                             DeviceTensorViewf v_weights) -> void;
@@ -1538,6 +1552,16 @@ __global__ auto sum_rows(DeviceTensorConstViewf matrix, DeviceTensorViewf out) -
 __global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
     -> void;
 __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                                    DeviceTensorViewf out) -> void;
+
+// Averaged per sample (divides by row count, i.e. batch size), not per element like mse_kernel
+// above - the standard cross-entropy convention, since targets are one-hot along the last axis
+// and dividing by element count too would shrink the loss as the class count grows for no
+// meaningful reason. predictions are expected to already be probabilities (e.g. Softmax's own
+// output), not raw logits - this loss does not fuse a softmax internally.
+__global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
+    -> void;
+__global__ auto cce_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void;
 
 // accum[i] += delta[i] for every element. Two unrelated uses share this: summing multiple
@@ -1601,6 +1625,20 @@ struct DenseLayer
 struct SigmoidLayer
 {
     static auto with_extents(const Extents &extents) -> Result<SigmoidLayer, Error>;
+
+    auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
+
+    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+
+    DeviceOwningTensorf outputs;
+    DeviceOwningTensorf d_inputs;
+
+    Stream stream;
+};
+
+struct SoftmaxLayer
+{
+    static auto with_extents(const Extents &extents) -> Result<SoftmaxLayer, Error>;
 
     auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
@@ -1736,6 +1774,26 @@ struct MSELoss
     Stream stream;
 };
 
+// Categorical cross-entropy. Same forward(predictions, targets)/backward(predictions, targets)
+// shape as MSELoss - see cce_kernel's doc comment for the normalization convention, and
+// train_step's for why sharing that shape is what actually matters (it's what lets train_step be
+// templated on Loss rather than needing a LossKind variant).
+struct CCELoss
+{
+    static auto with_extents(const Extents &extents) -> Result<CCELoss, Error>;
+
+    auto forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+        -> KernelJob<DeviceTensorConstViewf>;
+
+    auto backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+        -> KernelJob<DeviceTensorConstViewf>;
+
+    DeviceOwningTensorf loss;
+    DeviceOwningTensorf d_inputs;
+
+    Stream stream;
+};
+
 // =============================================================================
 // Computation Graph
 // =============================================================================
@@ -1750,6 +1808,10 @@ struct InputSpec
 };
 
 struct SigmoidSpec
+{
+};
+
+struct SoftmaxSpec
 {
 };
 
@@ -1788,8 +1850,8 @@ struct ConcatSpec
 {
 };
 
-using LayerSpec =
-    std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, MaxPool2DSpec, FlattenSpec, AddSpec, ConcatSpec>;
+using LayerSpec = std::variant<InputSpec, DenseSpec, Conv2DSpec, SigmoidSpec, SoftmaxSpec, MaxPool2DSpec, FlattenSpec,
+                               AddSpec, ConcatSpec>;
 
 struct Node
 {
@@ -1804,8 +1866,8 @@ struct InputLayer
     auto backward(DeviceTensorConstViewf upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 };
 
-using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, Conv2DLayer, MaxPool2DLayer, Flatten2DLayer,
-                               AddLayer, ConcatLayer>;
+using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, SoftmaxLayer, Conv2DLayer, MaxPool2DLayer,
+                               Flatten2DLayer, AddLayer, ConcatLayer>;
 
 struct Layer
 {
@@ -1926,6 +1988,7 @@ struct ComputationGraph
     auto dense(NodeId input, usize output_features, std::optional<u32> requested_seed = std::nullopt)
         -> Result<NodeId, Error>;
     auto sigmoid(NodeId input) -> Result<NodeId, Error>;
+    auto softmax(NodeId input) -> Result<NodeId, Error>;
     auto flatten(NodeId input) -> Result<NodeId, Error>;
     auto conv2d(NodeId input, usize kernel_height, usize kernel_width, usize channels_out, usize stride, usize padding,
                 std::optional<u32> requested_seed = std::nullopt) -> Result<NodeId, Error>;
@@ -2384,6 +2447,63 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
 
     return {launch_kernel(sigmoid_backward, sliced_d_inputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+                          outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
+}
+
+auto SoftmaxLayer::with_extents(const Extents &extents) -> Result<SoftmaxLayer, Error>
+{
+    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+
+    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    return ok(
+        SoftmaxLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
+}
+
+auto SoftmaxLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
+{
+    UNWRAP_OR_RETURN(check_input_count(inputs, 1, "softmax forward"));
+    const auto &input = inputs[0];
+
+    const auto input_extents = input.to_extents();
+    UNWRAP_OR_RETURN(check_trailing_extents(input_extents, outputs.extents(), "softmax forward", "input"));
+
+    const usize k = input_extents[0];
+    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+
+    // One thread per row, not per element - see softmax_forward's own doc comment for why.
+    const usize width = input.extents[input.rank - 1];
+    const usize row_count = input.element_count() / width;
+    const usize threads = 256;
+    const usize blocks = (row_count + threads - 1) / threads;
+
+    return launch_kernel(softmax_forward, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+                         input, sliced_outputs);
+}
+
+auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
+    -> std::vector<KernelJob<DeviceTensorConstViewf>>
+{
+    const auto upstream_extents = upstream_gradient.to_extents();
+    UNWRAP_OR_RETURN(check_trailing_extents(upstream_extents, d_inputs.extents(), "softmax backward", "upstream"));
+
+    // Invariant: with_extents allocates both from the same extents.
+    if (d_inputs.extents() != outputs.extents())
+    {
+        return {KernelJob<DeviceTensorConstViewf>::failed(
+            VIKA_SHAPE_ERROR("softmax backward: gradient holds %zu elements but outputs hold %zu",
+                             d_inputs.element_count(), outputs.element_count()))};
+    }
+
+    const usize k = upstream_extents[0];
+    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+
+    const usize width = upstream_gradient.extents[upstream_gradient.rank - 1];
+    const usize row_count = upstream_gradient.element_count() / width;
+    const usize threads = 256;
+    const usize blocks = (row_count + threads - 1) / threads;
+
+    return {launch_kernel(softmax_backward, sliced_d_inputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
                           outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
 }
 
@@ -2846,6 +2966,46 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
                          dim3(threads), stream.handle(), predictions, targets, sliced_d_inputs);
 }
 
+auto CCELoss::with_extents(const Extents &extents) -> Result<CCELoss, Error>
+{
+    auto loss = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
+    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+
+    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    return ok(CCELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
+}
+
+auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+    -> KernelJob<DeviceTensorConstViewf>
+{
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(predictions.to_extents(), d_inputs.extents(), "cce forward", "predictions"));
+    UNWRAP_OR_RETURN(check_trailing_extents(targets.to_extents(), d_inputs.extents(), "cce forward", "targets"));
+
+    UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
+
+    const usize n = predictions.element_count();
+    const usize threads = 256;
+    return launch_kernel(cce_kernel, loss.const_view(), dim3((n + threads - 1) / threads), dim3(threads),
+                         stream.handle(), predictions, targets, loss.view());
+}
+
+auto CCELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
+    -> KernelJob<DeviceTensorConstViewf>
+{
+    UNWRAP_OR_RETURN(
+        check_trailing_extents(predictions.to_extents(), d_inputs.extents(), "cce backward", "predictions"));
+    UNWRAP_OR_RETURN(check_trailing_extents(targets.to_extents(), d_inputs.extents(), "cce backward", "targets"));
+
+    const usize k = predictions.extents[0];
+    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+
+    const usize n = predictions.element_count();
+    const usize threads = 256;
+    return launch_kernel(cce_gradient_kernel, sliced_d_inputs.const_view(), dim3((n + threads - 1) / threads),
+                         dim3(threads), stream.handle(), predictions, targets, sliced_d_inputs);
+}
+
 // =============================================================================
 // Computation Graph
 // =============================================================================
@@ -2908,6 +3068,23 @@ auto ComputationGraph::sigmoid(NodeId input) -> Result<NodeId, Error>
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
         .spec = SigmoidSpec{},
+        .output_extents = in_extents,
+        .inputs = {input},
+    });
+    return ok(id);
+}
+
+auto ComputationGraph::softmax(NodeId input) -> Result<NodeId, Error>
+{
+    if (input.value >= nodes.size())
+    {
+        return error(VIKA_GRAPH_ERROR("softmax: invalid NodeId"));
+    }
+
+    const auto in_extents = nodes[input.value].output_extents;
+    const NodeId id{nodes.size()};
+    nodes.push_back(Node{
+        .spec = SoftmaxSpec{},
         .output_extents = in_extents,
         .inputs = {input},
     });
@@ -3086,6 +3263,10 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, SigmoidSpec>)
             {
                 return SigmoidLayer::with_extents(pred_extents[0]).map(as_trainable);
+            }
+            else if constexpr (std::is_same_v<T, SoftmaxSpec>)
+            {
+                return SoftmaxLayer::with_extents(pred_extents[0]).map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, FlattenSpec>)
             {
@@ -3514,6 +3695,32 @@ __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
     out[i] = 2.0f * (predictions[i] - targets[i]) / (f32)predictions.element_count();
 }
 
+__global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
+    -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= predictions.element_count())
+    {
+        return;
+    }
+    // Clamped away from 0, not the raw prediction - a probability that's genuinely (or numerically)
+    // zero at the one-hot target class would otherwise make log() produce -inf.
+    const f32 p = predictions[i] < 1e-12f ? 1e-12f : predictions[i];
+    atomicAdd(&out[0], -targets[i] * std::log(p) / (f32)predictions.extents[0]);
+}
+
+__global__ auto cce_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                                    DeviceTensorViewf out) -> void
+{
+    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= predictions.element_count())
+    {
+        return;
+    }
+    const f32 p = predictions[i] < 1e-12f ? 1e-12f : predictions[i];
+    out[i] = -targets[i] / p / (f32)predictions.extents[0];
+}
+
 __global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f32 v_hat_scale,
                             DeviceTensorConstViewf d_weights, DeviceTensorViewf weights, DeviceTensorViewf m_weights,
                             DeviceTensorViewf v_weights) -> void
@@ -3562,6 +3769,67 @@ __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstView
     {
 
         out[i] = a[i] * (1.0 - a[i]) * upstream_gradient[i];
+    }
+}
+
+__global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf out) -> void
+{
+    const usize width = input.extents[input.rank - 1];
+    const usize row_count = input.element_count() / width;
+
+    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= row_count)
+    {
+        return;
+    }
+
+    // Subtract the row max before exponentiating - same shift-invariance trick as every softmax
+    // implementation, so a row of large logits doesn't overflow expf into inf/nan.
+    f32 max_val = input[row * width];
+    for (usize col = 1; col < width; ++col)
+    {
+        const f32 val = input[row * width + col];
+        if (val > max_val)
+        {
+            max_val = val;
+        }
+    }
+
+    f32 sum = 0.0f;
+    for (usize col = 0; col < width; ++col)
+    {
+        const f32 e = std::exp(input[row * width + col] - max_val);
+        out[row * width + col] = e;
+        sum += e;
+    }
+
+    for (usize col = 0; col < width; ++col)
+    {
+        out[row * width + col] /= sum;
+    }
+}
+
+__global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorConstViewf upstream_gradient,
+                                 DeviceTensorViewf out) -> void
+{
+    const usize width = outputs.extents[outputs.rank - 1];
+    const usize row_count = outputs.element_count() / width;
+
+    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= row_count)
+    {
+        return;
+    }
+
+    f32 dot = 0.0f;
+    for (usize col = 0; col < width; ++col)
+    {
+        dot += outputs[row * width + col] * upstream_gradient[row * width + col];
+    }
+    for (usize col = 0; col < width; ++col)
+    {
+        const usize idx = row * width + col;
+        out[idx] = outputs[idx] * (upstream_gradient[idx] - dot);
     }
 }
 
