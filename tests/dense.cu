@@ -224,7 +224,7 @@ UTEST(dense, layer_adam_update)
     for (usize step = 1; step <= 3; ++step)
     {
         auto jobs = layer.update(states, parameters, step);
-        for (auto &result : wait_on(jobs))
+        for (auto &result : wait_on_all(jobs))
         {
             result.unwrap();
         }

@@ -88,6 +88,17 @@ using usize = size_t;
 // Generic Utilities
 // =============================================================================
 
+template <typename T, typename UnaryOperation>
+auto map(const std::vector<T> &in, UnaryOperation op)
+{
+    using namespace std;
+    using out_type = decltype(op(*begin(in)));
+    std::vector<out_type> out;
+    out.reserve(in.size());
+    transform(begin(in), end(in), back_inserter(out), op);
+    return out;
+}
+
 template <typename T, usize Capacity>
 class FixedVector
 {
@@ -515,6 +526,36 @@ class Error
 #define VIKA_GRAPH_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Graph, __VA_ARGS__)
 #define VIKA_UNSUPPORTED_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Unsupported, __VA_ARGS__)
 #define VIKA_DEVICE_ERROR(code) ::vika::Error::from_cuda((code), __FILE__, __LINE__)
+
+// Like map() (Generic Utilities, above), but for a fallible op (one returning
+// Result<T, Error>): stops at the first failure and propagates it, instead of collecting one
+// Result per element the way map(in, op) naturally would when op is fallible (see wait_on_all,
+// which wants exactly that - every element processed regardless of an earlier one's outcome).
+// Use try_map when continuing after a failure has no value (e.g. further allocations after one
+// fails), map when it does. Lives here rather than beside map() because it needs Result/Error to
+// already be complete types, which they aren't yet at that point in the file.
+//
+// Needs an explicit trailing return type, unlike map(): its two return statements convert
+// through Err<Error> and Ok<vector<T>> respectively, which only unify once a concrete Result<...>
+// target is named - a deduced auto return type requires every return statement to already agree
+// on one type before conversion, which these do not.
+template <typename T, typename UnaryOperation>
+auto try_map(const std::vector<T> &in, UnaryOperation op) -> Result<std::vector<decltype(op(in[0]).unwrap())>, Error>
+{
+    using OutT = decltype(op(in[0]).unwrap());
+    std::vector<OutT> out;
+    out.reserve(in.size());
+    for (const auto &item : in)
+    {
+        auto res = op(item);
+        if (res.is_error())
+        {
+            return error(res.unwrap_error());
+        }
+        out.push_back(std::move(res.unwrap()));
+    }
+    return ok(std::move(out));
+}
 
 template <typename Node>
 auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Node>, Error>
@@ -1288,7 +1329,7 @@ struct [[nodiscard]] KernelJob
         return KernelJob(std::move(value), nullptr);
     }
 
-    auto wait() -> Result<T, Error>
+    auto wait() const -> Result<T, Error>
     {
         if (result.is_error())
         {
@@ -1345,22 +1386,16 @@ auto launch_kernel(Kernel kernel, Output output, dim3 grid, dim3 block, cudaStre
     return KernelJob<Output>::launched(output, stream);
 }
 
-// Every job is waited on regardless of an earlier one's outcome: short-circuiting on the first
-// failure would leave later jobs' async work unsynchronised, racing with whatever the caller
-// does next. Each job's own Result is preserved rather than collapsed into one aggregate
-// success/failure, so the caller decides how to interpret a batch of independent outcomes
-// (fail on the first one that matters to it, collect every failure, count successes, ...)
-// instead of this function committing to one policy for everyone.
 template <typename T>
-auto wait_on(std::vector<KernelJob<T>> &jobs) -> std::vector<Result<T, Error>>
+auto wait_on(const KernelJob<T> &job) -> Result<T, Error>
 {
-    std::vector<Result<T, Error>> results;
-    results.reserve(jobs.size());
-    for (auto &job : jobs)
-    {
-        results.push_back(job.wait());
-    }
-    return results;
+    return job.wait();
+}
+
+template <typename T>
+auto wait_on_all(const std::vector<KernelJob<T>> &jobs) -> std::vector<Result<T, Error>>
+{
+    return vika::map(jobs, wait_on<T>);
 }
 
 struct AdamParameters
@@ -1423,6 +1458,7 @@ struct AdamState
     DeviceOwningTensorf v;
 
     static auto create(const Extents &extents) -> Result<AdamState, Error>;
+    static auto from_parameters(const ConstParameterView &parameters) -> Result<AdamState, Error>;
 };
 
 // Launches one adam_update per parameter on the given stream and returns every job unresolved
@@ -1876,6 +1912,8 @@ struct ComputationGraph
 // pred_extents[0]; compile() is the only caller and always passes one entry per input.
 auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Extents> &pred_extents)
     -> Result<Layer, Error>;
+
+auto parameters(const Layer &layer) -> std::optional<std::vector<ConstParameterView>>;
 
 auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceTensorConstViewf upstream,
                   std::vector<AdamState> &states, const AdamParameters &params, usize t) -> Result<Void, Error>;
@@ -2677,12 +2715,7 @@ auto ConcatLayer::with_extents(const std::vector<Extents> &input_extents) -> Res
     const auto output_extents = UNWRAP_OR_RETURN(concat_output_extents(input_extents));
     auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(output_extents));
 
-    std::vector<DeviceOwningTensorf> d_inputs;
-    d_inputs.reserve(input_extents.size());
-    for (const auto &extents : input_extents)
-    {
-        d_inputs.push_back(UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents)));
-    }
+    auto d_inputs = UNWRAP_OR_RETURN(try_map(input_extents, &DeviceOwningTensorf::empty));
 
     auto stream = UNWRAP_OR_RETURN(Stream::create());
     return ok(ConcatLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
@@ -3113,6 +3146,23 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
         spec);
 }
 
+auto parameters(const Layer &layer) -> std::optional<std::vector<ConstParameterView>>
+{
+    return std::visit(
+        [](const auto &l) -> std::optional<std::vector<ConstParameterView>> {
+            using T = std::decay_t<decltype(l)>;
+            if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer>)
+            {
+                return l.parameters();
+            }
+            else
+            {
+                return std::nullopt;
+            }
+        },
+        layer.kind);
+}
+
 auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
 {
     if (output.value >= nodes.size())
@@ -3354,7 +3404,7 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
                     return error(wg_result.unwrap_error());
                 }
                 auto update_jobs = l.update(states, params, t);
-                for (auto &result : wait_on(update_jobs))
+                for (auto &result : wait_on_all(update_jobs))
                 {
                     if (result.is_error())
                     {
@@ -3374,38 +3424,23 @@ auto AdamState::create(const Extents &extents) -> Result<AdamState, Error>
     return ok(AdamState{std::move(m), std::move(v)});
 }
 
+auto AdamState::from_parameters(const ConstParameterView &parameters) -> Result<AdamState, Error>
+{
+    return AdamState::create(parameters.value.to_extents());
+}
+
 auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>
 {
     AdamOptimizer optimizer{params, {}};
-
     for (const auto node_id : model.execution_order)
     {
-        const auto &layer = model.layers[node_id.value];
-        auto maybe_params = std::visit(
-            [](const auto &l) -> std::optional<std::vector<ConstParameterView>> {
-                using T = std::decay_t<decltype(l)>;
-                if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer>)
-                {
-                    return l.parameters();
-                }
-                else
-                {
-                    return std::nullopt;
-                }
-            },
-            layer.kind);
-
+        auto maybe_params = parameters(model.layers[node_id.value]);
         if (!maybe_params.has_value())
         {
             continue;
         }
 
-        std::vector<AdamState> states;
-        states.reserve(maybe_params->size());
-        for (const auto &param : *maybe_params)
-        {
-            states.push_back(UNWRAP_OR_RETURN(AdamState::create(param.value.to_extents())));
-        }
+        auto states = UNWRAP_OR_RETURN(try_map(*maybe_params, &AdamState::from_parameters));
         optimizer.states.emplace(node_id.value, std::move(states));
     }
 
