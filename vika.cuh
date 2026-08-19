@@ -3072,12 +3072,7 @@ auto ComputationGraph::concat(std::vector<NodeId> inputs) -> Result<NodeId, Erro
         }
     }
 
-    std::vector<Extents> input_extents;
-    input_extents.reserve(inputs.size());
-    for (const auto &input : inputs)
-    {
-        input_extents.push_back(nodes[input.value].output_extents);
-    }
+    const auto input_extents = map(inputs, [&](const NodeId &input) { return nodes[input.value].output_extents; });
     const auto output_extents = UNWRAP_OR_RETURN(concat_output_extents(input_extents));
 
     const NodeId id{nodes.size()};
@@ -3216,12 +3211,8 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         const auto &node = nodes[idx];
         layer_inputs_result.push_back(node.inputs);
 
-        std::vector<Extents> pred_extents;
-        pred_extents.reserve(node.inputs.size());
-        for (const auto &pred : node.inputs)
-        {
-            pred_extents.push_back(nodes[pred.value].output_extents);
-        }
+        const auto pred_extents =
+            map(node.inputs, [&](const NodeId &pred) { return nodes[pred.value].output_extents; });
 
         auto layer_result = make_layer(node.spec, batch_size, pred_extents);
         if (layer_result.is_error())
@@ -3231,12 +3222,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         layers.push_back(std::move(layer_result.unwrap()));
     }
 
-    std::vector<NodeId> execution_order{};
-    execution_order.reserve(nodes.size());
-    for (const auto idx : topo_order)
-    {
-        execution_order.push_back(NodeId{idx});
-    }
+    auto execution_order = map(topo_order, [](usize idx) { return NodeId{idx}; });
 
     auto stream = UNWRAP_OR_RETURN(Stream::create());
     return ok(Model{
@@ -3266,11 +3252,8 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         }
         else
         {
-            pred_inputs.reserve(preds.size());
-            for (const auto &pred : preds)
-            {
-                pred_inputs.push_back(UNWRAP_OR_RETURN(forward_jobs[pred.value].value().wait()));
-            }
+            pred_inputs = UNWRAP_OR_RETURN(
+                try_map(preds, [&](const NodeId &pred) { return forward_jobs[pred.value].value().wait(); }));
         }
 
         auto job = std::visit(
