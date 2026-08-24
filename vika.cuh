@@ -56,7 +56,7 @@
 // just calls the same non-explicit constructor), so one form covers every return shape instead of
 // needing a separate macro for the vector case. No T argument needed either way: the conversion
 // happens via the return statement itself, to whatever the enclosing function actually declared.
-#define UNWRAP_OR_RETURN(expr)                                                                                         \
+#define VIKA_UNWRAP_OR_RETURN(expr)                                                                                    \
     ({                                                                                                                 \
         auto _res = (expr);                                                                                            \
         if (_res.is_error())                                                                                           \
@@ -827,7 +827,7 @@ class HostTensor
             return error(VIKA_SHAPE_ERROR("host tensor extents are empty"));
         }
 
-        const usize count = UNWRAP_OR_RETURN(checked_element_count(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(checked_element_count(extents));
         if (count == 0)
         {
             return error(VIKA_SHAPE_ERROR("host tensor extents contain a zero extent"));
@@ -837,13 +837,13 @@ class HostTensor
 
     static auto zero(const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = UNWRAP_OR_RETURN(Self::checked_size(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(Self::checked_size(extents));
         return ok(HostTensor(std::vector<T>(count, T{}), extents));
     }
 
     static auto empty(const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = UNWRAP_OR_RETURN(Self::checked_size(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(Self::checked_size(extents));
         return ok(HostTensor(std::vector<T>(count), extents));
     }
 
@@ -865,7 +865,7 @@ class HostTensor
 
     static auto copy_from(std::vector<T> data, const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = UNWRAP_OR_RETURN(Self::checked_size(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(Self::checked_size(extents));
         if (std::size(data) != count)
         {
             return error(VIKA_SHAPE_ERROR("host tensor data holds %zu elements but extents describe %zu",
@@ -925,7 +925,7 @@ class DeviceOwningTensor
   public:
     static auto empty(const Extents &extents) -> Result<Self, Error>
     {
-        const usize bytes = UNWRAP_OR_RETURN(vika::checked_byte_count<T>(extents));
+        const usize bytes = VIKA_UNWRAP_OR_RETURN(vika::checked_byte_count<T>(extents));
 
         T *ptr = nullptr;
         const auto err = cudaMalloc(&ptr, bytes);
@@ -938,14 +938,14 @@ class DeviceOwningTensor
 
     static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = UNWRAP_OR_RETURN(vika::checked_element_count(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(vika::checked_element_count(extents));
         if (data.size() != count)
         {
             return error(
                 VIKA_SHAPE_ERROR("device tensor data holds %zu elements but extents describe %zu", data.size(), count));
         }
 
-        auto tensor = UNWRAP_OR_RETURN(empty(extents));
+        auto tensor = VIKA_UNWRAP_OR_RETURN(empty(extents));
         VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(tensor.data(), data.data(), tensor.byte_count(), cudaMemcpyHostToDevice));
         return ok(std::move(tensor));
     }
@@ -1129,7 +1129,7 @@ auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, Error>
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, Error>
 {
-    auto dst = UNWRAP_OR_RETURN(HostTensor<T>::empty(src.extents));
+    auto dst = VIKA_UNWRAP_OR_RETURN(HostTensor<T>::empty(src.extents));
     const auto err = copy(src, dst);
     if (err.is_error())
     {
@@ -1337,7 +1337,7 @@ template <typename T>
 struct [[nodiscard]] KernelJob
 {
     // Implicit on purpose, mirroring Result's Err<E> constructor: it lets a function
-    // returning KernelJob<T> write `return error(...)` (or UNWRAP_OR_RETURN) without
+    // returning KernelJob<T> write `return error(...)` (or VIKA_UNWRAP_OR_RETURN) without
     // naming T again — the return statement's own conversion to the declared return
     // type supplies it. Takes KernelJob out of aggregate territory, which is fine:
     // nothing outside launched()/failed()/ready() ever brace-initialised one.
@@ -2098,13 +2098,13 @@ template <typename Loss>
 auto train_step(Model &model, Loss &loss_fn, DeviceTensorConstViewf inputs, DeviceTensorConstViewf targets,
                 AdamOptimizer &optimizer, usize t) -> Result<f32, Error>
 {
-    const auto predictions = UNWRAP_OR_RETURN(model.forward(inputs));
-    const auto loss_value = UNWRAP_OR_RETURN(loss_fn.forward(predictions, targets).wait());
-    const auto loss_grad = UNWRAP_OR_RETURN(loss_fn.backward(predictions, targets).wait());
-    UNWRAP_OR_RETURN(model.backward(loss_grad));
-    UNWRAP_OR_RETURN(model.step(optimizer, t));
+    const auto predictions = VIKA_UNWRAP_OR_RETURN(model.forward(inputs));
+    const auto loss_value = VIKA_UNWRAP_OR_RETURN(loss_fn.forward(predictions, targets).wait());
+    const auto loss_grad = VIKA_UNWRAP_OR_RETURN(loss_fn.backward(predictions, targets).wait());
+    VIKA_UNWRAP_OR_RETURN(model.backward(loss_grad));
+    VIKA_UNWRAP_OR_RETURN(model.step(optimizer, t));
 
-    const auto loss_cpu = UNWRAP_OR_RETURN(download(loss_value));
+    const auto loss_cpu = VIKA_UNWRAP_OR_RETURN(download(loss_value));
     return ok(loss_cpu[0]);
 }
 
@@ -2242,7 +2242,7 @@ auto trailing_extents(const Extents &extents) -> Extents
 // Every layer's forward() takes a vector of predecessor views instead of a fixed number of
 // named parameters, so nothing at the type level stops a caller from passing the wrong count -
 // indexing inputs[0]/inputs[1] on a too-short vector would be silent undefined behavior instead
-// of a caught error. Every forward() checks this first, via UNWRAP_OR_RETURN, before touching
+// of a caught error. Every forward() checks this first, via VIKA_UNWRAP_OR_RETURN, before touching
 // any element.
 auto _check_input_count(const std::vector<DeviceTensorConstViewf> &inputs, usize expected, const char *context,
                         const char *file, i32 line) -> Result<Void, Error>
@@ -2441,13 +2441,13 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensorf weights, Dev
             VIKA_SHAPE_ERROR("dense: biases has %zu neurons, weights expects %zu", biases.extent(0), neuron_count));
     }
 
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, neuron_count}));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, neuron_count}));
 
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, feature_count}));
-    auto d_weights = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(weights));
-    auto d_biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, feature_count}));
+    auto d_weights = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(weights));
+    auto d_biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok<DenseLayer>({
         .outputs = std::move(outputs),
         .weights = {std::move(weights), std::move(d_weights)},
@@ -2460,26 +2460,26 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensorf weights, Dev
 auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
     -> Result<DenseLayer, Error>
 {
-    auto weights = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({input_features, neuron_count}));
-    auto biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(neuron_count, 0.0f)));
+    auto weights = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({input_features, neuron_count}));
+    auto biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(neuron_count, 0.0f)));
 
     // Built first so xavier_tensor can run on the layer's own stream instead of standing up a
     // second, throwaway one just for initialization.
-    auto layer = UNWRAP_OR_RETURN(with_weights(batch_size, std::move(weights), std::move(biases)));
-    UNWRAP_OR_RETURN(
+    auto layer = VIKA_UNWRAP_OR_RETURN(with_weights(batch_size, std::move(weights), std::move(biases)));
+    VIKA_UNWRAP_OR_RETURN(
         xavier_tensor(layer.weights.value.view(), seed, input_features, neuron_count, layer.stream.handle()).wait());
     return ok(std::move(layer));
 }
 
 auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
 
     const usize k = input.extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
     auto sliced_outputs_const = sliced_outputs.const_view();
 
     const u32 M = (u32)k;
@@ -2499,11 +2499,11 @@ auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> K
 auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
 
     const usize k = upstream_gradient.extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const u32 M = (u32)k;
     const u32 N = d_inputs.extent(1);
@@ -2518,10 +2518,10 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream_gradient));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream_gradient));
 
     // Grid must cover weights.grad's own shape (feature_count x neuron_count) - the tensor the
     // matmul below actually writes - not d_inputs' (batch_capacity x feature_count). Sizing from
@@ -2567,24 +2567,24 @@ auto DenseLayer::update(std::vector<AdamState> &states, const AdamParameters &pa
 
 auto SigmoidLayer::with_extents(const Extents &extents) -> Result<SigmoidLayer, Error>
 {
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(
         SigmoidLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
 }
 
 auto SigmoidLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
     const auto input_extents = input.extents;
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input_extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input_extents, outputs.extents()));
 
     const usize k = input_extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     usize threads = 256;
     usize blocks = (input.element_count() + threads - 1) / threads;
@@ -2597,7 +2597,7 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     const auto upstream_extents = upstream_gradient.extents;
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
     if (d_inputs.extents() != outputs.extents())
@@ -2608,7 +2608,7 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     }
 
     const usize k = upstream_extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     usize threads = 256;
     usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
@@ -2619,24 +2619,24 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
 
 auto SoftmaxLayer::with_extents(const Extents &extents) -> Result<SoftmaxLayer, Error>
 {
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(
         SoftmaxLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
 }
 
 auto SoftmaxLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
     const auto input_extents = input.extents;
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input_extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input_extents, outputs.extents()));
 
     const usize k = input_extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     // One thread per row, not per element - see softmax_forward's own doc comment for why.
     const usize width = input.extents.back();
@@ -2652,7 +2652,7 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     const auto upstream_extents = upstream_gradient.extents;
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
     if (d_inputs.extents() != outputs.extents())
@@ -2663,7 +2663,7 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     }
 
     const usize k = upstream_extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize width = upstream_gradient.extents.back();
     const usize row_count = upstream_gradient.element_count() / width;
@@ -2687,13 +2687,13 @@ auto Flatten2DLayer::output_extents() const -> Extents
 auto Flatten2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const
     -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
     // Trailing extents, not a full comparison: the leading (batch) dimension is expected to vary
     // from call to call, exactly like every other layer's forward(). Comparing in full made this
     // the one layer that rejected any batch smaller than the capacity it was compiled for.
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, extents));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, extents));
 
     const usize k = input.extents[0];
     const usize features = element_count(trailing_extents(extents));
@@ -2702,7 +2702,7 @@ auto Flatten2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
 
 auto InputLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     return KernelJob<DeviceTensorConstViewf>::ready(inputs[0]);
 }
 
@@ -2717,7 +2717,7 @@ auto Flatten2DLayer::backward(DeviceTensorConstViewf upstream_gradient) const
     // Checked against output_extents(), not extents: upstream is the gradient of the *flattened*
     // output, so it is rank 2 [batch, features] - the two only happen to agree on element count.
     const auto upstream_extents = upstream_gradient.extents;
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, output_extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, output_extents()));
 
     // Reshaped back to the input's own shape, with the batch the caller actually passed rather
     // than the capacity this layer was built for.
@@ -2753,12 +2753,12 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     const usize out_H = window_output_extent(input_height, kH, stride, padding);
     const usize out_W = window_output_extent(input_width, kW, stride, padding);
 
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, C_out}));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, C_in}));
-    auto d_filters = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(filters));
-    auto d_biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, C_out}));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, C_in}));
+    auto d_filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(filters));
+    auto d_biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(Conv2DLayer{
         .outputs = std::move(outputs),
         .d_inputs = std::move(d_inputs),
@@ -2773,27 +2773,27 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
 auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
                              usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, Error>
 {
-    auto filters = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({kH, kW, C_in, C_out}));
-    auto biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(C_out, 0.0f)));
+    auto filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({kH, kW, C_in, C_out}));
+    auto biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(C_out, 0.0f)));
 
     // Built first so xavier_tensor can run on the layer's own stream instead of standing up a
     // second, throwaway one just for initialization.
-    auto layer = UNWRAP_OR_RETURN(
+    auto layer = VIKA_UNWRAP_OR_RETURN(
         with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride, padding));
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         xavier_tensor(layer.filters.value.view(), seed, kH * kW * C_in, kH * kW * C_out, layer.stream.handle()).wait());
     return ok(std::move(layer));
 }
 
 auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
 
     const usize k = input.extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     const usize H_out = outputs.extent(1);
     const usize W_out = outputs.extent(2);
@@ -2808,10 +2808,10 @@ auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
 
 auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
 
     const usize k = upstream.extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize H_in = d_inputs.extent(1);
     const usize W_in = d_inputs.extent(2);
@@ -2829,11 +2829,11 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream));
 
     const usize filter_count = filters.grad.element_count();
     const usize C_out = biases.grad.element_count();
@@ -2899,12 +2899,12 @@ auto ConvTranspose2DLayer::with_weights(usize batch_size, usize input_height, us
     const usize out_H = transposed_window_output_extent(input_height, kH, stride, padding);
     const usize out_W = transposed_window_output_extent(input_width, kW, stride, padding);
 
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, C_out}));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, C_in}));
-    auto d_filters = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(filters));
-    auto d_biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, C_out}));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, C_in}));
+    auto d_filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(filters));
+    auto d_biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(ConvTranspose2DLayer{
         .outputs = std::move(outputs),
         .d_inputs = std::move(d_inputs),
@@ -2920,18 +2920,18 @@ auto ConvTranspose2DLayer::randomized(usize batch_size, usize input_height, usiz
                                       usize C_in, usize C_out, usize stride, usize padding, u32 seed)
     -> Result<ConvTranspose2DLayer, Error>
 {
-    auto filters = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({kH, kW, C_out, C_in}));
-    auto biases = UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(C_out, 0.0f)));
+    auto filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({kH, kW, C_out, C_in}));
+    auto biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(C_out, 0.0f)));
 
     // Built first so xavier_tensor can run on the layer's own stream instead of standing up a
     // second, throwaway one just for initialization.
-    auto layer = UNWRAP_OR_RETURN(
+    auto layer = VIKA_UNWRAP_OR_RETURN(
         with_weights(batch_size, input_height, input_width, std::move(filters), std::move(biases), stride, padding));
     // fan_in/fan_out are about the operation's actual connectivity (kH*kW inputs feeding each
     // output channel, kH*kW outputs fed by each input channel), not the filters tensor's literal
     // axis order - same values Conv2DLayer::randomized passes despite the swapped C_out/C_in
     // layout.
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         xavier_tensor(layer.filters.value.view(), seed, kH * kW * C_in, kH * kW * C_out, layer.stream.handle()).wait());
     return ok(std::move(layer));
 }
@@ -2939,14 +2939,14 @@ auto ConvTranspose2DLayer::randomized(usize batch_size, usize input_height, usiz
 auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
 
     const usize k = input.extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     const usize H_out = outputs.extent(1);
     const usize W_out = outputs.extent(2);
@@ -2962,11 +2962,11 @@ auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &in
 auto ConvTranspose2DLayer::backward(const DeviceTensorConstViewf &upstream)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
 
     const usize k = upstream.extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize H_in = d_inputs.extent(1);
     const usize W_in = d_inputs.extent(2);
@@ -2985,10 +2985,10 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream));
 
     const usize filter_count = filters.grad.element_count();
     const usize C_out = biases.grad.element_count();
@@ -3033,11 +3033,12 @@ auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize in
     const usize out_H = window_output_extent(input_height, pool_h, stride, 0);
     const usize out_W = window_output_extent(input_width, pool_w, stride, 0);
 
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, channels}));
-    auto argmax = UNWRAP_OR_RETURN((DeviceOwningTensoru::empty({batch_size, out_H, out_W, channels})));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, channels}));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, channels}));
+    auto argmax = VIKA_UNWRAP_OR_RETURN((DeviceOwningTensoru::empty({batch_size, out_H, out_W, channels})));
+    auto d_inputs =
+        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, channels}));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(MaxPool2DLayer{
         .outputs = std::move(outputs),
         .argmax = std::move(argmax),
@@ -3051,14 +3052,14 @@ auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize in
 
 auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
 
     const usize k = input.extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
-    auto sliced_argmax = UNWRAP_OR_RETURN(argmax.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_argmax = VIKA_UNWRAP_OR_RETURN(argmax.view().first_n(k));
 
     const usize H_out = outputs.extent(1);
     const usize W_out = outputs.extent(2);
@@ -3073,22 +3074,22 @@ auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
 
 auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
 
     const usize k = upstream.extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize H_out = upstream.extents[1];
     const usize W_out = upstream.extents[2];
     const usize C = d_inputs.extent(3);
 
-    UNWRAP_OR_RETURN(zero(d_inputs.view(), stream.handle()));
+    VIKA_UNWRAP_OR_RETURN(zero(d_inputs.view(), stream.handle()));
 
     dim3 block(16, 16, 1);
     dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
 
     return {launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
-                          UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs)};
+                          VIKA_UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs)};
 }
 
 auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize scale)
@@ -3099,11 +3100,12 @@ auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize i
         return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
     }
 
-    auto outputs =
-        UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height * scale, input_width * scale, channels}));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, channels}));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(
+        DeviceOwningTensorf::empty({batch_size, input_height * scale, input_width * scale, channels}));
+    auto d_inputs =
+        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, channels}));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(Upsample2DLayer{
         .outputs = std::move(outputs),
         .d_inputs = std::move(d_inputs),
@@ -3114,13 +3116,13 @@ auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize i
 
 auto Upsample2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
 
     const usize k = input.extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     const usize H_out = outputs.extent(1);
     const usize W_out = outputs.extent(2);
@@ -3135,11 +3137,11 @@ auto Upsample2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs)
 
 auto Upsample2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
 
     const usize k = upstream.extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize H_in = d_inputs.extent(1);
     const usize W_in = d_inputs.extent(2);
@@ -3161,20 +3163,20 @@ auto AddLayer::with_extents(const Extents &extents, usize input_count) -> Result
         return error(VIKA_SHAPE_ERROR("add: input_count must be at least 2, got %zu", input_count));
     }
 
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(AddLayer{.outputs = std::move(outputs), .input_count = input_count, .stream = std::move(stream)});
 }
 
 auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, input_count));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, input_count));
 
     for (usize i = 0; i < inputs.size(); ++i)
     {
         // Called directly, not through VIKA_CHECK_TRAILING_EXTENTS: the name carries the offending
         // input's index, which the macro's stringified argument ("inputs[i]") cannot.
-        UNWRAP_OR_RETURN(_check_trailing_extents(inputs[i].extents, outputs.extents(), __func__,
+        VIKA_UNWRAP_OR_RETURN(_check_trailing_extents(inputs[i].extents, outputs.extents(), __func__,
                                                  ("input " + std::to_string(i)).c_str(), __FILE__, __LINE__));
         if (inputs[i].extents[0] != inputs[0].extents[0])
         {
@@ -3184,12 +3186,12 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
     }
 
     const usize k = inputs[0].extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     // out = inputs[0], then accumulate every remaining input into it - see accumulate_into's
     // doc comment for why this kernel, written for gradient fan-in summing, also does
     // elementwise add.
-    UNWRAP_OR_RETURN(copy(inputs[0], sliced_outputs, stream.handle()));
+    VIKA_UNWRAP_OR_RETURN(copy(inputs[0], sliced_outputs, stream.handle()));
 
     const usize threads = 256;
     const usize blocks = (inputs[0].element_count() + threads - 1) / threads;
@@ -3231,23 +3233,23 @@ auto AddLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<K
 
 auto ConcatLayer::with_extents(const std::vector<Extents> &input_extents) -> Result<ConcatLayer, Error>
 {
-    const auto output_extents = UNWRAP_OR_RETURN(concat_output_extents(input_extents));
-    auto outputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(output_extents));
+    const auto output_extents = VIKA_UNWRAP_OR_RETURN(concat_output_extents(input_extents));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(output_extents));
 
-    auto d_inputs = UNWRAP_OR_RETURN(try_map(input_extents, &DeviceOwningTensorf::empty));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(try_map(input_extents, &DeviceOwningTensorf::empty));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(ConcatLayer{.outputs = std::move(outputs), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
 }
 
 auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, d_inputs.size()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, d_inputs.size()));
 
     for (usize i = 0; i < inputs.size(); ++i)
     {
         // Called directly for the same reason as AddLayer::forward above - the index in the name.
-        UNWRAP_OR_RETURN(_check_trailing_extents(inputs[i].extents, d_inputs[i].extents(), __func__,
+        VIKA_UNWRAP_OR_RETURN(_check_trailing_extents(inputs[i].extents, d_inputs[i].extents(), __func__,
                                                  ("input " + std::to_string(i)).c_str(), __FILE__, __LINE__));
         if (inputs[i].extents[0] != inputs[0].extents[0])
         {
@@ -3257,7 +3259,7 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     }
 
     const usize k = inputs[0].extents[0];
-    auto sliced_outputs = UNWRAP_OR_RETURN(outputs.view().first_n(k));
+    auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     const usize threads = 256;
     usize col_offset = 0;
@@ -3321,22 +3323,22 @@ auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
 
 auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
 {
-    auto loss = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
 }
 
 auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
-    UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
+    VIKA_UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
 
     const usize n = predictions.element_count();
     const usize threads = 256;
@@ -3347,13 +3349,13 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
 auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
     const usize k = predictions.extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize n = predictions.element_count();
     const usize threads = 256;
@@ -3363,22 +3365,22 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
 
 auto CCELoss::with_extents(const Extents &extents) -> Result<CCELoss, Error>
 {
-    auto loss = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
-    auto d_inputs = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
+    auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(CCELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
 }
 
 auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
-    UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
+    VIKA_UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
 
     const usize n = predictions.element_count();
     const usize threads = 256;
@@ -3389,13 +3391,13 @@ auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
 auto CCELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    UNWRAP_OR_RETURN(
+    VIKA_UNWRAP_OR_RETURN(
         VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
-    UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
     const usize k = predictions.extents[0];
-    auto sliced_d_inputs = UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
+    auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize n = predictions.element_count();
     const usize threads = 256;
@@ -3693,7 +3695,7 @@ auto ComputationGraph::concat(std::vector<NodeId> inputs) -> Result<NodeId, Erro
     }
 
     const auto input_extents = map(inputs, [&](const NodeId &input) { return nodes[input.value].output_extents; });
-    const auto output_extents = UNWRAP_OR_RETURN(concat_output_extents(input_extents));
+    const auto output_extents = VIKA_UNWRAP_OR_RETURN(concat_output_extents(input_extents));
 
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
@@ -3885,11 +3887,11 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
     {
         if (adj[idx].size() > 1)
         {
-            d_outputs[idx] = UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(nodes[idx].output_extents));
+            d_outputs[idx] = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(nodes[idx].output_extents));
         }
     }
 
-    auto stream = UNWRAP_OR_RETURN(Stream::create());
+    auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(Model{
         .batch_size = batch_size,
         .layers = std::move(layers),
@@ -3918,7 +3920,7 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         }
         else
         {
-            pred_inputs = UNWRAP_OR_RETURN(
+            pred_inputs = VIKA_UNWRAP_OR_RETURN(
                 try_map(preds, [&](const NodeId &pred) { return forward_jobs[pred.value].value().wait(); }));
         }
 
@@ -3957,18 +3959,18 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
         return jobs[0].wait();
     }
 
-    const auto first = UNWRAP_OR_RETURN(jobs[0].wait());
+    const auto first = VIKA_UNWRAP_OR_RETURN(jobs[0].wait());
     const usize k = first.extents[0];
-    auto sliced_accum = UNWRAP_OR_RETURN(d_outputs[node_id.value]->view().first_n(k));
+    auto sliced_accum = VIKA_UNWRAP_OR_RETURN(d_outputs[node_id.value]->view().first_n(k));
 
-    UNWRAP_OR_RETURN(copy(first, sliced_accum, stream.handle()));
+    VIKA_UNWRAP_OR_RETURN(copy(first, sliced_accum, stream.handle()));
 
     const usize threads = 256;
     const usize blocks = (first.element_count() + threads - 1) / threads;
     for (usize i = 1; i < jobs.size(); ++i)
     {
-        const auto contribution = UNWRAP_OR_RETURN(jobs[i].wait());
-        UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_accum.const_view(), dim3(blocks), dim3(threads),
+        const auto contribution = VIKA_UNWRAP_OR_RETURN(jobs[i].wait());
+        VIKA_UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_accum.const_view(), dim3(blocks), dim3(threads),
                                        stream.handle(), contribution, sliced_accum)
                              .wait());
     }
@@ -4000,7 +4002,7 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
             continue;
         }
 
-        const auto upstream = UNWRAP_OR_RETURN(accumulate_output_gradient(node_id));
+        const auto upstream = VIKA_UNWRAP_OR_RETURN(accumulate_output_gradient(node_id));
 
         // Collapse to the single already-accumulated value, in place of the raw per-consumer
         // contributions - step() re-reads this node's slot afterwards for weight_gradients() and
@@ -4069,8 +4071,8 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
 
 auto AdamState::create(const Extents &extents) -> Result<AdamState, Error>
 {
-    auto m = UNWRAP_OR_RETURN(DeviceOwningTensorf::zero(extents));
-    auto v = UNWRAP_OR_RETURN(DeviceOwningTensorf::zero(extents));
+    auto m = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::zero(extents));
+    auto v = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::zero(extents));
     return ok(AdamState{std::move(m), std::move(v)});
 }
 
@@ -4090,7 +4092,7 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
             continue;
         }
 
-        auto states = UNWRAP_OR_RETURN(try_map(*maybe_params, &AdamState::from_parameters));
+        auto states = VIKA_UNWRAP_OR_RETURN(try_map(*maybe_params, &AdamState::from_parameters));
         optimizer.states.emplace(node_id.value, std::move(states));
     }
 
@@ -4126,8 +4128,8 @@ auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
             continue;
         }
 
-        const auto forward_input = UNWRAP_OR_RETURN(forward_jobs[preds[0].value].value().wait());
-        const auto upstream = UNWRAP_OR_RETURN(backward_jobs[node_id.value][0].wait());
+        const auto forward_input = VIKA_UNWRAP_OR_RETURN(forward_jobs[preds[0].value].value().wait());
+        const auto upstream = VIKA_UNWRAP_OR_RETURN(backward_jobs[node_id.value][0].wait());
 
         auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
         if (result.is_error())
