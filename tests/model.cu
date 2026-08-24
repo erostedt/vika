@@ -130,7 +130,7 @@ UTEST(model, compile_out_of_order_nodes)
     const auto inputs = DeviceOwningTensorf::zero({batch_size, 4}).unwrap();
     const auto out = model.forward(inputs.const_view()).unwrap();
 
-    EXPECT_EQ(out.rank, 2u);
+    EXPECT_EQ(out.rank(), 2u);
     EXPECT_EQ(out.extents[0], batch_size);
     EXPECT_EQ(out.extents[1], 3u);
 }
@@ -195,7 +195,7 @@ UTEST(model, forward_output_shape)
     const auto gpu_inputs = DeviceOwningTensorf::empty({batch_size, 8, 8, 1}).unwrap();
     const auto out = model.forward(gpu_inputs.const_view()).unwrap();
 
-    EXPECT_EQ(out.rank, 2u);
+    EXPECT_EQ(out.rank(), 2u);
     EXPECT_EQ(out.extents[0], batch_size);
     EXPECT_EQ(out.extents[1], 1u);
 }

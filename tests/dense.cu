@@ -218,7 +218,7 @@ UTEST(dense, layer_adam_update)
     std::vector<AdamState> states;
     for (const auto &param : layer.parameters())
     {
-        states.push_back(AdamState::create(param.value.to_extents()).unwrap());
+        states.push_back(AdamState::create(param.value.extents).unwrap());
     }
 
     for (usize step = 1; step <= 3; ++step)
