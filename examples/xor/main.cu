@@ -30,7 +30,7 @@ int main()
 
     for (usize t = 1; t <= epochs; ++t)
     {
-        const auto loss = train_step(model, loss_fn, inputs.const_view(), targets.const_view(), optimizer, t).unwrap();
+        const auto loss = train_step(model, loss_fn, inputs.const_view(), targets.const_view(), optimizer).unwrap();
 
         if (t % 1000 == 0)
         {

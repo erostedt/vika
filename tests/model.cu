@@ -192,8 +192,9 @@ UTEST(model, out_of_order_passes_return_errors)
     const auto inputs = DeviceOwningTensorf::zero({batch_size, 2}).unwrap();
     const auto loss_grad = DeviceOwningTensorf::zero({batch_size, 3}).unwrap();
 
-    EXPECT_TRUE(model.step(optimizer, 1).is_error());
+    EXPECT_TRUE(model.step(optimizer).is_error());
     EXPECT_TRUE(model.backward(loss_grad.const_view()).is_error());
+    EXPECT_EQ(optimizer.steps_taken, 0u);   // a rejected step must not consume a step count
     EXPECT_TRUE(model.accumulate_output_gradient(model.output_node).is_error());
     EXPECT_TRUE(model.forward_output(model.output_node).is_error());
 
@@ -201,15 +202,17 @@ UTEST(model, out_of_order_passes_return_errors)
     EXPECT_TRUE(model.forward_output(NodeId{99}).is_error());
 
     // Forward has run, backward has not.
-    EXPECT_TRUE(model.step(optimizer, 1).is_error());
+    EXPECT_TRUE(model.step(optimizer).is_error());
 
-    // In order, and repeatable.
-    for (usize t = 1; t <= 3; ++t)
+    // In order, and repeatable. The optimizer owns the step count, so the first successful step
+    // is t = 1 no matter what a caller's own loop variable does.
+    for (usize t = 0; t < 3; ++t)
     {
         ASSERT_TRUE(model.forward(inputs.const_view()).is_ok());
         ASSERT_TRUE(model.backward(loss_grad.const_view()).is_ok());
-        ASSERT_TRUE(model.step(optimizer, t).is_ok());
+        ASSERT_TRUE(model.step(optimizer).is_ok());
     }
+    EXPECT_EQ(optimizer.steps_taken, 3u);
 }
 
 UTEST(model, forward_output_shape)
@@ -267,7 +270,7 @@ UTEST(model, xor_trains_to_convergence)
         const auto out = model.forward(gpu_inputs.const_view()).unwrap();
         const auto loss_grad = loss_fn.backward(out, gpu_targets.const_view()).wait().unwrap();
         model.backward(loss_grad).unwrap();
-        model.step(optimizer, t).unwrap();
+        model.step(optimizer).unwrap();
     }
 
     const auto out = model.forward(gpu_inputs.const_view()).unwrap();
@@ -316,7 +319,7 @@ UTEST(model, branching_add_forward_and_backward)
     model.backward(loss_grad).unwrap();
 
     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.1f}).unwrap();
-    model.step(optimizer, 1).unwrap();
+    model.step(optimizer).unwrap();
 
     // Both branches must have received a real gradient through the Add node's fan-out - if
     // backward's routing to preds[0]/preds[1] were swapped, missing, or zeroed, at least one of
@@ -364,7 +367,7 @@ UTEST(model, branching_concat_forward_and_backward)
     model.backward(loss_grad).unwrap();
 
     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.1f}).unwrap();
-    model.step(optimizer, 1).unwrap();
+    model.step(optimizer).unwrap();
 
     // Both branches must have received their own (differently-shaped) split of the gradient
     // through Concat's backward - if the column-offset splitting were wrong, at least one of
@@ -423,7 +426,7 @@ UTEST(model, fan_in_accumulation_across_multiple_backward_calls)
         const auto loss_view = loss_fn.forward(prediction, gpu_targets.const_view()).wait().unwrap();
         const auto loss_grad = loss_fn.backward(prediction, gpu_targets.const_view()).wait().unwrap();
         model.backward(loss_grad).unwrap();
-        model.step(optimizer, step).unwrap();
+        model.step(optimizer).unwrap();
 
         const auto loss_cpu = download(loss_view).unwrap();
         if (step == 1)

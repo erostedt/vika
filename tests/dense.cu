@@ -156,6 +156,33 @@ UTEST(dense, layer_weight_gradients)
     ASSERT_TRUE(are_close(d_biases_cpu, expected_d_biases, 1e-5f));
 }
 
+// Adam's bias correction divides by 1 - beta^t, which is zero at t = 0: every scale becomes inf
+// and every weight NaN. Model::step() owns the counter and cannot pass 0, but a layer's update()
+// takes t straight from its caller.
+UTEST(dense, layer_adam_update_rejects_step_zero)
+{
+    using namespace vika;
+    auto layer = DenseLayer::randomized(1, 2, 3, 42).unwrap();
+
+    std::vector<AdamState> states;
+    for (const auto &param : layer.parameters())
+    {
+        states.push_back(AdamState::create(param.value.extents).unwrap());
+    }
+
+    const auto before = download(layer.weights.value).unwrap();
+
+    auto jobs = layer.update(states, AdamParameters{}, 0);
+    for (auto &result : wait_on_all(jobs))
+    {
+        EXPECT_TRUE(result.is_error());
+    }
+
+    // Rejected before any launch, so the weights are untouched rather than NaN.
+    const auto after = download(layer.weights.value).unwrap();
+    ASSERT_TRUE(are_equal(after, before));
+}
+
 UTEST(dense, layer_adam_update)
 {
     using namespace vika;

@@ -2077,7 +2077,7 @@ struct Model
     // an exception thrown out of a library that otherwise has none.
     auto forward_output(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>;
     auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>;
-    auto step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>;
+    auto step(AdamOptimizer &optimizer) -> Result<Void, Error>;
 
     // The (possibly summed) gradient of the loss w.r.t. node_id's output - what gets fed to that
     // node's own layer.backward(). Exactly one consumer is a plain wait, no allocation or launch:
@@ -2092,25 +2092,34 @@ struct AdamOptimizer
     // One AdamState per parameter, not per layer - see AdamState.
     std::unordered_map<usize, std::vector<AdamState>> states;
 
+    // Steps taken so far, owned here rather than passed in by the caller. Adam's bias correction
+    // divides by 1 - beta^t, which is zero at t = 0, so a caller counting from zero - the obvious
+    // way to write a training loop - turned every weight into NaN on the first step with nothing
+    // reporting it. Model::step() increments this before using it, so the first step is t = 1 and
+    // the mistake is no longer expressible through Model::step()/train_step().
+    usize steps_taken = 0;
+
     static auto from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>;
 };
 
 // One full training step: forward, loss forward+backward, backward, optimizer step. Returns the
 // scalar loss value so callers can log/monitor progress without a separate loss_fn.forward()
-// call of their own, same as every example's training loop already computes for printing.
+// call of their own, same as every example's training loop already computes for printing. The
+// step count lives on the optimizer (see AdamOptimizer::steps_taken), so a caller's own loop
+// variable can start wherever it likes without affecting Adam's bias correction.
 //
 // Templated on Loss rather than a variant: MSELoss is the only loss today, but anything sharing
 // its forward(predictions, targets)/backward(predictions, targets) shape (CCE, once it exists)
 // works here unchanged - no reason to invent a LossKind enumeration for a single member.
 template <typename Loss>
 auto train_step(Model &model, Loss &loss_fn, DeviceTensorConstViewf inputs, DeviceTensorConstViewf targets,
-                AdamOptimizer &optimizer, usize t) -> Result<f32, Error>
+                AdamOptimizer &optimizer) -> Result<f32, Error>
 {
     const auto predictions = VIKA_UNWRAP_OR_RETURN(model.forward(inputs));
     const auto loss_value = VIKA_UNWRAP_OR_RETURN(loss_fn.forward(predictions, targets).wait());
     const auto loss_grad = VIKA_UNWRAP_OR_RETURN(loss_fn.backward(predictions, targets).wait());
     VIKA_UNWRAP_OR_RETURN(model.backward(loss_grad));
-    VIKA_UNWRAP_OR_RETURN(model.step(optimizer, t));
+    VIKA_UNWRAP_OR_RETURN(model.step(optimizer));
 
     const auto loss_cpu = VIKA_UNWRAP_OR_RETURN(download(loss_value));
     return ok(loss_cpu[0]);
@@ -2396,6 +2405,14 @@ inline auto adam_bias_correction(const AdamParameters &params, usize t) -> std::
 auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamState> &states, cudaStream_t stream,
                        const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>
 {
+    if (t == 0)
+    {
+        // Model::step() makes this unreachable by owning the counter, but a layer's update() is
+        // public and takes t straight from its caller - see AdamOptimizer::steps_taken for what
+        // t = 0 does to the bias correction.
+        return {error(VIKA_UNSUPPORTED_ERROR("adam: step t must be at least 1, got 0"))};
+    }
+
     if (states.size() != parameters.size())
     {
         // states[i] is indexed in lockstep with parameters[i] below, with nothing structural
@@ -4129,7 +4146,7 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
     return ok(std::move(optimizer));
 }
 
-auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
+auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
 {
     // Both vectors are sized by their own pass and start empty, so stepping before either one ran
     // indexed off the end of an empty vector rather than reporting anything.
@@ -4141,6 +4158,11 @@ auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
     {
         return error(VIKA_GRAPH_ERROR("step: no backward pass to step from; call backward() first"));
     }
+
+    // After the guards above, so a rejected call doesn't consume a step. Pre-incremented, so the
+    // first step is t = 1: see AdamOptimizer::steps_taken.
+    ++optimizer.steps_taken;
+    const usize t = optimizer.steps_taken;
 
     for (const auto node_id : execution_order)
     {
