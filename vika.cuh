@@ -1710,6 +1710,12 @@ struct Flatten2DLayer
 
     auto backward(DeviceTensorConstViewf upstream_gradient) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
+    // The shape forward() produces: the batch dimension unchanged, every other dimension
+    // collapsed into one. Stands in for the outputs.extents() every buffer-owning layer checks
+    // its upstream gradient against - this layer owns no buffer of its own, since it only ever
+    // reinterprets its input's.
+    auto output_extents() const -> Extents;
+
     Extents extents;
 };
 
@@ -2630,24 +2636,25 @@ auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
     return {extents};
 }
 
+auto Flatten2DLayer::output_extents() const -> Extents
+{
+    return {extents[0], element_count(trailing_extents(extents))};
+}
+
 auto Flatten2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const
     -> KernelJob<DeviceTensorConstViewf>
 {
     UNWRAP_OR_RETURN(check_input_count(inputs, 1, "flatten forward"));
     const auto &input = inputs[0];
 
-    const auto input_extents = input.to_extents();
-    if (input_extents != extents)
-    {
-        return KernelJob<DeviceTensorConstViewf>::failed(VIKA_SHAPE_ERROR(
-            "flatten forward: input is rank %zu with %zu elements, layer expects rank %zu with %zu",
-            input_extents.size(), element_count(input_extents), extents.size(), element_count(extents)));
-    }
+    // Trailing extents, not a full comparison: the leading (batch) dimension is expected to vary
+    // from call to call, exactly like every other layer's forward(). Comparing in full made this
+    // the one layer that rejected any batch smaller than the capacity it was compiled for.
+    UNWRAP_OR_RETURN(check_trailing_extents(input.to_extents(), extents, "flatten forward", "input"));
 
-    const auto batch = input.extents[0];
-    const usize features =
-        std::accumulate(input.extents + 1, input.extents + extents.size(), 1ul, std::multiplies<usize>{});
-    return KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(input.data, {batch, features}));
+    const usize k = input.extents[0];
+    const usize features = element_count(trailing_extents(extents));
+    return KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(input.data, {k, features}));
 }
 
 auto InputLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>
@@ -2664,15 +2671,16 @@ auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> std::vector<
 auto Flatten2DLayer::backward(DeviceTensorConstViewf upstream_gradient) const
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
+    // Checked against output_extents(), not extents: upstream is the gradient of the *flattened*
+    // output, so it is rank 2 [batch, features] - the two only happen to agree on element count.
     const auto upstream_extents = upstream_gradient.to_extents();
-    if (element_count(upstream_extents) != element_count(extents))
-    {
-        return {KernelJob<DeviceTensorConstViewf>::failed(
-            VIKA_SHAPE_ERROR("flatten backward: upstream holds %zu elements, layer extents hold %zu",
-                             element_count(upstream_extents), element_count(extents)))};
-    }
+    UNWRAP_OR_RETURN(check_trailing_extents(upstream_extents, output_extents(), "flatten backward", "upstream"));
 
-    return {KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream_gradient.data, extents))};
+    // Reshaped back to the input's own shape, with the batch the caller actually passed rather
+    // than the capacity this layer was built for.
+    Extents input_extents = extents;
+    input_extents[0] = upstream_extents[0];
+    return {KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream_gradient.data, input_extents))};
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensorf filters,
