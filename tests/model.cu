@@ -174,6 +174,44 @@ UTEST(model, forward_matches_manual_xor)
     ASSERT_TRUE(are_close(graph_cpu, manual_cpu, 1e-5f));
 }
 
+// Calling these out of order used to take the process down (step indexed off the end of an empty
+// forward_jobs/backward_jobs) or silently succeed on uninitialised layer state (backward reads the
+// `outputs`/`argmax` that only forward fills).
+UTEST(model, out_of_order_passes_return_errors)
+{
+    using namespace vika;
+
+    constexpr usize batch_size = 4;
+
+    ComputationGraph graph{batch_size};
+    auto x = graph.input({2});
+    x = graph.dense(x, 3, 42).unwrap();
+    auto model = graph.compile(x).unwrap();
+    auto optimizer = AdamOptimizer::from_model(model, {}).unwrap();
+
+    const auto inputs = DeviceOwningTensorf::zero({batch_size, 2}).unwrap();
+    const auto loss_grad = DeviceOwningTensorf::zero({batch_size, 3}).unwrap();
+
+    EXPECT_TRUE(model.step(optimizer, 1).is_error());
+    EXPECT_TRUE(model.backward(loss_grad.const_view()).is_error());
+    EXPECT_TRUE(model.accumulate_output_gradient(model.output_node).is_error());
+    EXPECT_TRUE(model.forward_output(model.output_node).is_error());
+
+    ASSERT_TRUE(model.forward(inputs.const_view()).is_ok());
+    EXPECT_TRUE(model.forward_output(NodeId{99}).is_error());
+
+    // Forward has run, backward has not.
+    EXPECT_TRUE(model.step(optimizer, 1).is_error());
+
+    // In order, and repeatable.
+    for (usize t = 1; t <= 3; ++t)
+    {
+        ASSERT_TRUE(model.forward(inputs.const_view()).is_ok());
+        ASSERT_TRUE(model.backward(loss_grad.const_view()).is_ok());
+        ASSERT_TRUE(model.step(optimizer, t).is_ok());
+    }
+}
+
 UTEST(model, forward_output_shape)
 {
     using namespace vika;

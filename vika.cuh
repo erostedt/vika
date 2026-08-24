@@ -2038,8 +2038,10 @@ struct Model
     // (same space layers/layer_inputs use) rather than an opaque hash key. Slots are optional
     // because KernelJob<T> cannot be default-constructed (see KernelJob<T>'s Result<T, Error>,
     // which requires DeviceTensorConstViewf to be default-constructible, and it deliberately
-    // is not) and because not every slot is ever written: the input node never gets a
-    // forward_jobs entry, since nothing computes it.
+    // is not) - not because any slot is left unwritten. forward() walks all of execution_order,
+    // the input node included (InputLayer::forward hands its input straight back as a ready job),
+    // so after a successful forward() every slot holds a value. Empty means forward() has not run,
+    // which is what forward_output() below reports.
     std::vector<std::optional<KernelJob<DeviceTensorConstViewf>>> forward_jobs;
 
     // One slot per node, each accumulating zero or more incoming gradient jobs - one per
@@ -2068,6 +2070,12 @@ struct Model
     Stream stream;
 
     auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>;
+
+    // The (waited) output of node_id's forward pass. A Result rather than a bare
+    // forward_jobs[i].value(): an unset or missing slot means forward() has not run for this
+    // model, which is a caller error to report through the same channel as everything else, not
+    // an exception thrown out of a library that otherwise has none.
+    auto forward_output(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>;
     auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>;
     auto step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>;
 
@@ -3904,6 +3912,16 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
     });
 }
 
+auto Model::forward_output(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>
+{
+    if (node_id.value >= forward_jobs.size() || !forward_jobs[node_id.value].has_value())
+    {
+        return error(VIKA_GRAPH_ERROR("node %zu has no forward output; was forward() called on this model?",
+                                      node_id.value));
+    }
+    return forward_jobs[node_id.value]->wait();
+}
+
 auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>
 {
     forward_jobs.clear();
@@ -3921,7 +3939,7 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         else
         {
             pred_inputs = VIKA_UNWRAP_OR_RETURN(
-                try_map(preds, [&](const NodeId &pred) { return forward_jobs[pred.value].value().wait(); }));
+                try_map(preds, [&](const NodeId &pred) { return forward_output(pred); }));
         }
 
         auto job = std::visit(
@@ -3931,12 +3949,7 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         forward_jobs[node_id.value] = std::move(job);
     }
 
-    auto result = forward_jobs[output_node.value].value().wait();
-    if (result.is_error())
-    {
-        return error(result.unwrap_error());
-    }
-    return ok(result.unwrap());
+    return forward_output(output_node);
 }
 
 // Order of summation is the order jobs were pushed, which is execution_order's (deterministic)
@@ -3944,6 +3957,14 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
 // the same model bit-for-bit reproducible.
 auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>
 {
+    if (node_id.value >= backward_jobs.size())
+    {
+        // Public, like the jobs.empty() check below: backward() sizes this vector, so an
+        // out-of-range node here means it has not run (or not for this model).
+        return error(VIKA_GRAPH_ERROR("accumulate_output_gradient: node %zu is out of range; was backward() called?",
+                                      node_id.value));
+    }
+
     auto &jobs = backward_jobs[node_id.value];
     if (jobs.empty())
     {
@@ -3980,6 +4001,15 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
 
 auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
 {
+    // Every layer's backward() reads state its own forward() wrote - SigmoidLayer and
+    // SoftmaxLayer read `outputs`, MaxPool2DLayer reads `argmax` - and those buffers come from
+    // empty(), i.e. uninitialised device memory. Without forward() first, backward() used to
+    // succeed and hand back gradients computed from whatever was in that memory.
+    if (forward_jobs.size() != layers.size())
+    {
+        return error(VIKA_GRAPH_ERROR("backward: no forward pass to differentiate; call forward() first"));
+    }
+
     backward_jobs.clear();
     backward_jobs.resize(layers.size());
     backward_jobs[output_node.value].push_back(KernelJob<DeviceTensorConstViewf>::ready(loss_grad));
@@ -4101,6 +4131,17 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
 
 auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
 {
+    // Both vectors are sized by their own pass and start empty, so stepping before either one ran
+    // indexed off the end of an empty vector rather than reporting anything.
+    if (forward_jobs.size() != layers.size())
+    {
+        return error(VIKA_GRAPH_ERROR("step: no forward pass to step from; call forward() first"));
+    }
+    if (backward_jobs.size() != layers.size())
+    {
+        return error(VIKA_GRAPH_ERROR("step: no backward pass to step from; call backward() first"));
+    }
+
     for (const auto node_id : execution_order)
     {
         auto &layer = layers[node_id.value];
@@ -4128,7 +4169,7 @@ auto Model::step(AdamOptimizer &optimizer, usize t) -> Result<Void, Error>
             continue;
         }
 
-        const auto forward_input = VIKA_UNWRAP_OR_RETURN(forward_jobs[preds[0].value].value().wait());
+        const auto forward_input = VIKA_UNWRAP_OR_RETURN(forward_output(preds[0]));
         const auto upstream = VIKA_UNWRAP_OR_RETURN(backward_jobs[node_id.value][0].wait());
 
         auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
