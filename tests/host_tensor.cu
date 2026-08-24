@@ -60,3 +60,21 @@ UTEST(tensor, row_major_indexing)
     EXPECT_EQ(t[4], 5.0f);
     EXPECT_EQ(t[5], 6.0f);
 }
+
+// The copy in DeviceOwningTensor::from is sized from extents, not from the vector, so a length
+// mismatch used to read past the vector's end and report success.
+UTEST(tensor, device_from_rejects_wrong_length)
+{
+    const auto too_short = DeviceOwningTensorf::from(std::vector<f32>{1.0f, 2.0f}, {8});
+    EXPECT_TRUE(too_short.is_error());
+
+    const auto too_long = DeviceOwningTensorf::from(std::vector<f32>(8, 1.0f), {2});
+    EXPECT_TRUE(too_long.is_error());
+
+    const auto exact = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3});
+    ASSERT_TRUE(exact.is_ok());
+
+    const auto host = download(exact.unwrap()).unwrap();
+    EXPECT_EQ(host.size(), 6u);
+    EXPECT_EQ(host(1, 2), 6.0f);
+}

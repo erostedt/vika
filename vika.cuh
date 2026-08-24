@@ -929,19 +929,16 @@ class DeviceOwningTensor
 
     static auto from(const std::vector<T> &data, const Extents &extents) -> Result<Self, Error>
     {
-        auto tensor = empty(extents);
-        if (tensor.is_error())
+        const usize count = UNWRAP_OR_RETURN(vika::checked_element_count(extents));
+        if (data.size() != count)
         {
-            return tensor;
+            return error(
+                VIKA_SHAPE_ERROR("device tensor data holds %zu elements but extents describe %zu", data.size(), count));
         }
-        const auto err =
-            cudaMemcpy(tensor.unwrap().data(), data.data(), tensor.unwrap().byte_count(), cudaMemcpyHostToDevice);
 
-        if (is_error(err))
-        {
-            return error(VIKA_DEVICE_ERROR(err));
-        }
-        return tensor;
+        auto tensor = UNWRAP_OR_RETURN(empty(extents));
+        VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(tensor.data(), data.data(), tensor.byte_count(), cudaMemcpyHostToDevice));
+        return ok(std::move(tensor));
     }
 
     static auto from(const std::vector<T> &data) -> Result<Self, Error>
