@@ -3787,16 +3787,29 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
     }
 
     const auto &topo_order = sort_result.unwrap();
+    if (topo_order.size() != nodes.size())
+    {
+        // Every node is seeded into adj above, so topological_sort's own count check already
+        // covers this - but the slots below are filled by index rather than appended, so a
+        // missing node would leave a default-constructed InputLayer behind (a silent
+        // pass-through) instead of an obvious failure. Cheap to state where it's relied on.
+        return error(VIKA_GRAPH_ERROR("compile: sorted %zu of %zu nodes", topo_order.size(), nodes.size()));
+    }
 
-    std::vector<Layer> layers;
-    std::vector<std::vector<NodeId>> layer_inputs_result;
-    layers.reserve(nodes.size());
-    layer_inputs_result.reserve(nodes.size());
+    // Indexed by NodeId::value, not by position in topo_order: NodeId is already the dense index
+    // every consumer uses (see Model's own fields, and Model::forward/backward/step indexing
+    // layers[node_id.value]). Filling these in traversal order instead silently mis-wired every
+    // node whenever a graph's node vector wasn't already in topological order - which the
+    // builders happen to guarantee, since they reject a NodeId that doesn't exist yet and so can
+    // only ever add edges from lower to higher indices, but nothing states or checks it, and a
+    // graph assembled by hand (nodes is public) or loaded from disk need not be ordered that way.
+    std::vector<Layer> layers(nodes.size());
+    std::vector<std::vector<NodeId>> layer_inputs_result(nodes.size());
 
     for (const auto idx : topo_order)
     {
         const auto &node = nodes[idx];
-        layer_inputs_result.push_back(node.inputs);
+        layer_inputs_result[idx] = node.inputs;
 
         const auto pred_extents =
             map(node.inputs, [&](const NodeId &pred) { return nodes[pred.value].output_extents; });
@@ -3806,7 +3819,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         {
             return error(layer_result.unwrap_error());
         }
-        layers.push_back(std::move(layer_result.unwrap()));
+        layers[idx] = std::move(layer_result.unwrap());
     }
 
     auto execution_order = map(topo_order, [](usize idx) { return NodeId{idx}; });

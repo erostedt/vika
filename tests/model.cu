@@ -99,6 +99,42 @@ UTEST(model, compile_multiple_input_nodes)
     EXPECT_TRUE(result.is_error());
 }
 
+// compile() fills layers/layer_inputs by NodeId, not by position in the topological order, so a
+// node vector that isn't already topologically ordered still wires up correctly. The builders
+// cannot produce one (they reject a NodeId that does not exist yet, so edges only ever run from
+// lower to higher indices), but nodes is public and a graph loaded from disk need not be ordered
+// that way - here node 0 consumes node 1. This used to mis-index every layer and then throw.
+UTEST(model, compile_out_of_order_nodes)
+{
+    using namespace vika;
+
+    constexpr usize batch_size = 2;
+
+    ComputationGraph graph{batch_size};
+    graph.nodes.push_back(Node{DenseSpec{3, 42}, Extents{batch_size, 3}, {NodeId{1}}});
+    graph.nodes.push_back(Node{InputSpec{}, Extents{batch_size, 4}, {}});
+
+    auto model = graph.compile(NodeId{0}).unwrap();
+
+    EXPECT_TRUE(std::holds_alternative<DenseLayer>(model.layers[0].kind));
+    EXPECT_TRUE(std::holds_alternative<InputLayer>(model.layers[1].kind));
+
+    EXPECT_EQ(model.layer_inputs[0].size(), 1u);
+    EXPECT_EQ(model.layer_inputs[0][0].value, 1u);
+    EXPECT_EQ(model.layer_inputs[1].size(), 0u);
+
+    EXPECT_EQ(model.execution_order.size(), 2u);
+    EXPECT_EQ(model.execution_order[0].value, 1u);
+    EXPECT_EQ(model.execution_order[1].value, 0u);
+
+    const auto inputs = DeviceOwningTensorf::zero({batch_size, 4}).unwrap();
+    const auto out = model.forward(inputs.const_view()).unwrap();
+
+    EXPECT_EQ(out.rank, 2u);
+    EXPECT_EQ(out.extents[0], batch_size);
+    EXPECT_EQ(out.extents[1], 3u);
+}
+
 UTEST(model, forward_matches_manual_xor)
 {
     using namespace vika;
