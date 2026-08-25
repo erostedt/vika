@@ -2171,8 +2171,13 @@ struct Model
 struct AdamOptimizer
 {
     AdamParameters params;
-    // One AdamState per parameter, not per layer - see AdamState.
-    std::unordered_map<usize, std::vector<AdamState>> states;
+    // One AdamState per parameter, not per layer - see AdamState - and one entry per node,
+    // indexed by NodeId::value like every other per-node array in Model. An empty entry means
+    // that node's layer has no parameters, which is exact: a trainable layer always has at least
+    // one. This was an unordered_map until the vector made two things possible - dropping a hash
+    // lookup per node per step, and letting step() notice an optimizer built from a different
+    // model, which a missing key silently turned into "skip this layer, train nothing".
+    std::vector<std::vector<AdamState>> states;
 
     // Steps taken so far, owned here rather than passed in by the caller. Adam's bias correction
     // divides by 1 - beta^t, which is zero at t = 0, so a caller counting from zero - the obvious
@@ -4214,7 +4219,7 @@ auto AdamState::from_parameters(const ConstParameterView &parameters) -> Result<
 
 auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>
 {
-    AdamOptimizer optimizer{params, {}};
+    AdamOptimizer optimizer{params, std::vector<std::vector<AdamState>>(model.layers.size()), 0};
     for (const auto node_id : model.execution_order)
     {
         auto maybe_params = parameters(model.layers[node_id.value]);
@@ -4223,8 +4228,7 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
             continue;
         }
 
-        auto states = VIKA_UNWRAP_OR_RETURN(try_map(*maybe_params, &AdamState::from_parameters));
-        optimizer.states.emplace(node_id.value, std::move(states));
+        optimizer.states[node_id.value] = VIKA_UNWRAP_OR_RETURN(try_map(*maybe_params, &AdamState::from_parameters));
     }
 
     return ok(std::move(optimizer));
@@ -4241,6 +4245,15 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
     if (backward_jobs.size() != layers.size())
     {
         return error(VIKA_GRAPH_ERROR("step: no backward pass to step from; call backward() first"));
+    }
+
+    if (optimizer.states.size() != layers.size())
+    {
+        // An optimizer built from a different model. As an unordered_map this was invisible:
+        // every find() missed, every layer was skipped, and step() reported success having
+        // trained nothing.
+        return error(VIKA_GRAPH_ERROR("step: optimizer holds state for %zu nodes but this model has %zu",
+                                      optimizer.states.size(), layers.size()));
     }
 
     // After the guards above, so a rejected call doesn't consume a step. Pre-incremented, so the
@@ -4262,8 +4275,8 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
             continue;
         }
 
-        auto it = optimizer.states.find(node_id.value);
-        if (it == optimizer.states.end())
+        auto &layer_states = optimizer.states[node_id.value];
+        if (layer_states.empty())
         {
             continue;
         }
@@ -4278,7 +4291,7 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
         const auto forward_input = VIKA_UNWRAP_OR_RETURN(forward_output(preds[0]));
         const auto upstream = VIKA_UNWRAP_OR_RETURN(backward_jobs[node_id.value][0].wait());
 
-        auto result = update_layer(layer.kind, forward_input, upstream, it->second, optimizer.params, t);
+        auto result = update_layer(layer.kind, forward_input, upstream, layer_states, optimizer.params, t);
         if (result.is_error())
         {
             return error(result.unwrap_error());
