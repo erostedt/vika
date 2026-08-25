@@ -686,13 +686,7 @@ auto checked_size(const Extents &extents) -> Result<usize, Error>;
 template <typename T>
 inline auto checked_byte_count(const Extents &extents) -> Result<usize, Error>
 {
-    auto count = checked_size(extents);
-    if (count.is_error())
-    {
-        return error(count.unwrap_error());
-    }
-
-    const usize elements = count.unwrap();
+    const usize elements = VIKA_UNWRAP_OR_RETURN(checked_size(extents));
     if (elements > std::numeric_limits<usize>::max() / sizeof(T))
     {
         return error(VIKA_SHAPE_ERROR("byte count overflows usize: %zu elements of %zu bytes", elements, sizeof(T)));
@@ -964,11 +958,7 @@ class DeviceOwningTensor
         const usize bytes = VIKA_UNWRAP_OR_RETURN(vika::checked_byte_count<T>(extents));
 
         T *ptr = nullptr;
-        const auto err = cudaMalloc(&ptr, bytes);
-        if (err)
-        {
-            return error(VIKA_DEVICE_ERROR(err));
-        }
+        VIKA_RETURN_ON_CUDA_ERROR(cudaMalloc(&ptr, bytes));
         return ok(Self(ptr, extents));
     }
 
@@ -998,17 +988,9 @@ class DeviceOwningTensor
 
     static auto zero(const Extents &extents) -> Result<Self, Error>
     {
-        auto tensor = empty(extents);
-        if (tensor.is_error())
-        {
-            return tensor;
-        }
-        const auto err = cudaMemset(tensor.unwrap().data(), 0, tensor.unwrap().byte_count());
-        if (is_error(err))
-        {
-            return error(VIKA_DEVICE_ERROR(err));
-        }
-        return tensor;
+        auto tensor = VIKA_UNWRAP_OR_RETURN(empty(extents));
+        VIKA_RETURN_ON_CUDA_ERROR(cudaMemset(tensor.data(), 0, tensor.byte_count()));
+        return ok(std::move(tensor));
     }
 
     static auto zero_like(const Self &other) -> Result<Self, Error>
@@ -1075,11 +1057,7 @@ auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, 
                                       src.element_count(), dst.size()));
     }
 
-    const auto err = cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost);
-    if (is_error(err))
-    {
-        return error(VIKA_DEVICE_ERROR(err));
-    }
+    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost));
     return ok(Void{});
 }
 
@@ -1092,11 +1070,7 @@ auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Vo
                                       src.element_count(), dst.size()));
     }
 
-    const auto err = cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost);
-    if (is_error(err))
-    {
-        return error(VIKA_DEVICE_ERROR(err));
-    }
+    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost));
     return ok(Void{});
 }
 
@@ -1109,11 +1083,7 @@ auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, 
                                       src.size(), dst.element_count()));
     }
 
-    const auto err = cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice);
-    if (is_error(err))
-    {
-        return error(VIKA_DEVICE_ERROR(err));
-    }
+    VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice));
     return ok(Void{});
 }
 
@@ -1148,29 +1118,16 @@ auto zero(DeviceTensorView<T> dst, cudaStream_t stream) -> Result<Void, Error>
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto upload(const HostTensor<T> &src) -> Result<DeviceOwningTensor<T>, Error>
 {
-    auto dst = DeviceOwningTensor<T>::empty(src.extents());
-    if (dst.is_error())
-    {
-        return error(dst.unwrap_error());
-    }
-
-    const auto err = copy(src, dst.unwrap());
-    if (err.is_error())
-    {
-        return error(err.unwrap_error());
-    }
-    return dst;
+    auto dst = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensor<T>::empty(src.extents()));
+    VIKA_UNWRAP_OR_RETURN(copy(src, dst));
+    return ok(std::move(dst));
 }
 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto download(const DeviceTensorView<const T> &src) -> Result<HostTensor<T>, Error>
 {
     auto dst = VIKA_UNWRAP_OR_RETURN(HostTensor<T>::empty(src.extents));
-    const auto err = copy(src, dst);
-    if (err.is_error())
-    {
-        return error(err.unwrap_error());
-    }
+    VIKA_UNWRAP_OR_RETURN(copy(src, dst));
     return ok(std::move(dst));
 }
 
@@ -1348,11 +1305,7 @@ class Stream
     static auto create() -> Result<Self, Error>
     {
         cudaStream_t stream = nullptr;
-        const auto err = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-        if (is_error(err))
-        {
-            return error(VIKA_DEVICE_ERROR(err));
-        }
+        VIKA_RETURN_ON_CUDA_ERROR(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
         return ok(Self(stream));
     }
 
@@ -4106,13 +4059,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         }
     }
 
-    auto sort_result = topological_sort(adj);
-    if (sort_result.is_error())
-    {
-        return error(sort_result.unwrap_error());
-    }
-
-    const auto &topo_order = sort_result.unwrap();
+    const auto topo_order = VIKA_UNWRAP_OR_RETURN(topological_sort(adj));
     if (topo_order.size() != nodes.size())
     {
         // Every node is seeded into adj above, so topological_sort's own count check already
@@ -4145,12 +4092,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         const auto pred_extents =
             map(node.inputs, [&](const NodeId &pred) { return nodes[pred.value].output_extents; });
 
-        auto layer_result = make_layer(node.spec, batch_size, pred_extents);
-        if (layer_result.is_error())
-        {
-            return error(layer_result.unwrap_error());
-        }
-        layers[idx] = std::move(layer_result.unwrap());
+        layers[idx] = VIKA_UNWRAP_OR_RETURN(make_layer(node.spec, batch_size, pred_extents));
     }
 
     std::vector<NodeId> execution_order;
@@ -4368,18 +4310,12 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
                 // weight_gradients() writes into the layer's own weights.grad/biases.grad (or
                 // filters.grad/biases.grad) buffers; update()'s parameters() reads them back
                 // from there, so nothing needs to be threaded through by hand here.
-                auto wg_result = l.weight_gradients(forward_input, upstream).wait();
-                if (wg_result.is_error())
-                {
-                    return error(wg_result.unwrap_error());
-                }
+                VIKA_UNWRAP_OR_RETURN(l.weight_gradients(forward_input, upstream).wait());
+
                 auto update_jobs = l.update(states, params, t);
                 for (auto &result : wait_on_all(update_jobs))
                 {
-                    if (result.is_error())
-                    {
-                        return error(result.unwrap_error());
-                    }
+                    VIKA_UNWRAP_OR_RETURN(std::move(result));
                 }
             }
             return ok(Void{});
@@ -4473,11 +4409,7 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
         const auto forward_input = VIKA_UNWRAP_OR_RETURN(forward_output(preds[0]));
         const auto upstream = VIKA_UNWRAP_OR_RETURN(backward_jobs[node_id.value][0].wait());
 
-        auto result = update_layer(layer.kind, forward_input, upstream, layer_states, optimizer.params, t);
-        if (result.is_error())
-        {
-            return error(result.unwrap_error());
-        }
+        VIKA_UNWRAP_OR_RETURN(update_layer(layer.kind, forward_input, upstream, layer_states, optimizer.params, t));
     }
 
     return ok(Void{});
