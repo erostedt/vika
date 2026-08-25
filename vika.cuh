@@ -47,6 +47,24 @@
         }                                                                                                              \
     } while (0)
 
+// Debug-only precondition, compiled out when NDEBUG is set. A third tier alongside the two the
+// file already has: VIKA_PANIC_IF, which always runs and is for invariants whose violation means
+// the library itself is broken, and returning a Result, which is for anything a caller could
+// legitimately get wrong. VIKA_ASSERT is for conditions that can only be a bug in the calling
+// code, where a release build should not pay to re-check what the caller was told to guarantee.
+// install.sh builds Debug by default, so tests and examples do check.
+//
+// Host-only, like VIKA_PANIC itself: fprintf and exit have no device equivalent.
+//
+// The sizeof form in the NDEBUG branch evaluates nothing, but still counts as a use of whatever
+// the condition names, so a variable that exists only for an assert does not become an unused one
+// in release - which -Werror would reject.
+#ifdef NDEBUG
+#define VIKA_ASSERT(expr, fmt, ...) ((void)sizeof((expr) ? 1 : 0))
+#else
+#define VIKA_ASSERT(expr, fmt, ...) VIKA_PANIC_IF(!(expr), fmt, ##__VA_ARGS__)
+#endif
+
 // Works for any enclosing return type with an implicit Err<Error> constructor - Result<T, Error>
 // and KernelJob<T> directly, and std::vector<KernelJob<T>> (a layer's backward(), which can
 // return one gradient per predecessor) via its initializer-list constructor, since each element
@@ -754,16 +772,20 @@ class HostTensor
 
     auto operator()(usize r, usize c) -> T &
     {
+        VIKA_ASSERT(_extents.size() == 2, "HostTensor: 2-argument accessor on a rank %zu tensor", _extents.size());
         return _data[r * _extents[1] + c];
     }
 
     auto operator()(usize r, usize c) const -> const T &
     {
+        VIKA_ASSERT(_extents.size() == 2, "HostTensor: 2-argument accessor on a rank %zu tensor", _extents.size());
         return _data[r * _extents[1] + c];
     }
 
     auto operator()(usize n, usize h, usize w, usize c) -> T &
     {
+        VIKA_ASSERT(_extents.size() == 4, "HostTensor: 4-argument accessor on a rank %zu tensor",
+                    _extents.size());
         const auto height = _extents[1];
         const auto width = _extents[2];
         const auto channels = _extents[3];
@@ -772,6 +794,8 @@ class HostTensor
 
     auto operator()(usize n, usize h, usize w, usize c) const -> const T &
     {
+        VIKA_ASSERT(_extents.size() == 4, "HostTensor: 4-argument accessor on a rank %zu tensor",
+                    _extents.size());
         const auto height = _extents[1];
         const auto width = _extents[2];
         const auto channels = _extents[3];
