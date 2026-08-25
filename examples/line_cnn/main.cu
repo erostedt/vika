@@ -16,8 +16,8 @@ int main()
     constexpr usize N_VERT = IMG_W;
     constexpr usize batch_size = N_HORIZ + N_VERT;
 
-    auto cpu_inputs = HostTensor4f::zero({batch_size, IMG_H, IMG_W, 1}).unwrap();
-    auto cpu_targets = HostTensor2f::zero({batch_size, 1}).unwrap();
+    auto cpu_inputs = HostTensorf::zero({batch_size, IMG_H, IMG_W, 1}).unwrap();
+    auto cpu_targets = HostTensorf::zero({batch_size, 1}).unwrap();
 
     for (usize r = 0; r < N_HORIZ; ++r)
     {

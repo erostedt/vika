@@ -50,7 +50,7 @@ UTEST(softmax, backward)
 
     const auto upstream_gradient = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f}, {1, 3}).unwrap();
     auto layer = SoftmaxLayer::with_extents({1, 3}).unwrap();
-    copy(HostTensor2f::from({0.2f, 0.3f, 0.5f}, {1, 3}).unwrap(), layer.outputs).unwrap();
+    copy(HostTensorf::from({0.2f, 0.3f, 0.5f}, {1, 3}).unwrap(), layer.outputs).unwrap();
 
     const auto outputs = layer.backward(upstream_gradient.const_view())[0].wait().unwrap();
 

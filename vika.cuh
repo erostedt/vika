@@ -906,16 +906,14 @@ class HostTensor
     const Extents _extents{};
 };
 
+// Unsuffixed, for the reason step 13 gave when it dropped the device-side suffixes: rank lives at
+// runtime in the extents, never in the type, so HostTensor2f and HostTensor4f were always the
+// same HostTensor<f32> wearing different names for a distinction that does not exist.
 using HostTensorf = HostTensor<f32>;
-using HostTensor1f = HostTensorf;
-using HostTensor2f = HostTensorf;
-using HostTensor3f = HostTensorf;
-using HostTensor4f = HostTensorf;
 using HostTensoru = HostTensor<u32>;
-using HostTensor4u = HostTensor<u32>;
-using Vectorf = HostTensor1f;
+using Vectorf = HostTensorf;
 using Vectoru = HostTensor<u32>;
-using Matrixf = HostTensor2f;
+using Matrixf = HostTensorf;
 
 // =============================================================================
 // Device Tensors

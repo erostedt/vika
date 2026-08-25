@@ -13,7 +13,7 @@ UTEST(conv, forward_valid_stride1_multi_channel)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    auto cpu_inputs = HostTensor4f::zero({batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero({batch, height, width, channels}).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize h = 0; h < height; ++h)
@@ -78,7 +78,7 @@ UTEST(conv, forward_smaller_batch)
     // has spare capacity (2) while the actual batch (1) is smaller. Each output element only
     // depends on its own sample, so this should reproduce that test's n=0 values exactly - both
     // in what gets computed and in the shape of what's returned.
-    auto cpu_inputs = HostTensor4f::zero({actual_batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero({actual_batch, height, width, channels}).unwrap();
     for (usize h = 0; h < height; ++h)
     {
         for (usize w = 0; w < width; ++w)
@@ -126,7 +126,7 @@ UTEST(conv, forward_batch_exceeds_capacity)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    const auto inputs = upload(HostTensor4f::zero({2, height, width, channels}).unwrap()).unwrap();
+    const auto inputs = upload(HostTensorf::zero({2, height, width, channels}).unwrap()).unwrap();
 
     constexpr usize kernel_height = 3;
     constexpr usize kernel_width = 3;
@@ -149,7 +149,7 @@ UTEST(conv, backward_valid_stride1)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    auto cpu_inputs = HostTensor4f::zero({batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero({batch, height, width, channels}).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize h = 0; h < height; ++h)
@@ -176,7 +176,7 @@ UTEST(conv, backward_valid_stride1)
 
     const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
 
-    auto cpu_upstream = HostTensor4f::zero({batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
+    auto cpu_upstream = HostTensorf::zero({batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize out_h = 0; out_h < gpu_out.extents[1]; ++out_h)
@@ -246,7 +246,7 @@ UTEST(conv, backward_smaller_batch)
     // capacity (2) while the actual upstream batch (1) is smaller. Each output element only
     // depends on its own sample, so this should reproduce that test's n=0 values exactly - both
     // in what gets computed and in the shape of what's returned.
-    auto cpu_inputs = HostTensor4f::zero({actual_batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero({actual_batch, height, width, channels}).unwrap();
     for (usize h = 0; h < height; ++h)
     {
         for (usize w = 0; w < width; ++w)
@@ -272,7 +272,7 @@ UTEST(conv, backward_smaller_batch)
     const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
 
     auto cpu_upstream =
-        HostTensor4f::zero({actual_batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
+        HostTensorf::zero({actual_batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
     for (usize out_h = 0; out_h < gpu_out.extents[1]; ++out_h)
     {
         for (usize out_w = 0; out_w < gpu_out.extents[2]; ++out_w)

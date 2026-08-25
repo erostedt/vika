@@ -183,7 +183,7 @@ UTEST(model, forward_matches_manual_xor)
     constexpr u32 seed1 = 42;
     constexpr u32 seed2 = 43;
 
-    const auto cpu_inputs = HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_inputs = HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
 
     // graph API forward
@@ -349,8 +349,8 @@ UTEST(model, xor_trains_to_convergence)
 
     constexpr usize batch_size = 4;
 
-    const auto cpu_inputs = HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
-    const auto cpu_targets = HostTensor2f::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1}).unwrap();
+    const auto cpu_inputs = HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_targets = HostTensorf::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1}).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
 
@@ -402,7 +402,7 @@ UTEST(model, branching_add_forward_and_backward)
 
     auto model = graph.compile(out).unwrap();
 
-    const auto cpu_inputs = HostTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_inputs = HostTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {batch_size, 2}).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
 
     const auto prediction = model.forward(gpu_inputs.const_view()).unwrap();
@@ -414,7 +414,7 @@ UTEST(model, branching_add_forward_and_backward)
     const auto weights_a_before = download(dense_a.weights.value).unwrap();
     const auto weights_b_before = download(dense_b.weights.value).unwrap();
 
-    const auto cpu_targets = HostTensor2f::zero({batch_size, 3}).unwrap();
+    const auto cpu_targets = HostTensorf::zero({batch_size, 3}).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
     auto loss_fn = MSELoss::with_extents({batch_size, 3}).unwrap();
     const auto loss_grad = loss_fn.backward(prediction, gpu_targets.const_view()).wait().unwrap();
@@ -450,7 +450,7 @@ UTEST(model, branching_concat_forward_and_backward)
 
     auto model = graph.compile(out).unwrap();
 
-    const auto cpu_inputs = HostTensor2f::from({1.0f, 2.0f, 3.0f, 4.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_inputs = HostTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {batch_size, 2}).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
 
     const auto prediction = model.forward(gpu_inputs.const_view()).unwrap();
@@ -462,7 +462,7 @@ UTEST(model, branching_concat_forward_and_backward)
     const auto weights_a_before = download(dense_a.weights.value).unwrap();
     const auto weights_b_before = download(dense_b.weights.value).unwrap();
 
-    const auto cpu_targets = HostTensor2f::zero({batch_size, 5}).unwrap();
+    const auto cpu_targets = HostTensorf::zero({batch_size, 5}).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
     auto loss_fn = MSELoss::with_extents({batch_size, 5}).unwrap();
     const auto loss_grad = loss_fn.backward(prediction, gpu_targets.const_view()).wait().unwrap();
@@ -509,8 +509,8 @@ UTEST(model, fan_in_accumulation_across_multiple_backward_calls)
     auto model = graph.compile(out).unwrap();
 
     const auto cpu_inputs =
-        HostTensor2f::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
-    const auto cpu_targets = HostTensor2f::zero({batch_size, 3}).unwrap();
+        HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_targets = HostTensorf::zero({batch_size, 3}).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
 
