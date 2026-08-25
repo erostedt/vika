@@ -911,9 +911,6 @@ class HostTensor
 // same HostTensor<f32> wearing different names for a distinction that does not exist.
 using HostTensorf = HostTensor<f32>;
 using HostTensoru = HostTensor<u32>;
-using Vectorf = HostTensorf;
-using Vectoru = HostTensor<u32>;
-using Matrixf = HostTensorf;
 
 // =============================================================================
 // Device Tensors
