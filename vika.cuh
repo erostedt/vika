@@ -784,8 +784,7 @@ class HostTensor
 
     auto operator()(usize n, usize h, usize w, usize c) -> T &
     {
-        VIKA_ASSERT(_extents.size() == 4, "HostTensor: 4-argument accessor on a rank %zu tensor",
-                    _extents.size());
+        VIKA_ASSERT(_extents.size() == 4, "HostTensor: 4-argument accessor on a rank %zu tensor", _extents.size());
         const auto height = _extents[1];
         const auto width = _extents[2];
         const auto channels = _extents[3];
@@ -794,8 +793,7 @@ class HostTensor
 
     auto operator()(usize n, usize h, usize w, usize c) const -> const T &
     {
-        VIKA_ASSERT(_extents.size() == 4, "HostTensor: 4-argument accessor on a rank %zu tensor",
-                    _extents.size());
+        VIKA_ASSERT(_extents.size() == 4, "HostTensor: 4-argument accessor on a rank %zu tensor", _extents.size());
         const auto height = _extents[1];
         const auto width = _extents[2];
         const auto channels = _extents[3];
@@ -1457,9 +1455,7 @@ __device__ inline auto global_thread_y() -> usize
 // narrow implicitly at each one.
 inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
 {
-    const auto blocks = [](usize count, u32 block_size) -> u32 {
-        return (u32)((count + block_size - 1) / block_size);
-    };
+    const auto blocks = [](usize count, u32 block_size) -> u32 { return (u32)((count + block_size - 1) / block_size); };
     return dim3(blocks(x, block.x), blocks(y, block.y), blocks(z, block.z));
 }
 
@@ -2053,6 +2049,38 @@ struct InputLayer
 using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, SoftmaxLayer, Conv2DLayer, ConvTranspose2DLayer,
                                MaxPool2DLayer, Upsample2DLayer, Flatten2DLayer, AddLayer, ConcatLayer>;
 
+// Whether a layer type carries trainable parameters - the question parameters(const Layer &) and
+// update_layer both used to answer with a hand-maintained
+// `is_same_v<T, DenseLayer> || is_same_v<T, Conv2DLayer> || ...` list. Two lists, nothing checking
+// them against each other, and a layer left out of either one silently stopped training.
+//
+// Detection is deliberately loose - "does parameters() exist" - rather than demanding the exact
+// return type. A trait that demanded it would report false for a layer whose signature is subtly
+// wrong, silently treating it as having no parameters at all: the same failure the lists had.
+// Existence routes the layer down the trainable path, and the static_assert then pins the
+// signature, so a mistake is a readable compile error instead.
+template <typename T, typename = void>
+inline constexpr bool has_parameters_v = false;
+
+template <typename T>
+inline constexpr bool has_parameters_v<T, std::void_t<decltype(std::declval<const T &>().parameters())>> = true;
+
+template <typename T>
+inline constexpr auto is_trainable_layer() -> bool
+{
+    if constexpr (has_parameters_v<T>)
+    {
+        static_assert(std::is_same_v<decltype(std::declval<const T &>().parameters()), std::vector<ConstParameterView>>,
+                      "a layer declaring parameters() must return std::vector<ConstParameterView> from its const "
+                      "overload - see DenseLayer::parameters");
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
 struct Layer
 {
     LayerKind kind;
@@ -2596,8 +2624,7 @@ auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> K
 auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
 
     const usize k = upstream_gradient.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -2617,8 +2644,7 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream_gradient));
 
@@ -2926,10 +2952,8 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream));
 
     const usize filter_count = filters.grad.element_count();
@@ -2938,9 +2962,8 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
-    auto weight_job =
-        launch_kernel(conv_weight_gradients, gradients, grid_covering(block, filter_count), block, stream.handle(),
-                      inputs, upstream, filters.grad.view(), stride, padding);
+    auto weight_job = launch_kernel(conv_weight_gradients, gradients, grid_covering(block, filter_count), block,
+                                    stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
     if (weight_job.is_error())
     {
         return weight_job;
@@ -3039,8 +3062,7 @@ auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &in
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, d_inputs.extents()));
 
     const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
@@ -3059,8 +3081,7 @@ auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &in
 auto ConvTranspose2DLayer::backward(const DeviceTensorConstViewf &upstream)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
 
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -3082,8 +3103,7 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
 {
     using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream));
 
@@ -3093,9 +3113,8 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
-    auto weight_job =
-        launch_kernel(conv_transpose_weight_gradients, gradients, grid_covering(block, filter_count), block,
-                      stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
+    auto weight_job = launch_kernel(conv_transpose_weight_gradients, gradients, grid_covering(block, filter_count),
+                                    block, stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
     if (weight_job.is_error())
     {
         return weight_job;
@@ -3234,8 +3253,7 @@ auto Upsample2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs)
 
 auto Upsample2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
 
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -3274,7 +3292,7 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
         // Called directly, not through VIKA_CHECK_TRAILING_EXTENTS: the name carries the offending
         // input's index, which the macro's stringified argument ("inputs[i]") cannot.
         VIKA_UNWRAP_OR_RETURN(_check_trailing_extents(inputs[i].extents, outputs.extents(), __func__,
-                                                 ("input " + std::to_string(i)).c_str(), __FILE__, __LINE__));
+                                                      ("input " + std::to_string(i)).c_str(), __FILE__, __LINE__));
         if (inputs[i].extents[0] != inputs[0].extents[0])
         {
             return error(VIKA_SHAPE_ERROR("add forward: input %zu has batch %zu but input 0 has batch %zu", i,
@@ -3347,7 +3365,7 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     {
         // Called directly for the same reason as AddLayer::forward above - the index in the name.
         VIKA_UNWRAP_OR_RETURN(_check_trailing_extents(inputs[i].extents, d_inputs[i].extents(), __func__,
-                                                 ("input " + std::to_string(i)).c_str(), __FILE__, __LINE__));
+                                                      ("input " + std::to_string(i)).c_str(), __FILE__, __LINE__));
         if (inputs[i].extents[0] != inputs[0].extents[0])
         {
             return error(VIKA_SHAPE_ERROR("concat forward: input %zu has batch %zu but input 0 has batch %zu", i,
@@ -3430,8 +3448,7 @@ auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
 auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
@@ -3446,8 +3463,7 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
 auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
@@ -3472,8 +3488,7 @@ auto CCELoss::with_extents(const Extents &extents) -> Result<CCELoss, Error>
 auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
@@ -3488,8 +3503,7 @@ auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
 auto CCELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
     -> KernelJob<DeviceTensorConstViewf>
 {
-    VIKA_UNWRAP_OR_RETURN(
-        VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(predictions.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
@@ -3882,8 +3896,7 @@ auto parameters(const Layer &layer) -> std::optional<std::vector<ConstParameterV
     return std::visit(
         [](const auto &l) -> std::optional<std::vector<ConstParameterView>> {
             using T = std::decay_t<decltype(l)>;
-            if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer> ||
-                          std::is_same_v<T, ConvTranspose2DLayer>)
+            if constexpr (is_trainable_layer<T>())
             {
                 return l.parameters();
             }
@@ -4005,8 +4018,8 @@ auto Model::forward_output(NodeId node_id) -> Result<DeviceTensorConstViewf, Err
 {
     if (node_id.value >= forward_jobs.size() || !forward_jobs[node_id.value].has_value())
     {
-        return error(VIKA_GRAPH_ERROR("node %zu has no forward output; was forward() called on this model?",
-                                      node_id.value));
+        return error(
+            VIKA_GRAPH_ERROR("node %zu has no forward output; was forward() called on this model?", node_id.value));
     }
     return forward_jobs[node_id.value]->wait();
 }
@@ -4027,8 +4040,8 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
         }
         else
         {
-            pred_inputs = VIKA_UNWRAP_OR_RETURN(
-                try_map(preds, [&](const NodeId &pred) { return forward_output(pred); }));
+            pred_inputs =
+                VIKA_UNWRAP_OR_RETURN(try_map(preds, [&](const NodeId &pred) { return forward_output(pred); }));
         }
 
         auto job = std::visit(
@@ -4081,7 +4094,8 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
         const auto contribution = VIKA_UNWRAP_OR_RETURN(jobs[i].wait());
         const auto grid = grid_covering(block, first.element_count());
         VIKA_UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_accum.const_view(), grid, block, stream.handle(),
-                                            contribution, sliced_accum) .wait());
+                                            contribution, sliced_accum)
+                                  .wait());
     }
 
     return ok(sliced_accum.const_view());
@@ -4162,8 +4176,7 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
     return std::visit(
         [&](auto &l) -> Result<Void, Error> {
             using T = std::decay_t<decltype(l)>;
-            if constexpr (std::is_same_v<T, DenseLayer> || std::is_same_v<T, Conv2DLayer> ||
-                          std::is_same_v<T, ConvTranspose2DLayer>)
+            if constexpr (is_trainable_layer<T>())
             {
                 // weight_gradients() writes into the layer's own weights.grad/biases.grad (or
                 // filters.grad/biases.grad) buffers; update()'s parameters() reads them back
