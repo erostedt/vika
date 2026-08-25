@@ -149,33 +149,21 @@
         }                                                                                                              \
     } while (0)
 
-// Debug-only precondition, compiled out when NDEBUG is set. A third tier alongside the two the
-// file already has: VIKA_PANIC_IF, which always runs and is for invariants whose violation means
-// the library itself is broken, and returning a Result, which is for anything a caller could
-// legitimately get wrong. VIKA_ASSERT is for conditions that can only be a bug in the calling
-// code, where a release build should not pay to re-check what the caller was told to guarantee.
-// install.sh builds Debug by default, so tests and examples do check.
+// A precondition that can only be a bug in the calling code, so a release build should not pay to
+// re-check it. Host-only, like VIKA_PANIC itself.
 //
-// Host-only, like VIKA_PANIC itself: fprintf and exit have no device equivalent.
-//
-// The sizeof form in the NDEBUG branch evaluates nothing, but still counts as a use of whatever
-// the condition names, so a variable that exists only for an assert does not become an unused one
-// in release - which -Werror would reject.
+// The NDEBUG branch evaluates nothing but still counts as a use of what the condition names, so a
+// variable existing only for an assert does not become an unused one under -Werror.
 #ifdef NDEBUG
 #define VIKA_ASSERT(expr, fmt, ...) ((void)sizeof((expr) ? 1 : 0))
 #else
 #define VIKA_ASSERT(expr, fmt, ...) VIKA_PANIC_IF(!(expr), fmt, ##__VA_ARGS__)
 #endif
 
-// Works for any enclosing return type with an implicit Err<Error> constructor - Result<T, Error>
-// and KernelJob<T> directly, and std::vector<KernelJob<T>> (a layer's backward(), which can
-// return one gradient per predecessor) via its initializer-list constructor, since each element
-// of a braced-init-list still converts through KernelJob's implicit Err<Error> constructor.
-// Always braced for that reason - `return {error(...)}` behaves identically to the unbraced
-// `return error(...)` for Result/KernelJob (list-initialization from a single Err<Error> argument
-// just calls the same non-explicit constructor), so one form covers every return shape instead of
-// needing a separate macro for the vector case. No T argument needed either way: the conversion
-// happens via the return statement itself, to whatever the enclosing function actually declared.
+// Works in any function returning something constructible from Err<Error>: Result<T, Error> and
+// KernelJob<T> directly, and std::vector<KernelJob<T>> - a layer's backward() - through its
+// initializer-list constructor. Hence the braces, which are a no-op for the first two and the
+// whole point for the third, so one macro covers all three.
 #define VIKA_UNWRAP_OR_RETURN(expr)                                                                                    \
     ({                                                                                                                 \
         auto _res = (expr);                                                                                            \
@@ -208,11 +196,9 @@ using usize = size_t;
 // Generic Utilities
 // =============================================================================
 
-// The read accessors are __host__ __device__ because Extents/Strides live inside DeviceTensorView,
-// which is passed by value into every kernel: a kernel reads extents[i], size(), back(). The
-// mutators and at() stay host-only - they report failure through VIKA_PANIC, i.e. fprintf/exit,
-// which has no device equivalent - so calling one from device code is a compile error rather than
-// a silent panic-less path.
+// The read accessors are __host__ __device__ because Extents/Strides live inside
+// DeviceTensorView, which kernels take by value. The mutators and at() cannot be: they report
+// failure through VIKA_PANIC, and fprintf/exit have no device equivalent.
 template <typename T, usize Capacity>
 class FixedVector
 {
@@ -315,12 +301,9 @@ class FixedVector
         m_data[m_size++] = std::move(value);
     }
 
-    // Assignment, not placement new: m_data is a T[Capacity], so every slot is already a live,
-    // default-constructed T. Constructing over one without destroying it first is undefined for
-    // any T with a non-trivial destructor - it would leak whatever the slot already owned. The
-    // same reason pop_back() and clear() only move m_size: the objects stay alive, and are
-    // destroyed with the array. Harmless today, since Extents/Strides are the only instantiations
-    // and usize owns nothing, but this is a general-purpose container in Generic Utilities.
+    // Assignment, not placement new: every slot of m_data already holds a live T, and
+    // constructing over one without destroying it leaks whatever it owned. Same reason pop_back()
+    // and clear() only move m_size - the objects stay alive until the array itself dies.
     template <typename... Args>
     auto emplace_back(Args &&...args) -> T &
     {
@@ -402,9 +385,8 @@ class FixedVector
     }
 
   private:
-    // Zero-initialised, not left indeterminate: DeviceTensorView holds two of these and is copied
-    // whole into every kernel launch, so entries past size() are read as padding by the copy and
-    // must not be garbage. Costs nothing for a VIKA_MAX_RANK-element array of usize.
+    // Zero-initialised because DeviceTensorView holds two of these and is copied whole into every
+    // kernel launch, so entries past size() travel along as padding.
     T m_data[Capacity] = {};
     usize m_size;
 
@@ -461,11 +443,8 @@ auto error(E value) -> Err<std::decay_t<E>>
 template <typename T, typename E>
 class [[nodiscard]] Result
 {
-    // The storage is a variant<T, E>, so is_ok()/is_error() and every get<> below distinguish the
-    // two cases by type alone. With T and E the same type there is nothing to distinguish: the
-    // variant holds one alternative, holds_alternative is ambiguous, and a Result would report
-    // whichever answer the compiler happened to pick. Nothing in the library instantiates one,
-    // but it is a public template.
+    // storage is a variant<T, E>, so ok and error are told apart by type alone - which a
+    // Result<T, T> cannot do.
     static_assert(!std::is_same_v<T, E>, "Result's value and error types must differ - a Result<T, T> cannot tell "
                                          "an ok from an error");
 
@@ -663,8 +642,7 @@ class Error
 // Generic Utilities, Result-aware
 // ===========================================================================
 
-// These are as generic as the FixedVector/Result section above, and belong with it - they sit
-// here only because they need Result and Error to be complete types.
+// As generic as the section above, and here only because they need Result and Error complete.
 template <typename T, typename UnaryOperation>
 auto map(const std::vector<T> &in, UnaryOperation op)
 {
@@ -780,11 +758,9 @@ inline auto byte_count(const Extents &extents) -> usize
 // that were already validated when their tensor was created.
 auto checked_element_count(const Extents &extents) -> Result<usize, Error>;
 
-// Element count described by extents, rejecting the three ways extents can be unusable: empty,
-// containing a zero, or overflowing usize when multiplied out. Shared by HostTensor's factories
-// and, through checked_byte_count below, by DeviceOwningTensor's - the device side used to check
-// only the third, so empty({0, 5}) returned a zero-byte allocation and empty({}) a rank-0 one,
-// both of which failed much later and much less legibly as an invalid launch configuration.
+// Element count, rejecting the three ways extents can be unusable: empty, containing a zero, or
+// overflowing usize. Every host and device tensor factory funnels through this, the device ones
+// via checked_byte_count below.
 auto checked_size(const Extents &extents) -> Result<usize, Error>;
 
 template <typename T>
@@ -798,11 +774,8 @@ inline auto checked_byte_count(const Extents &extents) -> Result<usize, Error>
     return ok(elements * sizeof(T));
 }
 
-// Extents as text, for error messages. Every shape error in the file used to fall back to a rank
-// and an element count, because there was no way to print the shape itself - which made messages
-// like "source holds 6 elements, destination holds 6" for a {2, 3} against a {3, 2}. Returns a
-// std::string rather than filling a caller's buffer: error messages are not a hot path, and
-// Error::make copies the formatted result into its own fixed buffer anyway.
+// Extents as text, for error messages - "{2, 3}". A std::string is fine here: error formatting is
+// not a hot path, and Error::make copies the result into its own fixed buffer regardless.
 inline auto describe(const Extents &extents) -> std::string
 {
     std::string out = "{";
@@ -885,11 +858,8 @@ class HostTensor
     using const_iterator = typename std::vector<T>::const_iterator;
 
   public:
-    // Move-only, with copying spelled out. The const on _extents used to make this move-only by
-    // accident - it deleted both assignment operators, so a HostTensor could not be reassigned or
-    // held in anything that reassigns its elements - while still allowing a silent deep copy
-    // through the implicit copy constructor. Now the buffer is only ever duplicated where a
-    // caller wrote clone(), the same way DeviceOwningTensor's unique_ptr forces the question.
+    // Move-only: duplicating the buffer takes an explicit clone(), the same question
+    // DeviceOwningTensor's unique_ptr forces on its own.
     HostTensor(const HostTensor &) = delete;
     auto operator=(const HostTensor &) -> HostTensor & = delete;
     HostTensor(HostTensor &&) noexcept = default;
@@ -1030,8 +1000,7 @@ class HostTensor
 
     HostTensor(std::vector<T> &&data, const Extents &extents) : _data(std::move(data)), _extents(extents)
     {
-        // Every factory funnels through checked_size, so these can only fail if one of them
-        // stopped doing that - which is what VIKA_ASSERT is for.
+        // Guaranteed by checked_size in every factory, so these only fire if one stops calling it.
         VIKA_ASSERT(!_extents.empty(), "HostTensor: constructed with empty extents");
         VIKA_ASSERT(element_count(_extents) != 0, "HostTensor: constructed with a zero extent");
         VIKA_ASSERT(_data.size() == element_count(_extents),
@@ -1207,9 +1176,8 @@ auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, 
 }
 
 // Device-to-device, async on the given stream - unlike the host<->device overloads above, which
-// are synchronous. Views, not owning tensors: every caller with a device-to-device copy to make
-// (AddLayer::forward, Model::accumulate_output_gradient) already only has a view in hand, either
-// sliced via first_n() or handed back from a KernelJob, never an owning tensor to copy whole.
+// are synchronous. Views rather than owning tensors, because every caller only has a view: either
+// sliced by first_n() or handed back from a KernelJob.
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(DeviceTensorView<const T> src, DeviceTensorView<T> dst, cudaStream_t stream) -> Result<Void, Error>
 {
@@ -1223,10 +1191,7 @@ auto copy(DeviceTensorView<const T> src, DeviceTensorView<T> dst, cudaStream_t s
     return ok(Void{});
 }
 
-// Async zero-fill on the given stream, checked like every launch in the file - unlike the two
-// bare cudaMemsetAsync calls this replaces (MaxPool2DLayer::backward resetting d_inputs before
-// scatter-writing into it, MSELoss::forward resetting its running loss scalar), which ignored
-// cudaMemsetAsync's return value entirely.
+// Async zero-fill on the given stream.
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto zero(DeviceTensorView<T> dst, cudaStream_t stream) -> Result<Void, Error>
 {
@@ -1259,14 +1224,10 @@ auto download(const DeviceOwningTensor<T> &src) -> Result<HostTensor<T>, Error>
 template <typename T, typename>
 struct DeviceTensorView
 {
-    // Rank is taken from extents_ rather than passed separately. Extents cannot hold more
-    // than VIKA_MAX_RANK entries, so an over-rank view is unrepresentable instead of being
-    // a runtime failure.
     DeviceTensorView(T *data_, const Extents &extents_) : data(data_), extents(extents_)
     {
-        // Row-major: the last axis is contiguous, and each earlier stride is the product of every
-        // extent after it. Seeded from extents purely to get one entry per dimension - every entry
-        // is overwritten below.
+        // Row-major: the last axis is contiguous, each earlier stride the product of the extents
+        // after it. Copied from extents only to get one entry per dimension; all are overwritten.
         strides = extents;
         usize stride = 1;
         for (usize i = extents.size(); i-- > 0;)
@@ -1277,9 +1238,6 @@ struct DeviceTensorView
     }
 
     T *data = nullptr;
-    // The same Extents the rest of the library speaks, rather than a raw array plus a separate
-    // rank: no conversion step at the boundary, and rank cannot drift from the extents it
-    // describes because it *is* extents.size().
     Extents extents{};
     Strides strides{};
 
@@ -1288,12 +1246,8 @@ struct DeviceTensorView
         return extents.size();
     }
 
-    // Slices the leading (batch) dimension down to the first n entries. Row-major storage means
-    // those are already a contiguous prefix of the same buffer, so this is just a reinterpreted
-    // extent, never a copy or allocation. A Result rather than a panic: the view is a
-    // self-contained type and shouldn't assume its caller already validated n, since a caller's
-    // actual batch size exceeding what a tensor was allocated for is an ordinary, expected-to-be-
-    // handled condition, not an internal invariant violation.
+    // Slices the leading dimension to its first n rows. Row-major storage makes those a
+    // contiguous prefix of the same buffer, so this reinterprets extents and copies nothing.
     auto first_n(usize n) const -> Result<DeviceTensorView, Error>
     {
         if (n > extents[0])
@@ -1377,15 +1331,9 @@ struct DeviceTensorView
     }
 };
 
-// Unsuffixed on purpose: rank lives at runtime in the extents, reported by
-// DeviceTensorView::rank(), never in the type. Names like DeviceOwningTensor4f used to sit
-// alongside DeviceOwningTensorf as if they were different types - they were always the exact same
-// DeviceOwningTensor<f32>, so the suffix documented nothing and enforced nothing. Every call site
-// now names the type it actually is, and layers assert the rank they expect at their own
-// forward()/backward() boundary instead (see the VIKA_CHECK_TRAILING_EXTENTS calls throughout).
-// Dynamic rank was kept deliberately over templating tensors on a compile-time rank: loading an
-// unknown-until-runtime rank from disk (save/load) is simpler against one type than dispatching to
-// N compile-time-rank types.
+// Unsuffixed on purpose: rank lives in the extents at runtime, never in the type, and each layer
+// checks the rank it expects at its own boundary. Kept dynamic rather than templating tensors on a
+// compile-time rank, so loading an unknown-until-runtime rank from disk stays one type.
 using DeviceOwningTensorf = DeviceOwningTensor<f32>;
 using DeviceOwningTensoru = DeviceOwningTensor<u32>;
 
@@ -1395,9 +1343,8 @@ using DeviceTensorViewu = DeviceTensorView<u32>;
 using DeviceTensorConstViewf = DeviceTensorView<const f32>;
 using DeviceTensorConstViewu = DeviceTensorView<const u32>;
 
-// Rank 2 only, hence the Result: the swap below touches extents[1]/strides[1], which on a lower
-// rank view are the zeroed slots past size(). That produced a view claiming extent 0, whose
-// element_count() is 0, so every kernel launched against it quietly did nothing.
+// Rank 2 only: the swap touches extents[1]/strides[1], which on a lower-rank view are the zeroed
+// slots past size() - yielding a view of extent 0 that every kernel then skips silently.
 auto transposed(const DeviceTensorConstViewf &view) -> Result<DeviceTensorConstViewf, Error>;
 
 // =============================================================================
@@ -1412,10 +1359,8 @@ struct StreamDeleter
     }
 };
 
-// Owns a CUDA stream. Move-only via unique_ptr, same idiom as DeviceOwningTensor's DeviceDeleter:
-// a moved-from Stream holds a null pointer, which cudaStreamDestroy never sees since the deleter
-// only runs on a non-null owned handle. Created non-blocking so it never implicitly synchronizes
-// with the legacy default stream (stream 0) the way a plain cudaStreamCreate() stream would.
+// Owns a CUDA stream, move-only via unique_ptr. Created non-blocking so it never implicitly
+// synchronizes with the legacy default stream, as a plain cudaStreamCreate() stream would.
 class Stream
 {
     using Self = Stream;
@@ -1448,11 +1393,8 @@ class Stream
 template <typename T>
 struct [[nodiscard]] KernelJob
 {
-    // Implicit on purpose, mirroring Result's Err<E> constructor: it lets a function
-    // returning KernelJob<T> write `return error(...)` (or VIKA_UNWRAP_OR_RETURN) without
-    // naming T again — the return statement's own conversion to the declared return
-    // type supplies it. Takes KernelJob out of aggregate territory, which is fine:
-    // nothing outside launched()/failed()/ready() ever brace-initialised one.
+    // Implicit on purpose, mirroring Result's: it lets a function returning KernelJob<T> write
+    // `return error(...)` without naming T again.
     KernelJob(Err<Error> err) : result(std::move(err)), stream(nullptr)
     {
     }
@@ -1463,20 +1405,17 @@ struct [[nodiscard]] KernelJob
         return KernelJob(std::move(value), stream);
     }
 
-    // A request rejected before anything was enqueued, so there is no stream to wait on.
-    // Holding a Result rather than a value plus an error flag means there is no
-    // placeholder value to accidentally read: callers cannot reach a T without first
-    // confronting the error, and result.is_error() is inspectable without synchronising.
+    // A request rejected before anything was enqueued, so there is no stream to wait on. Holding
+    // a Result rather than a value plus a flag means there is no placeholder value to read by
+    // mistake, and is_error() answers without synchronising.
     static auto failed(Error err) -> KernelJob
     {
         return KernelJob(error(std::move(err)));
     }
 
-    // A value that was never asynchronous to begin with (a passthrough view, a host-supplied
-    // gradient seeding a backward pass, ...): no kernel ran, so there is no stream to wait on
-    // either. Named after std::future's "ready future" — a future whose value is already
-    // available needs no wait. wait() recognises the null stream and skips synchronisation
-    // instead of synchronising the real legacy default stream for work that was never queued.
+    // A value that was never asynchronous - a passthrough view, a host-supplied gradient seeding
+    // a backward pass. wait() sees the null stream and skips synchronising, rather than
+    // synchronising the legacy default stream for work nobody queued.
     static auto ready(T value) -> KernelJob
     {
         return KernelJob(std::move(value), nullptr);
@@ -1521,14 +1460,11 @@ struct [[nodiscard]] KernelJob
     }
 };
 
-// A thread's global index along one grid dimension. The multiply is done in usize on purpose:
-// blockIdx and blockDim are both unsigned int, so `blockIdx.x * blockDim.x` computes in 32 bits
-// and wraps before any widening on the receiving end can help. A grid.x large enough to wrap
-// needs 4.29e9 threads - 17 GB of f32 - so it is unreachable on a 12 GB card but ordinary on an
-// A100 or H100, where the result would be a thread silently processing the wrong element rather
-// than reading out of bounds: the wrapped index still passes an element_count() check. grid.y and
-// grid.z are capped at 65535 blocks and so cannot wrap, but they use the same helpers rather than
-// leave an idiom with an exception in it.
+// A thread's global index along one grid dimension. The cast matters: blockIdx and blockDim are
+// both unsigned int, so `blockIdx.x * blockDim.x` computes in 32 bits and wraps before any
+// widening on the receiving end can help. It takes 4.29e9 threads to wrap - 17 GB of f32, so not
+// on a 12 GB card but ordinary on an A100 - and the wrapped index still passes an
+// element_count() check, so the thread silently works on the wrong element.
 __device__ inline auto global_thread_x() -> usize
 {
     return (usize)blockIdx.x * blockDim.x + threadIdx.x;
@@ -1539,24 +1475,20 @@ __device__ inline auto global_thread_y() -> usize
     return (usize)blockIdx.y * blockDim.y + threadIdx.y;
 }
 
-// The grid needed to cover x * y * z items with blocks of `block`. Counts are usize, because a
-// tensor's element count genuinely needs 64 bits - an 80 GB card holds 2e10 f32 elements - while
-// dim3 is unsigned int, because that is what CUDA's only constructor takes. This is the one place
-// in the library where those two meet, so it is the one place that narrows: a block count large
-// enough to overflow u32 would need ~1e12 elements (4 TB at f32), far past any tensor this library
-// could have allocated. Every launch site used to spell the ceiling division out by hand and
-// narrow implicitly at each one.
+// The grid needed to cover x * y * z items with blocks of `block`. Counts are usize because an
+// element count needs 64 bits on a large card; dim3 is unsigned int because that is CUDA's only
+// constructor. This is the one place the two meet, so the one place that narrows - overflowing a
+// u32 block count would take ~1e12 elements, 4 TB at f32.
 inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
 {
     const auto blocks = [](usize count, u32 block_size) -> u32 { return (u32)((count + block_size - 1) / block_size); };
     return dim3(blocks(x, block.x), blocks(y, block.y), blocks(z, block.z));
 }
 
-// Launches `kernel` and immediately reads back cudaGetLastError(), since
-// cudaStreamSynchronize (what KernelJob::wait() checks) does not surface launch-configuration
-// failures such as cudaErrorInvalidConfiguration. On success the launch's `output` view rides
-// through as the job's value; on failure the job carries the error instead, so a bad launch
-// can never be read as if it had produced real data.
+// Launches `kernel` and reads cudaGetLastError() immediately, because cudaStreamSynchronize -
+// what KernelJob::wait() checks - does not report launch-configuration failures such as
+// cudaErrorInvalidConfiguration. A rejected launch becomes a failed job rather than a job holding
+// data no kernel produced.
 template <typename Kernel, typename Output, typename... Args>
 auto launch_kernel(Kernel kernel, Output output, dim3 grid, dim3 block, cudaStream_t stream, Args... args)
     -> KernelJob<Output>
@@ -1594,33 +1526,25 @@ struct AdamParameters
     f32 epsilon = 1e-8f;
 };
 
-// One trainable tensor: value is mutated in place by the optimizer, grad is read-only (the
-// optimizer step never writes gradients, only reads them, regardless of which overload of
-// parameters() produced this). Layers expose their full parameter list uniformly through
-// parameters() regardless of how many tensors they own, instead of every caller needing to know
-// each layer type's specific field names (weights/biases, filters/biases, ...). Named after
-// DeviceTensorView, for the same reason: this is a view (both fields are views, even though
-// value happens to be mutable), not an owner.
+// One trainable tensor: the optimizer mutates value in place and only ever reads grad. Layers
+// hand out their whole parameter list this way, so no caller needs to know that Dense calls them
+// weights/biases and Conv2D filters/biases.
 struct ParameterView
 {
     DeviceTensorViewf value;
     DeviceTensorConstViewf grad;
 };
 
-// Read-only counterpart of ParameterView, returned by the const overload of parameters() - a
-// const layer cannot hand out a mutable view of its own value, so callers that only need to
-// inspect parameters (e.g. to discover shapes) use this instead. Must stay in lockstep with
-// ParameterView's order/count for a given layer, since AdamState entries are positional.
+// What the const parameters() overload returns, for callers that only inspect - discovering
+// shapes, say. Must stay in the same order and count as ParameterView: AdamState is positional.
 struct ConstParameterView
 {
     DeviceTensorConstViewf value;
     DeviceTensorConstViewf grad;
 };
 
-// Owning counterpart of ParameterView/ConstParameterView, mirroring how DeviceOwningTensor
-// relates to DeviceTensorView: view()/const_view() are the same names and do the same job,
-// just bundling two tensors (a parameter and its gradient) instead of one. This is what a
-// layer actually stores; ParameterView/ConstParameterView are just what parameters() hands out.
+// What a layer actually stores. Same view()/const_view() names as DeviceOwningTensor, one level
+// up: a parameter bundled with its gradient.
 struct OwningParameter
 {
     DeviceOwningTensorf value;
@@ -1680,14 +1604,11 @@ __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTenso
 // upstream: [N, out_H, out_W, C_out], d_biases: [C_out], 1D grid over C_out
 __global__ auto conv_bias_gradients(DeviceTensorConstViewf upstream, DeviceTensorViewf d_biases) -> void;
 
-// ConvTranspose2D's forward is mathematically dual to Conv2D's backward (conv_backward above): a
-// learned upsampling operation is exactly "run a regular convolution's data-gradient computation
-// forward". Its own backward (conv_transpose_backward) is symmetrically dual to conv_forward, and
-// its bias gradient is identical in shape to conv_bias_gradients (a per-output-channel sum over
-// its own upstream), so that kernel is reused as-is - only weight and data gradients need their
-// own kernels. filters are shaped [kH, kW, C_out, C_in], with C_out/C_in swapped relative to
-// Conv2DLayer's [kH, kW, C_in, C_out], to match: filters(kh, kw, oc, ic) is what conv_backward
-// would have read as filters(kh, kw, ic, oc) had this been a regular Conv2D's data gradient.
+// ConvTranspose2D is Conv2D run inside out: its forward is exactly conv_backward's data-gradient
+// computation, and its backward is exactly conv_forward. That duality is why only the weight and
+// data gradients need their own kernels - conv_bias_gradients is a per-output-channel sum either
+// way - and why filters are stored [kH, kW, C_out, C_in], swapped against Conv2DLayer, so the
+// reused indexing lands on the same taps.
 //
 // inputs: [N, H_in, W_in, C_in] (the small tensor), filters: [kH, kW, C_out, C_in],
 // biases: [C_out], out: [N, H_out, W_out, C_out] (the large tensor)
@@ -1871,10 +1792,8 @@ struct Flatten2DLayer
 
     auto backward(DeviceTensorConstViewf upstream_gradient) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
-    // The shape forward() produces: the batch dimension unchanged, every other dimension
-    // collapsed into one. Stands in for the outputs.extents() every buffer-owning layer checks
-    // its upstream gradient against - this layer owns no buffer of its own, since it only ever
-    // reinterprets its input's.
+    // The shape forward() produces. Stands in for the outputs.extents() a buffer-owning layer
+    // checks its upstream against; this layer owns no buffer, it only reinterprets its input's.
     auto output_extents() const -> Extents;
 
     Extents extents;
@@ -2151,16 +2070,13 @@ struct InputLayer
 using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, SoftmaxLayer, Conv2DLayer, ConvTranspose2DLayer,
                                MaxPool2DLayer, Upsample2DLayer, Flatten2DLayer, AddLayer, ConcatLayer>;
 
-// Whether a layer type carries trainable parameters - the question parameters(const Layer &) and
-// update_layer both used to answer with a hand-maintained
-// `is_same_v<T, DenseLayer> || is_same_v<T, Conv2DLayer> || ...` list. Two lists, nothing checking
-// them against each other, and a layer left out of either one silently stopped training.
+// Whether a layer type carries trainable parameters, asked by parameters(const Layer &) and
+// update_layer.
 //
 // Detection is deliberately loose - "does parameters() exist" - rather than demanding the exact
-// return type. A trait that demanded it would report false for a layer whose signature is subtly
-// wrong, silently treating it as having no parameters at all: the same failure the lists had.
-// Existence routes the layer down the trainable path, and the static_assert then pins the
-// signature, so a mistake is a readable compile error instead.
+// return type. Demanding it would report false for a layer whose signature is subtly wrong,
+// silently treating it as having no parameters; the static_assert below pins the signature only
+// once a layer has claimed to have one, so a mistake is a readable compile error either way.
 template <typename T, typename = void>
 inline constexpr bool has_parameters_v = false;
 
@@ -2217,88 +2133,58 @@ struct Model
     NodeId input_node;
     NodeId output_node;
 
-    // Indexed directly by NodeId::value, which is already a dense 0..layers.size()-1 index
-    // (same space layers/layer_inputs use) rather than an opaque hash key. Slots are optional
-    // because KernelJob<T> cannot be default-constructed (see KernelJob<T>'s Result<T, Error>,
-    // which requires DeviceTensorConstViewf to be default-constructible, and it deliberately
-    // is not) - not because any slot is left unwritten. forward() walks all of execution_order,
-    // the input node included (InputLayer::forward hands its input straight back as a ready job),
-    // so after a successful forward() every slot holds a value. Empty means forward() has not run,
-    // which is what forward_output() below reports.
+    // Optional because KernelJob cannot be default-constructed, not because a slot goes
+    // unwritten: a successful forward() fills every reachable one. Empty means forward() has not
+    // run, which is what forward_output() reports.
     std::vector<std::optional<KernelJob<DeviceTensorConstViewf>>> forward_jobs{};
 
-    // One slot per node, each accumulating zero or more incoming gradient jobs - one per
-    // consumer that has run so far, in the order they ran. A node with a single consumer (the
-    // common case today) ends up with exactly one entry; a node with several consumers collects
-    // one from each, to be summed rather than have the last one silently overwrite the rest (see
-    // accumulate_output_gradient). Zero entries by the time a node's own turn comes up means either
-    // it's never been visited, or - just as validly - it has no consumer reachable from
-    // output_node at all (a dead branch left over from a fan-out that was never merged back in);
-    // backward() treats that as nothing to propagate, not an error.
+    // One entry per consumer that has run, in the order they ran, to be summed rather than
+    // overwritten (see accumulate_output_gradient). Empty by a node's own turn means nothing
+    // reached it, which backward() treats as nothing to propagate.
     std::vector<std::vector<KernelJob<DeviceTensorConstViewf>>> backward_jobs{};
 
-    // Gradient of the loss w.r.t. each node's output, indexed like forward_jobs/backward_jobs -
-    // same quantity every node has, but only given real storage where it actually needs summing.
-    // nullopt for any node with at most one consumer (most of the graph): there, the value
-    // already lives in that sole consumer's own job/buffer, so accumulate_output_gradient()
-    // returns it directly instead of allocating a redundant copy. Populated once at compile()
-    // time for every node with more than one consumer, and never touched again afterward except
-    // to be sliced via first_n(k), same as every layer's own outputs/d_inputs -
-    // accumulate_output_gradient() only ever reads these; a training step never calls cudaMalloc.
+    // Where a fan-out node's gradient contributions are summed. Allocated at compile() time only
+    // for nodes with more than one consumer; nullopt elsewhere, since with a single consumer the
+    // value already lives in that consumer's own buffer. Read, never allocated, during a step.
     std::vector<std::optional<DeviceOwningTensorf>> d_outputs;
 
-    // Not any one layer's stream - Flatten2DLayer/InputLayer don't have one, since they launch no
-    // kernels of their own - so graph-level bookkeeping that isn't tied to a specific layer (like
-    // accumulate_output_gradient) needs a stream to call its own.
+    // For graph-level work that belongs to no layer, like accumulate_output_gradient. Flatten2D
+    // and InputLayer launch nothing and so have no stream of their own to borrow.
     Stream stream;
 
     auto forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>;
 
-    // The (waited) output of node_id's forward pass. A Result rather than a bare
-    // forward_jobs[i].value(): an unset or missing slot means forward() has not run for this
-    // model, which is a caller error to report through the same channel as everything else, not
-    // an exception thrown out of a library that otherwise has none.
+    // The waited output of node_id's forward pass, or an error if forward() has not run.
     auto forward_output(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>;
     auto backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>;
     auto step(AdamOptimizer &optimizer) -> Result<Void, Error>;
 
-    // The (possibly summed) gradient of the loss w.r.t. node_id's output - what gets fed to that
-    // node's own layer.backward(). Exactly one consumer is a plain wait, no allocation or launch:
-    // see d_outputs' own comment for why. More than one accumulates into d_outputs[node_id],
-    // which by then is guaranteed to already hold a value.
+    // The gradient of the loss w.r.t. node_id's output, summed if several consumers produced one.
+    // A single consumer is just a wait; more than one accumulates into d_outputs[node_id].
     auto accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>;
 };
 
 struct AdamOptimizer
 {
     AdamParameters params;
-    // One AdamState per parameter, not per layer - see AdamState - and one entry per node,
-    // indexed by NodeId::value like every other per-node array in Model. An empty entry means
-    // that node's layer has no parameters, which is exact: a trainable layer always has at least
-    // one. This was an unordered_map until the vector made two things possible - dropping a hash
-    // lookup per node per step, and letting step() notice an optimizer built from a different
-    // model, which a missing key silently turned into "skip this layer, train nothing".
+    // One entry per node, indexed by NodeId::value like Model's own arrays, each holding one
+    // AdamState per parameter. Empty means that node's layer has no parameters - exact, since a
+    // trainable layer always has at least one.
     std::vector<std::vector<AdamState>> states;
 
-    // Steps taken so far, owned here rather than passed in by the caller. Adam's bias correction
-    // divides by 1 - beta^t, which is zero at t = 0, so a caller counting from zero - the obvious
-    // way to write a training loop - turned every weight into NaN on the first step with nothing
-    // reporting it. Model::step() increments this before using it, so the first step is t = 1 and
-    // the mistake is no longer expressible through Model::step()/train_step().
+    // Owned here rather than passed in, because Adam's bias correction divides by 1 - beta^t and
+    // is undefined at t = 0. Model::step() increments before using it, so the first step is t = 1
+    // whatever a caller's own loop counts from.
     usize steps_taken = 0;
 
     static auto from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>;
 };
 
-// One full training step: forward, loss forward+backward, backward, optimizer step. Returns the
-// scalar loss value so callers can log/monitor progress without a separate loss_fn.forward()
-// call of their own, same as every example's training loop already computes for printing. The
-// step count lives on the optimizer (see AdamOptimizer::steps_taken), so a caller's own loop
-// variable can start wherever it likes without affecting Adam's bias correction.
+// One full training step: forward, loss, backward, optimizer step. Returns the loss value, so a
+// caller can log progress without a second loss.forward() of its own.
 //
-// Templated on Loss rather than a variant: MSELoss is the only loss today, but anything sharing
-// its forward(predictions, targets)/backward(predictions, targets) shape (CCE, once it exists)
-// works here unchanged - no reason to invent a LossKind enumeration for a single member.
+// Templated on Loss rather than taking a variant: anything with MSELoss's
+// forward(predictions, targets)/backward(predictions, targets) shape works here unchanged.
 template <typename Loss>
 auto train_step(Model &model, Loss &loss_fn, DeviceTensorConstViewf inputs, DeviceTensorConstViewf targets,
                 AdamOptimizer &optimizer) -> Result<f32, Error>
@@ -2444,11 +2330,8 @@ auto trailing_extents(const Extents &extents) -> Extents
     return result;
 }
 
-// Every layer's forward() takes a vector of predecessor views instead of a fixed number of
-// named parameters, so nothing at the type level stops a caller from passing the wrong count -
-// indexing inputs[0]/inputs[1] on a too-short vector would be silent undefined behavior instead
-// of a caught error. Every forward() checks this first, via VIKA_UNWRAP_OR_RETURN, before touching
-// any element.
+// forward() takes a vector, so nothing at the type level stops a caller passing the wrong count.
+// Every forward() checks this before touching inputs[0].
 auto _check_input_count(const std::vector<DeviceTensorConstViewf> &inputs, usize expected, const char *context,
                         const char *file, i32 line) -> Result<Void, Error>
 {
@@ -2463,11 +2346,9 @@ auto _check_input_count(const std::vector<DeviceTensorConstViewf> &inputs, usize
 #define VIKA_CHECK_INPUT_COUNT(inputs, expected)                                                                       \
     ::vika::_check_input_count((inputs), (expected), __func__, __FILE__, __LINE__)
 
-// Every layer's forward()/backward()/weight_gradients() takes a runtime tensor whose leading
-// (batch) dimension is expected to vary from call to call, but whose every other dimension must
-// match what the layer was built for - checked via trailing_extents() rather than a full
-// comparison for exactly that reason. Call it through VIKA_CHECK_TRAILING_EXTENTS below, which fills in
-// `context`, `name`, `file` and `line` from the call site.
+// A runtime tensor's leading dimension is the batch, which varies per call; every other dimension
+// must match what the layer was built for. Call it through VIKA_CHECK_TRAILING_EXTENTS below,
+// which fills in the context, name, file and line from the call site.
 auto _check_trailing_extents(const Extents &actual, const Extents &expected, const char *context, const char *name,
                              const char *file, i32 line) -> Result<Void, Error>
 {
@@ -2479,20 +2360,13 @@ auto _check_trailing_extents(const Extents &actual, const Extents &expected, con
     return ok(Void{});
 }
 
-// Context and operand name from the call site, same as VIKA_CHECK_BATCH_AGREEMENT below - see its
-// comment for why the file and line are forwarded rather than captured inside the helper. The two
-// per-input sites in AddLayer/ConcatLayer::forward call _check_trailing_extents directly instead:
-// their name is built at runtime and carries the offending input's index, which #actual cannot.
+// The two per-input sites in AddLayer/ConcatLayer::forward call _check_trailing_extents directly
+// instead: their name is built at runtime and carries the offending input's index.
 #define VIKA_CHECK_TRAILING_EXTENTS(actual, expected)                                                                  \
     ::vika::_check_trailing_extents((actual), (expected), __func__, #actual, __FILE__, __LINE__)
 
-// window_output_extent divides by stride, and transposed_window_output_extent multiplies by it;
-// both document "requires stride > 0" and neither enforced it. A zero stride means a window that
-// never advances, which is not a shape the geometry can express - and unchecked it did two
-// different wrong things. Conv2D and MaxPool2D divided by zero on the host, taking the process
-// down with SIGFPE before any error could be returned. ConvTranspose2D accepted it, because its
-// formula multiplies instead, and deferred the division to a kernel where it is undefined rather
-// than fatal.
+// A zero stride is a window that never advances. window_output_extent divides by it, and the
+// transposed form defers the division to a kernel, so neither can express it.
 auto _check_stride(usize stride, const char *context, const char *file, i32 line) -> Result<Void, Error>
 {
     if (stride == 0)
@@ -2504,11 +2378,8 @@ auto _check_stride(usize stride, const char *context, const char *file, i32 line
 
 #define VIKA_CHECK_STRIDE(stride) ::vika::_check_stride((stride), __func__, __FILE__, __LINE__)
 
-// window_output_extent's other precondition: the window has to fit the padded input, or the
-// subtraction underflows into an enormous extent. That surfaced three calls later as "element
-// count overflows usize at dimension 2 (extent 18446744073709551614)" from the allocation, naming
-// the symptom rather than the geometry mistake. The graph builders checked it; the layer factories
-// did not, so the standalone-layer API - a first-class one - got the worse message.
+// The window has to fit the padded input, or window_output_extent's subtraction underflows into
+// an enormous extent that surfaces much later as an allocation failure.
 auto _check_window_fits(usize input, usize window, usize padding, const char *axis, const char *context,
                         const char *file, i32 line) -> Result<Void, Error>
 {
@@ -2524,9 +2395,8 @@ auto _check_window_fits(usize input, usize window, usize padding, const char *ax
 #define VIKA_CHECK_WINDOW_FITS(input, window, padding, axis)                                                           \
     ::vika::_check_window_fits((input), (window), (padding), (axis), __func__, __FILE__, __LINE__)
 
-// The inverse formula's precondition: transposed_window_output_extent subtracts 2 * padding from
-// (input - 1) * stride + window, so padding beyond that underflows the same way. Its input must
-// also be non-empty, since (input - 1) underflows at zero.
+// The same for the inverse formula, which subtracts 2 * padding from (input - 1) * stride +
+// window. Its input must also be non-empty, since (input - 1) underflows at zero.
 auto _check_transposed_window_fits(usize input, usize window, usize stride, usize padding, const char *axis,
                                    const char *context, const char *file, i32 line) -> Result<Void, Error>
 {
@@ -2547,16 +2417,12 @@ auto _check_transposed_window_fits(usize input, usize window, usize stride, usiz
 #define VIKA_CHECK_TRANSPOSED_WINDOW_FITS(input, window, stride, padding, axis)                                        \
     ::vika::_check_transposed_window_fits((input), (window), (stride), (padding), (axis), __func__, __FILE__, __LINE__)
 
-// Construction-time counterpart of VIKA_CHECK_INPUT_COUNT: make_layer reads pred_extents[0] for
-// every single-input spec, which on a node with no predecessors indexed off the end of an empty
-// vector - a segfault, not an error. A graph from the builders always has the right count, but
-// nodes is a public field and a hand-assembled or loaded graph need not. A minimum rather than an
-// exact count, because Add and Concat take any number from two up; the exact arity of the
-// single-input layers is still enforced per call at forward() by VIKA_CHECK_INPUT_COUNT.
+// Construction-time counterpart of VIKA_CHECK_INPUT_COUNT, for make_layer's reads of
+// pred_extents[0]. A minimum rather than an exact count, because Add and Concat take any number
+// from two up; forward() still checks the exact arity per call.
 //
-// No context parameter, unlike the checkers above: every call is inside make_layer's std::visit
-// lambda, where __func__ is the useless "operator()". The name is spelled once here instead, and
-// the forwarded line identifies which spec's branch rejected the node.
+// No context parameter, unlike the checkers above: every call sits inside make_layer's std::visit
+// lambda, where __func__ is the useless "operator()".
 auto _check_pred_count(const std::vector<Extents> &pred_extents, usize at_least, const char *file, i32 line)
     -> Result<Void, Error>
 {
@@ -2572,11 +2438,9 @@ auto _check_pred_count(const std::vector<Extents> &pred_extents, usize at_least,
 #define VIKA_CHECK_PRED_COUNT(pred_extents, at_least)                                                                  \
     ::vika::_check_pred_count((pred_extents), (at_least), __FILE__, __LINE__)
 
-// Two runtime tensors that must line up row for row. _check_trailing_extents above deliberately
-// ignores the leading (batch) dimension - it is expected to vary from call to call - so for a
-// method handed two tensors independently, nothing else catches the two disagreeing with each
-// other, and every kernel here sizes its launch off one of them while indexing straight into the
-// other: a mismatch is an out-of-bounds device read that reports success.
+// Two runtime tensors that must line up row for row. _check_trailing_extents ignores the batch
+// dimension by design, so nothing else catches two independently-supplied tensors disagreeing on
+// it - and every kernel here sizes its launch off one while indexing straight into the other.
 auto _check_batch_agreement(const DeviceTensorConstViewf &a, const DeviceTensorConstViewf &b, const char *context,
                             const char *a_name, const char *b_name, const char *file, i32 line) -> Result<Void, Error>
 {
@@ -2588,12 +2452,10 @@ auto _check_batch_agreement(const DeviceTensorConstViewf &a, const DeviceTensorC
     return ok(Void{});
 }
 
-// Takes the context and both operand names from the call site rather than having every caller spell
-// out strings that can drift from the code they describe. The originating file and line are
-// forwarded too, and Error is built with them rather than through VIKA_SHAPE_ERROR: that macro
-// would capture this helper's own line, so every call site would report the same one - and
-// __func__ is the bare function name ("forward"), not the class, so the line is what tells MSELoss
-// apart from CCELoss.
+// Context and operand names come from the call site rather than being spelled out by every caller.
+// The file and line are forwarded and Error built with them, because VIKA_SHAPE_ERROR would
+// capture this helper's line and report it for all fifty call sites - and __func__ is the bare
+// function name ("forward"), so the line is what tells MSELoss apart from CCELoss.
 #define VIKA_CHECK_BATCH_AGREEMENT(a, b) ::vika::_check_batch_agreement((a), (b), __func__, #a, #b, __FILE__, __LINE__)
 
 auto checked_size(const Extents &extents) -> Result<usize, Error>
@@ -3011,9 +2873,6 @@ auto Flatten2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    // Trailing extents, not a full comparison: the leading (batch) dimension is expected to vary
-    // from call to call, exactly like every other layer's forward(). Comparing in full made this
-    // the one layer that rejected any batch smaller than the capacity it was compiled for.
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, extents));
 
     const usize k = input.extents[0];
@@ -3035,13 +2894,11 @@ auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> std::vector<
 auto Flatten2DLayer::backward(DeviceTensorConstViewf upstream_gradient) const
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    // Checked against output_extents(), not extents: upstream is the gradient of the *flattened*
-    // output, so it is rank 2 [batch, features] - the two only happen to agree on element count.
+    // Against output_extents(), not extents: upstream is the gradient of the flattened output,
+    // so it is rank 2 [batch, features].
     const auto upstream_extents = upstream_gradient.extents;
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, output_extents()));
 
-    // Reshaped back to the input's own shape, with the batch the caller actually passed rather
-    // than the capacity this layer was built for.
     Extents input_extents = extents;
     input_extents[0] = upstream_extents[0];
     return {KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream_gradient.data, input_extents))};
@@ -3520,13 +3377,10 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
     const auto grid = grid_covering(block, inputs[0].element_count());
     for (usize i = 1; i < inputs.size() - 1; ++i)
     {
-        // Checked, not waited: every launch here shares one stream, which already serializes
-        // them in submission order with no host-side sync needed. is_error() only inspects the
-        // launch-time result already captured by launch_kernel (cudaGetLastError right after
-        // <<<>>>) - cheap, and the only way to catch a bad launch config, since that error is
-        // consumed immediately and won't reappear on a later wait(). A runtime failure inside the
-        // kernel itself, if any, still surfaces correctly on whichever job the caller eventually
-        // waits on, since cudaStreamSynchronize reports the stream's accumulated status.
+        // Checked, not waited: these launches share a stream and are already ordered. is_error()
+        // only inspects what launch_kernel captured from cudaGetLastError, which is the only
+        // chance to see a bad launch config - a runtime failure still surfaces on whichever job
+        // the caller eventually waits on.
         auto job = launch_kernel(accumulate_into, sliced_outputs.const_view(), grid, block, stream.handle(), inputs[i],
                                  sliced_outputs);
         if (job.is_error())
@@ -3588,9 +3442,7 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     usize col_offset = 0;
     for (usize i = 0; i < inputs.size() - 1; ++i)
     {
-        // Checked, not waited - see the identical comment in AddLayer::forward for why this is
-        // safe: same stream already serializes these launches, and a runtime failure (as opposed
-        // to a bad launch config) still surfaces on whichever job the caller eventually waits on.
+        // Checked, not waited - see AddLayer::forward for why.
         const auto grid = grid_covering(block, inputs[i].element_count());
         auto job = launch_kernel(concat_copy, sliced_outputs.const_view(), grid, block, stream.handle(), inputs[i],
                                  sliced_outputs, col_offset);
@@ -3627,9 +3479,7 @@ auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
         auto sliced_result = d_input.view().first_n(k);
         if (sliced_result.is_error())
         {
-            // Every d_inputs[i] was allocated with the same batch capacity, so this can only
-            // happen if that invariant was somehow broken - fail every job uniformly rather than
-            // return a shorter vector than d_inputs.size().
+            // Fail every job uniformly rather than return a vector shorter than d_inputs.size().
             return std::vector<KernelJob<DeviceTensorConstViewf>>(
                 d_inputs.size(), KernelJob<DeviceTensorConstViewf>::failed(sliced_result.unwrap_error()));
         }
@@ -4138,20 +3988,17 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         {
             if (pred.value >= nodes.size())
             {
-                // The builders reject an unknown NodeId, but nodes is public and a hand-assembled
-                // or loaded graph need not have been through them - and the walk below would
-                // index straight off the end.
+                // nodes is public, so a hand-assembled graph can name one that does not exist -
+                // and the walk below would index straight off the end.
                 return error(VIKA_GRAPH_ERROR("compile: node %zu names predecessor %zu, which does not exist", i,
                                               pred.value));
             }
         }
     }
 
-    // The nodes `output` actually depends on. A graph can hold branches nothing merges back -
-    // graph.dense(x, ...) twice on the same x, with only one of them compiled as the output - and
-    // those used to be built anyway, allocating their weights and workspace, then run on every
-    // forward pass for a result nothing reads. Slots outside this set are left default
-    // constructed and never appear in execution_order, so nothing touches them.
+    // The nodes `output` actually depends on: a graph can hold branches nothing merges back, and
+    // building or running those spends memory and launches on a result nobody reads. Slots outside
+    // this set stay default constructed and never enter execution_order.
     std::vector<bool> reachable(nodes.size(), false);
     std::vector<usize> pending{output.value};
     reachable[output.value] = true;
@@ -4185,20 +4032,14 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
     const auto topo_order = VIKA_UNWRAP_OR_RETURN(topological_sort(adj));
     if (topo_order.size() != nodes.size())
     {
-        // Every node is seeded into adj above, so topological_sort's own count check already
-        // covers this - but the slots below are filled by index rather than appended, so a
-        // missing node would leave a default-constructed InputLayer behind (a silent
-        // pass-through) instead of an obvious failure. Cheap to state where it's relied on.
+        // The slots below are filled by index, so a node missing from the sort would leave a
+        // default-constructed InputLayer behind - a silent pass-through rather than a failure.
         return error(VIKA_GRAPH_ERROR("compile: sorted %zu of %zu nodes", topo_order.size(), nodes.size()));
     }
 
-    // Indexed by NodeId::value, not by position in topo_order: NodeId is already the dense index
-    // every consumer uses (see Model's own fields, and Model::forward/backward/step indexing
-    // layers[node_id.value]). Filling these in traversal order instead silently mis-wired every
-    // node whenever a graph's node vector wasn't already in topological order - which the
-    // builders happen to guarantee, since they reject a NodeId that doesn't exist yet and so can
-    // only ever add edges from lower to higher indices, but nothing states or checks it, and a
-    // graph assembled by hand (nodes is public) or loaded from disk need not be ordered that way.
+    // Indexed by NodeId::value, not by position in topo_order: NodeId is the index every consumer
+    // uses. Filling them in traversal order mis-wires any graph whose nodes are not already in
+    // topological order, which only the builders guarantee.
     std::vector<Layer> layers(nodes.size());
     std::vector<std::vector<NodeId>> layer_inputs_result(nodes.size());
 
@@ -4228,11 +4069,8 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         }
     }
 
-    // Pre-allocated here, once, for every node with more than one consumer (adj[idx] - built
-    // above for the topological sort - is already exactly "who consumes idx", so this is free
-    // information, not a second pass over the graph). accumulate_output_gradient() only ever
-    // reads these buffers, never allocates - the whole point of doing it here instead of lazily
-    // on first use in backward() is that a training step never touches cudaMalloc at all.
+    // Allocated once, here, so that a training step never calls cudaMalloc. adj already says who
+    // consumes each node, so this costs no extra pass.
     std::vector<std::optional<DeviceOwningTensorf>> d_outputs(nodes.size());
     for (usize idx = 0; idx < nodes.size(); ++idx)
     {
@@ -4241,8 +4079,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
             continue;
         }
 
-        // Reachable consumers only: a consumer the output does not depend on never runs, so it
-        // never contributes a gradient, so it does not make this node a fan-out.
+        // Reachable consumers only: one that never runs never contributes a gradient.
         usize live_consumers = 0;
         for (const auto consumer : adj[idx])
         {
@@ -4313,8 +4150,6 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
 {
     if (node_id.value >= backward_jobs.size())
     {
-        // Public, like the jobs.empty() check below: backward() sizes this vector, so an
-        // out-of-range node here means it has not run (or not for this model).
         return error(VIKA_GRAPH_ERROR("accumulate_output_gradient: node %zu is out of range; was backward() called?",
                                       node_id.value));
     }
@@ -4322,10 +4157,8 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
     auto &jobs = backward_jobs[node_id.value];
     if (jobs.empty())
     {
-        // backward()'s own loop treats this as an expected, silent no-op (a dead branch with no
-        // consumer reachable from output_node) and never calls this far for such a node - but
-        // this method is public and has no way to know that context, so a direct standalone call
-        // here must fail loudly instead of indexing jobs[0] on an empty vector.
+        // backward() skips such a node before calling here, but this method is public, so a
+        // direct call must fail rather than index jobs[0] on an empty vector.
         return error(
             VIKA_GRAPH_ERROR("accumulate_output_gradient: node %zu has no gradient contributions yet", node_id.value));
     }
@@ -4355,10 +4188,8 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
 
 auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
 {
-    // Every layer's backward() reads state its own forward() wrote - SigmoidLayer and
-    // SoftmaxLayer read `outputs`, MaxPool2DLayer reads `argmax` - and those buffers come from
-    // empty(), i.e. uninitialised device memory. Without forward() first, backward() used to
-    // succeed and hand back gradients computed from whatever was in that memory.
+    // Every layer's backward() reads what its own forward() wrote - Sigmoid and Softmax read
+    // `outputs`, MaxPool2D reads `argmax` - and those buffers start uninitialised.
     if (forward_jobs.size() != layers.size())
     {
         return error(VIKA_GRAPH_ERROR("backward: no forward pass to differentiate; call forward() first"));
@@ -4380,17 +4211,14 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
         auto &contributions = backward_jobs[node_id.value];
         if (contributions.empty())
         {
-            // No consumer reachable from output_node ever produced a gradient here - a dead
-            // branch left over from a fan-out with no merge back to the output. Nothing to
-            // propagate, and nothing wrong either.
+            // Nothing reached this node - a branch that never merges back to the output.
             continue;
         }
 
         const auto upstream = VIKA_UNWRAP_OR_RETURN(accumulate_output_gradient(node_id));
 
-        // Collapse to the single already-accumulated value, in place of the raw per-consumer
-        // contributions - step() re-reads this node's slot afterwards for weight_gradients() and
-        // needs the same combined upstream, not the unsummed pieces.
+        // Collapse to the accumulated value: step() re-reads this slot for weight_gradients() and
+        // needs the sum, not the pieces.
         contributions = {KernelJob<DeviceTensorConstViewf>::ready(upstream)};
 
         // One job per predecessor, in the same order as preds - every layer type returns this
@@ -4400,11 +4228,8 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
             std::visit([&upstream](auto &layer) { return layer.backward(upstream); }, layers[node_id.value].kind);
         if (pred_jobs.size() != preds.size())
         {
-            // The count can only be known by actually calling backward() - a layer's arity isn't
-            // visible to Model ahead of dispatch - so by this point the (buggy) layer's async
-            // work is already launched. Wait on all of it, discarding the results we're already
-            // erroring out over anyway, so nothing is left in flight racing with whatever the
-            // caller does after this function returns.
+            // A layer's arity is only knowable by calling backward(), so its work is already in
+            // flight. Wait it out and discard, rather than leave it racing the caller.
             for (auto &job : pred_jobs)
             {
                 static_cast<void>(job.wait());
@@ -4430,9 +4255,8 @@ auto update_layer(LayerKind &kind, DeviceTensorConstViewf forward_input, DeviceT
             using T = std::decay_t<decltype(l)>;
             if constexpr (is_trainable_layer<T>())
             {
-                // weight_gradients() writes into the layer's own weights.grad/biases.grad (or
-                // filters.grad/biases.grad) buffers; update()'s parameters() reads them back
-                // from there, so nothing needs to be threaded through by hand here.
+                // weight_gradients() writes into the layer's own grad buffers and update() reads
+                // them back from there, so nothing is threaded through here.
                 VIKA_UNWRAP_OR_RETURN(l.weight_gradients(forward_input, upstream).wait());
 
                 auto update_jobs = l.update(states, params, t);
@@ -4477,8 +4301,7 @@ auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Res
 
 auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
 {
-    // Both vectors are sized by their own pass and start empty, so stepping before either one ran
-    // indexed off the end of an empty vector rather than reporting anything.
+    // Both vectors are sized by their own pass and start empty.
     if (forward_jobs.size() != layers.size())
     {
         return error(VIKA_GRAPH_ERROR("step: no forward pass to step from; call forward() first"));
@@ -4490,15 +4313,13 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
 
     if (optimizer.states.size() != layers.size())
     {
-        // An optimizer built from a different model. As an unordered_map this was invisible:
-        // every find() missed, every layer was skipped, and step() reported success having
-        // trained nothing.
+        // An optimizer built from a different model, which would otherwise skip every layer and
+        // report success having trained nothing.
         return error(VIKA_GRAPH_ERROR("step: optimizer holds state for %zu nodes but this model has %zu",
                                       optimizer.states.size(), layers.size()));
     }
 
-    // After the guards above, so a rejected call doesn't consume a step. Pre-incremented, so the
-    // first step is t = 1: see AdamOptimizer::steps_taken.
+    // After the guards, so a rejected call does not consume a step.
     ++optimizer.steps_taken;
     const usize t = optimizer.steps_taken;
 
@@ -4522,8 +4343,7 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
             continue;
         }
 
-        // Empty means backward() never reached this node - a dead branch with no consumer on
-        // the path to output_node - so there is no gradient to take a step with.
+        // Empty means backward() never reached this node, so there is no gradient to step with.
         if (backward_jobs[node_id.value].empty())
         {
             continue;
@@ -5219,12 +5039,9 @@ __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorCo
     const usize W_in = d_inputs.extents[2];
     const u32 idx = argmax(n, oh, ow, c);
 
-    // argmax is written by forward() and read here, with nothing in between guaranteeing the two
-    // ran in that order: a standalone layer's backward() can be called first, and argmax comes
-    // from empty(), i.e. whatever was in that device memory. An unchecked idx would make the
-    // scatter below write at an arbitrary offset from d_inputs - one compare per output element
-    // is a cheap price for that not being possible. Model::backward already refuses to run
-    // before forward(), so this covers the standalone path.
+    // argmax is written by forward() and read here, and a standalone layer's backward() can be
+    // called first - on memory from empty(). Unchecked, the scatter below would write at an
+    // arbitrary offset.
     if (idx >= H_in * W_in)
     {
         return;
