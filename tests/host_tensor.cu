@@ -28,7 +28,7 @@ UTEST(tensor, zero_2d)
 
 UTEST(tensor, size_from_extents)
 {
-    const auto count = HostTensorf::size({3, 4});
+    const auto count = element_count({3, 4});
     EXPECT_EQ(count, 12u);
 }
 

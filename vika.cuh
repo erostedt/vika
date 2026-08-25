@@ -847,12 +847,6 @@ class HostTensor
         return _data.data();
     }
 
-    static auto size(const Extents &extents) -> usize
-    {
-        using namespace std;
-        return accumulate(std::begin(extents), std::end(extents), usize{1}, multiplies<>{});
-    }
-
     auto size() const -> usize
     {
         return std::size(_data);
@@ -923,9 +917,13 @@ class HostTensor
 
     HostTensor(std::vector<T> &&data, const Extents &extents) : _data(std::move(data)), _extents(extents)
     {
-        VIKA_PANIC_IF(_extents.empty(), "Empty extents!");
-        VIKA_PANIC_IF(size(_extents) == 0, "Extent was 0");
-        VIKA_PANIC_IF(_data.size() != size(_extents), "data/extents size mismatch");
+        // Every factory funnels through checked_size, so these can only fail if one of them
+        // stopped doing that - which is what VIKA_ASSERT is for.
+        VIKA_ASSERT(!_extents.empty(), "HostTensor: constructed with empty extents");
+        VIKA_ASSERT(element_count(_extents) != 0, "HostTensor: constructed with a zero extent");
+        VIKA_ASSERT(_data.size() == element_count(_extents),
+                    "HostTensor: %zu elements of data for extents describing %zu", _data.size(),
+                    element_count(_extents));
     }
 
   private:
