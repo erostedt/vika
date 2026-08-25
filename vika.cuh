@@ -760,6 +760,21 @@ class HostTensor
     using const_iterator = typename std::vector<T>::const_iterator;
 
   public:
+    // Move-only, with copying spelled out. The const on _extents used to make this move-only by
+    // accident - it deleted both assignment operators, so a HostTensor could not be reassigned or
+    // held in anything that reassigns its elements - while still allowing a silent deep copy
+    // through the implicit copy constructor. Now the buffer is only ever duplicated where a
+    // caller wrote clone(), the same way DeviceOwningTensor's unique_ptr forces the question.
+    HostTensor(const HostTensor &) = delete;
+    auto operator=(const HostTensor &) -> HostTensor & = delete;
+    HostTensor(HostTensor &&) noexcept = default;
+    auto operator=(HostTensor &&) noexcept -> HostTensor & = default;
+
+    auto clone() const -> Self
+    {
+        return HostTensor(std::vector<T>(_data), _extents);
+    }
+
     auto operator[](usize i) -> T &
     {
         return _data[i];
@@ -903,7 +918,7 @@ class HostTensor
 
   private:
     std::vector<T> _data{};
-    const Extents _extents{};
+    Extents _extents{};
 };
 
 // Unsuffixed, for the reason step 13 gave when it dropped the device-side suffixes: rank lives at
