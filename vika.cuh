@@ -1270,7 +1270,10 @@ using DeviceTensorViewu = DeviceTensorView<u32>;
 using DeviceTensorConstViewf = DeviceTensorView<const f32>;
 using DeviceTensorConstViewu = DeviceTensorView<const u32>;
 
-auto transposed(const DeviceTensorConstViewf &view) -> DeviceTensorConstViewf;
+// Rank 2 only, hence the Result: the swap below touches extents[1]/strides[1], which on a lower
+// rank view are the zeroed slots past size(). That produced a view claiming extent 0, whose
+// element_count() is 0, so every kernel launched against it quietly did nothing.
+auto transposed(const DeviceTensorConstViewf &view) -> Result<DeviceTensorConstViewf, Error>;
 
 // =============================================================================
 // Stream
@@ -2378,12 +2381,17 @@ auto checked_element_count(const Extents &extents) -> Result<usize, Error>
 // Device Tensors
 // =============================================================================
 
-auto transposed(const DeviceTensorConstViewf &view) -> DeviceTensorConstViewf
+auto transposed(const DeviceTensorConstViewf &view) -> Result<DeviceTensorConstViewf, Error>
 {
+    if (view.rank() != 2)
+    {
+        return error(VIKA_SHAPE_ERROR("transposed: expects a rank 2 view, got rank %zu", view.rank()));
+    }
+
     auto transposed_view = view;
     std::swap(transposed_view.strides[0], transposed_view.strides[1]);
     std::swap(transposed_view.extents[0], transposed_view.extents[1]);
-    return transposed_view;
+    return ok(transposed_view);
 }
 
 // =============================================================================
@@ -2566,10 +2574,12 @@ auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
 
     const usize M = k;
     const usize N = d_inputs.extent(1);
+    const auto transposed_weights = VIKA_UNWRAP_OR_RETURN(transposed(weights.value.const_view()));
+
     const dim3 block(16, 16);
     const dim3 grid = grid_covering(block, N, M);
     return {launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream_gradient,
-                          transposed(weights.value.const_view()), sliced_d_inputs)};
+                          transposed_weights, sliced_d_inputs)};
 }
 
 auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream_gradient)
@@ -2591,9 +2601,11 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
     const dim3 block(16, 16);
     const dim3 grid = grid_covering(block, N, M);
     const auto gradients = std::make_tuple(weights.grad.const_view(), biases.grad.const_view());
+    const auto transposed_inputs = VIKA_UNWRAP_OR_RETURN(transposed(inputs));
+    const auto transposed_upstream = VIKA_UNWRAP_OR_RETURN(transposed(upstream_gradient));
 
     // NOTE: Run in separate streams?
-    auto matmul_job = launch_kernel(matmul_kernel, gradients, grid, block, stream.handle(), transposed(inputs),
+    auto matmul_job = launch_kernel(matmul_kernel, gradients, grid, block, stream.handle(), transposed_inputs,
                                     upstream_gradient, weights.grad.view());
     if (matmul_job.is_error())
     {
@@ -2602,7 +2614,7 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
 
     const dim3 row_block(256);
     const auto row_grid = grid_covering(row_block, upstream_gradient.extents[1]);
-    return launch_kernel(sum_rows, gradients, row_grid, row_block, stream.handle(), transposed(upstream_gradient),
+    return launch_kernel(sum_rows, gradients, row_grid, row_block, stream.handle(), transposed_upstream,
                          biases.grad.view());
 }
 
