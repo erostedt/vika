@@ -4922,8 +4922,21 @@ __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorCo
         return;
     }
 
+    const usize H_in = d_inputs.extents[1];
     const usize W_in = d_inputs.extents[2];
     const u32 idx = argmax(n, oh, ow, c);
+
+    // argmax is written by forward() and read here, with nothing in between guaranteeing the two
+    // ran in that order: a standalone layer's backward() can be called first, and argmax comes
+    // from empty(), i.e. whatever was in that device memory. An unchecked idx would make the
+    // scatter below write at an arbitrary offset from d_inputs - one compare per output element
+    // is a cheap price for that not being possible. Model::backward already refuses to run
+    // before forward(), so this covers the standalone path.
+    if (idx >= H_in * W_in)
+    {
+        return;
+    }
+
     const usize ih = idx / W_in;
     const usize iw = idx % W_in;
 
