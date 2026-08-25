@@ -2354,8 +2354,8 @@ auto _check_trailing_extents(const Extents &actual, const Extents &expected, con
 {
     if (trailing_extents(actual) != trailing_extents(expected))
     {
-        return error(Error::make(ErrorKind::Shape, file, line, "%s: %s is %s, layer expects %s (batch aside)",
-                                 context, name, describe(actual).c_str(), describe(expected).c_str()));
+        return error(Error::make(ErrorKind::Shape, file, line, "%s: %s is %s, layer expects %s (batch aside)", context,
+                                 name, describe(actual).c_str(), describe(expected).c_str()));
     }
     return ok(Void{});
 }
@@ -2428,8 +2428,9 @@ auto _check_pred_count(const std::vector<Extents> &pred_extents, usize at_least,
 {
     if (pred_extents.size() < at_least)
     {
-        return error(Error::make(ErrorKind::Graph, file, line, "make_layer: this layer needs at least %zu "
-                                                              "predecessor(s), got %zu",
+        return error(Error::make(ErrorKind::Graph, file, line,
+                                 "make_layer: this layer needs at least %zu "
+                                 "predecessor(s), got %zu",
                                  at_least, pred_extents.size()));
     }
     return ok(Void{});
@@ -3990,8 +3991,8 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
             {
                 // nodes is public, so a hand-assembled graph can name one that does not exist -
                 // and the walk below would index straight off the end.
-                return error(VIKA_GRAPH_ERROR("compile: node %zu names predecessor %zu, which does not exist", i,
-                                              pred.value));
+                return error(
+                    VIKA_GRAPH_ERROR("compile: node %zu names predecessor %zu, which does not exist", i, pred.value));
             }
         }
     }
@@ -4445,8 +4446,8 @@ __global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f3
     f32 m = m_weights[i];
     f32 v = v_weights[i];
 
-    m = parameters.beta1 * m + (1.0 - parameters.beta1) * g;
-    v = parameters.beta2 * v + (1.0 - parameters.beta2) * (g * g);
+    m = parameters.beta1 * m + (1.0f - parameters.beta1) * g;
+    v = parameters.beta2 * v + (1.0f - parameters.beta2) * (g * g);
 
     m_weights[i] = m;
     v_weights[i] = v;
@@ -4478,7 +4479,7 @@ __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstView
     if (i < a.element_count())
     {
 
-        out[i] = a[i] * (1.0 - a[i]) * upstream_gradient[i];
+        out[i] = a[i] * (1.0f - a[i]) * upstream_gradient[i];
     }
 }
 
