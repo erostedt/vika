@@ -2141,7 +2141,6 @@ struct AdamOptimizer;
 
 struct Model
 {
-    usize batch_size;
     std::vector<Layer> layers;
     std::vector<std::vector<NodeId>> layer_inputs;
     std::vector<NodeId> execution_order;
@@ -4195,7 +4194,6 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
 
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(Model{
-        .batch_size = batch_size,
         .layers = std::move(layers),
         .layer_inputs = std::move(layer_inputs_result),
         .execution_order = std::move(execution_order),
