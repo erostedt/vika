@@ -241,6 +241,68 @@ UTEST(model, forward_output_shape)
     EXPECT_EQ(out.extents[1], 1u);
 }
 
+// The gap that let a broken Flatten2DLayer ship: every *_smaller_batch test was per-layer, and
+// each of those layers was already correct. Nothing ran a whole model below its capacity.
+//
+// Checking shapes would not have caught it either - what makes this worth having is comparing
+// values: a batch-2 forward must produce exactly what the first two rows of a batch-4 forward
+// produce, since view slicing is supposed to change how much is computed, not what.
+UTEST(model, smaller_batch_matches_the_first_rows_of_a_full_batch)
+{
+    using namespace vika;
+
+    constexpr usize capacity = 4;
+
+    // conv -> maxpool -> flatten -> dense: the line_cnn shape, and the only path through a
+    // flatten in the suite.
+    ComputationGraph graph{capacity};
+    auto x = graph.input({4, 4, 1});
+    x = graph.conv2d(x, 3, 3, 2, 1, 0, 7).unwrap();
+    x = graph.maxpool2d(x, 2, 2, 2).unwrap();
+    x = graph.flatten(x).unwrap();
+    x = graph.dense(x, 1, 8).unwrap();
+    auto model = graph.compile(x).unwrap();
+
+    auto cpu_inputs = HostTensorf::zero({capacity, 4, 4, 1}).unwrap();
+    for (usize n = 0; n < capacity; ++n)
+    {
+        for (usize h = 0; h < 4; ++h)
+        {
+            for (usize w = 0; w < 4; ++w)
+            {
+                cpu_inputs(n, h, w, 0) = static_cast<f32>(n * 100 + h * 10 + w);
+            }
+        }
+    }
+    auto inputs = upload(cpu_inputs).unwrap();
+
+    const auto full_forward = model.forward(inputs.const_view());
+    ASSERT_TRUE(full_forward.is_ok());
+    const auto full = download(full_forward.unwrap()).unwrap();
+    ASSERT_EQ(full.extent(0), capacity);
+
+    const auto sliced = inputs.view().first_n(2).unwrap().const_view();
+    const auto half_forward = model.forward(sliced);
+    ASSERT_TRUE(half_forward.is_ok());
+    const auto half_view = half_forward.unwrap();
+    EXPECT_EQ(half_view.extents[0], 2u);
+    const auto half = download(half_view).unwrap();
+
+    ASSERT_EQ(half.extent(0), 2u);
+    EXPECT_NEAR(half(0, 0), full(0, 0), 1e-6f);
+    EXPECT_NEAR(half(1, 0), full(1, 0), 1e-6f);
+
+    // ... and the rest of the step runs at that batch too, which is the half of finding 1 that
+    // lived in backward().
+    auto loss_fn = MSELoss::with_extents({capacity, 1}).unwrap();
+    auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
+    auto targets = DeviceOwningTensorf::zero({capacity, 1}).unwrap();
+    const auto sliced_targets = targets.view().first_n(2).unwrap().const_view();
+
+    ASSERT_TRUE(train_step(model, loss_fn, sliced, sliced_targets, optimizer).is_ok());
+    EXPECT_EQ(optimizer.steps_taken, 1u);
+}
+
 UTEST(model, xor_trains_to_convergence)
 {
     using namespace vika;

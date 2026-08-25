@@ -78,3 +78,33 @@ UTEST(tensor, device_from_rejects_wrong_length)
     EXPECT_EQ(host.size(), 6u);
     EXPECT_EQ(host(1, 2), 6.0f);
 }
+
+// The device side used to check only for overflow, so these two returned a zero-byte and a rank-0
+// allocation respectively, failing much later as an invalid launch configuration.
+UTEST(tensor, device_empty_rejects_degenerate_extents)
+{
+    EXPECT_TRUE(DeviceOwningTensorf::empty({0, 5}).is_error());
+    EXPECT_TRUE(DeviceOwningTensorf::empty({}).is_error());
+    EXPECT_TRUE(HostTensorf::zero({0, 5}).is_error());
+
+    ASSERT_TRUE(DeviceOwningTensorf::empty({2, 3}).is_ok());
+}
+
+// transposed() swaps extents[0]/[1] and strides[0]/[1]; on a lower-rank view those are the zeroed
+// slots past size(), which produced a view of extent 0 that every kernel then skipped silently.
+UTEST(tensor, transposed_requires_rank_2)
+{
+    const auto matrix = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    const auto flipped = transposed(matrix.const_view());
+    ASSERT_TRUE(flipped.is_ok());
+    EXPECT_EQ(flipped.unwrap().extents[0], 3u);
+    EXPECT_EQ(flipped.unwrap().extents[1], 2u);
+    EXPECT_EQ(flipped.unwrap().strides[0], 1u);
+    EXPECT_EQ(flipped.unwrap().strides[1], 3u);
+
+    const auto vector = DeviceOwningTensorf::from({1.0f, 2.0f}, {2}).unwrap();
+    EXPECT_TRUE(transposed(vector.const_view()).is_error());
+
+    const auto cube = DeviceOwningTensorf::zero({2, 2, 2}).unwrap();
+    EXPECT_TRUE(transposed(cube.const_view()).is_error());
+}

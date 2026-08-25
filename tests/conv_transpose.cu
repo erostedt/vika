@@ -99,3 +99,24 @@ UTEST(conv_transpose, with_weights_rejects_bias_channel_mismatch)
     auto biases = DeviceOwningTensorf::from({0.0f, 0.0f}).unwrap();
     ASSERT_TRUE(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0).is_error());
 }
+
+UTEST(conv_transpose, forward_smaller_batch)
+{
+    using namespace vika;
+    // Built for a batch of 2, handed 1 - the same view-slicing every other layer does, but this
+    // is the newest layer and had no batch-related coverage of its own. Same single-sample input
+    // and filters as forward() above, so the expected output is the same.
+    const auto input = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
+    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2, 1, 1}).unwrap();
+    auto biases = DeviceOwningTensorf::from({0.0f}).unwrap();
+
+    auto layer = ConvTranspose2DLayer::with_weights(2, 2, 2, std::move(filters), std::move(biases), 1, 0).unwrap();
+    const auto forwarded = layer.forward({input.const_view()}).wait();
+    ASSERT_TRUE(forwarded.is_ok());
+    const auto out = download(forwarded.unwrap()).unwrap();
+
+    EXPECT_EQ(out.extent(0), 1u);
+    EXPECT_EQ(out.extent(1), 3u);
+    EXPECT_EQ(out.extent(2), 3u);
+    ASSERT_TRUE(are_close(out, {1.0f, 4.0f, 4.0f, 6.0f, 20.0f, 16.0f, 9.0f, 24.0f, 16.0f}, 1e-4f));
+}
