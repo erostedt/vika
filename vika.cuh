@@ -640,10 +640,17 @@ inline auto byte_count(const Extents &extents) -> usize
 // that were already validated when their tensor was created.
 auto checked_element_count(const Extents &extents) -> Result<usize, Error>;
 
+// Element count described by extents, rejecting the three ways extents can be unusable: empty,
+// containing a zero, or overflowing usize when multiplied out. Shared by HostTensor's factories
+// and, through checked_byte_count below, by DeviceOwningTensor's - the device side used to check
+// only the third, so empty({0, 5}) returned a zero-byte allocation and empty({}) a rank-0 one,
+// both of which failed much later and much less legibly as an invalid launch configuration.
+auto checked_size(const Extents &extents) -> Result<usize, Error>;
+
 template <typename T>
 inline auto checked_byte_count(const Extents &extents) -> Result<usize, Error>
 {
-    auto count = checked_element_count(extents);
+    auto count = checked_size(extents);
     if (count.is_error())
     {
         return error(count.unwrap_error());
@@ -816,34 +823,15 @@ class HostTensor
         return std::cend(_data);
     }
 
-    // Element count described by extents, rejecting the three ways extents can be
-    // unusable: empty, containing a zero, or overflowing usize when multiplied out.
-    // Every factory below funnels through this, so the private constructor can assume
-    // both the extents and the data length are sound.
-    static auto checked_size(const Extents &extents) -> Result<usize, Error>
-    {
-        if (extents.empty())
-        {
-            return error(VIKA_SHAPE_ERROR("host tensor extents are empty"));
-        }
-
-        const usize count = VIKA_UNWRAP_OR_RETURN(checked_element_count(extents));
-        if (count == 0)
-        {
-            return error(VIKA_SHAPE_ERROR("host tensor extents contain a zero extent"));
-        }
-        return ok(count);
-    }
-
     static auto zero(const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = VIKA_UNWRAP_OR_RETURN(Self::checked_size(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(checked_size(extents));
         return ok(HostTensor(std::vector<T>(count, T{}), extents));
     }
 
     static auto empty(const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = VIKA_UNWRAP_OR_RETURN(Self::checked_size(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(checked_size(extents));
         return ok(HostTensor(std::vector<T>(count), extents));
     }
 
@@ -865,7 +853,7 @@ class HostTensor
 
     static auto copy_from(std::vector<T> data, const Extents &extents) -> Result<Self, Error>
     {
-        const usize count = VIKA_UNWRAP_OR_RETURN(Self::checked_size(extents));
+        const usize count = VIKA_UNWRAP_OR_RETURN(checked_size(extents));
         if (std::size(data) != count)
         {
             return error(VIKA_SHAPE_ERROR("host tensor data holds %zu elements but extents describe %zu",
@@ -2355,6 +2343,21 @@ auto _check_batch_agreement(const DeviceTensorConstViewf &a, const DeviceTensorC
 // __func__ is the bare function name ("forward"), not the class, so the line is what tells MSELoss
 // apart from CCELoss.
 #define VIKA_CHECK_BATCH_AGREEMENT(a, b) ::vika::_check_batch_agreement((a), (b), __func__, #a, #b, __FILE__, __LINE__)
+
+auto checked_size(const Extents &extents) -> Result<usize, Error>
+{
+    if (extents.empty())
+    {
+        return error(VIKA_SHAPE_ERROR("tensor extents are empty"));
+    }
+
+    const usize count = VIKA_UNWRAP_OR_RETURN(checked_element_count(extents));
+    if (count == 0)
+    {
+        return error(VIKA_SHAPE_ERROR("tensor extents contain a zero extent"));
+    }
+    return ok(count);
+}
 
 auto checked_element_count(const Extents &extents) -> Result<usize, Error>
 {
