@@ -2657,7 +2657,6 @@ auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
 auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream_gradient)
     -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>
 {
-    using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
@@ -2965,7 +2964,6 @@ auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
 auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream)
     -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>
 {
-    using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
@@ -3116,7 +3114,6 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
                                             const DeviceTensorConstViewf &upstream)
     -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>
 {
-    using Job = KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
