@@ -20,7 +20,7 @@ UTEST(flatten, forward_collapses_every_dimension_but_the_batch)
 {
     using namespace vika;
     const auto inputs = counting_input(2);
-    const auto layer = Flatten2DLayer::with_extents({2, 2, 2, 1});
+    const auto layer = Flatten2DLayer::with_extents({2, 2, 2, 1}).unwrap();
 
     const auto forwarded = layer.forward({inputs.const_view()}).wait();
     ASSERT_TRUE(forwarded.is_ok());
@@ -40,7 +40,7 @@ UTEST(flatten, forward_smaller_batch)
     // Built for a batch of 4, handed 2. This is the case that was rejected outright until the
     // full-extent comparison became a trailing-extent one.
     const auto inputs = counting_input(2);
-    const auto layer = Flatten2DLayer::with_extents({4, 2, 2, 1});
+    const auto layer = Flatten2DLayer::with_extents({4, 2, 2, 1}).unwrap();
 
     const auto forwarded = layer.forward({inputs.const_view()}).wait();
     ASSERT_TRUE(forwarded.is_ok());
@@ -54,7 +54,7 @@ UTEST(flatten, backward_restores_the_input_shape)
     using namespace vika;
     const auto upstream =
         DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}, {2, 4}).unwrap();
-    const auto layer = Flatten2DLayer::with_extents({2, 2, 2, 1});
+    const auto layer = Flatten2DLayer::with_extents({2, 2, 2, 1}).unwrap();
 
     const auto backwarded = layer.backward(upstream.const_view())[0].wait();
     ASSERT_TRUE(backwarded.is_ok());
@@ -72,7 +72,7 @@ UTEST(flatten, backward_smaller_batch)
     // The batch must come from the upstream gradient, not from the layer's capacity - returning
     // the capacity shape would claim more rows than the caller actually has.
     const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4}).unwrap();
-    const auto layer = Flatten2DLayer::with_extents({4, 2, 2, 1});
+    const auto layer = Flatten2DLayer::with_extents({4, 2, 2, 1}).unwrap();
 
     const auto backwarded = layer.backward(upstream.const_view())[0].wait();
     ASSERT_TRUE(backwarded.is_ok());
@@ -86,7 +86,7 @@ UTEST(flatten, backward_smaller_batch)
 UTEST(flatten, rejects_wrong_trailing_extents_in_both_directions)
 {
     using namespace vika;
-    const auto layer = Flatten2DLayer::with_extents({2, 2, 2, 1});
+    const auto layer = Flatten2DLayer::with_extents({2, 2, 2, 1}).unwrap();
 
     const auto wrong_input = DeviceOwningTensorf::zero({2, 3, 3, 1}).unwrap();
     EXPECT_TRUE(layer.forward({wrong_input.const_view()}).wait().is_error());
@@ -96,4 +96,15 @@ UTEST(flatten, rejects_wrong_trailing_extents_in_both_directions)
 
     const auto input = counting_input(2);
     EXPECT_TRUE(layer.forward({input.const_view(), input.const_view()}).wait().is_error());
+}
+
+UTEST(flatten, with_extents_requires_rank_2_or_higher)
+{
+    using namespace vika;
+    // Below rank 2 there is nothing to flatten, and output_extents() reads extents[0]. This was
+    // the one layer factory that could not report anything.
+    EXPECT_TRUE(Flatten2DLayer::with_extents({}).is_error());
+    EXPECT_TRUE(Flatten2DLayer::with_extents({4}).is_error());
+    EXPECT_TRUE(Flatten2DLayer::with_extents({4, 2}).is_ok());
+    EXPECT_TRUE(Flatten2DLayer::with_extents({4, 2, 2, 1}).is_ok());
 }

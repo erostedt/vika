@@ -1759,8 +1759,9 @@ struct SoftmaxLayer
 
 struct Flatten2DLayer
 {
-    // TODO: CHECK RANK SIZE
-    static auto with_extents(const Extents &extents) -> Flatten2DLayer;
+    // Rank 2 or higher: below that there is nothing to flatten, and output_extents() reads
+    // extents[0]. The only layer factory that could not fail until it started checking.
+    static auto with_extents(const Extents &extents) -> Result<Flatten2DLayer, Error>;
 
     auto forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>;
 
@@ -2886,9 +2887,13 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
                           outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
 }
 
-auto Flatten2DLayer::with_extents(const Extents &extents) -> Flatten2DLayer
+auto Flatten2DLayer::with_extents(const Extents &extents) -> Result<Flatten2DLayer, Error>
 {
-    return {extents};
+    if (extents.size() < 2)
+    {
+        return error(VIKA_SHAPE_ERROR("flatten: extents must be rank 2 or higher, got %s", describe(extents).c_str()));
+    }
+    return ok(Flatten2DLayer{extents});
 }
 
 auto Flatten2DLayer::output_extents() const -> Extents
@@ -3934,7 +3939,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, FlattenSpec>)
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
-                return ok(Layer::trainable(LayerKind{Flatten2DLayer::with_extents(pred_extents[0])}));
+                return Flatten2DLayer::with_extents(pred_extents[0]).map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, Conv2DSpec>)
             {
