@@ -359,6 +359,14 @@ auto error(E value) -> Err<std::decay_t<E>>
 template <typename T, typename E>
 class [[nodiscard]] Result
 {
+    // The storage is a variant<T, E>, so is_ok()/is_error() and every get<> below distinguish the
+    // two cases by type alone. With T and E the same type there is nothing to distinguish: the
+    // variant holds one alternative, holds_alternative is ambiguous, and a Result would report
+    // whichever answer the compiler happened to pick. Nothing in the library instantiates one,
+    // but it is a public template.
+    static_assert(!std::is_same_v<T, E>, "Result's value and error types must differ - a Result<T, T> cannot tell "
+                                         "an ok from an error");
+
   public:
     using value_type = T;
     using error_type = E;
