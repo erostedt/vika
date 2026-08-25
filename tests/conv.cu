@@ -299,3 +299,11 @@ UTEST(conv, backward_smaller_batch)
     EXPECT_NEAR(d_inputs(0, 0, 0, 1), 1.7f, 1e-4f);
     EXPECT_NEAR(d_inputs(0, 2, 2, 1), 90.6f, 1e-4f);
 }
+
+UTEST(conv, with_weights_rejects_zero_stride)
+{
+    using namespace vika;
+    auto filters = DeviceOwningTensorf::zero({3, 3, 1, 2}).unwrap();
+    auto biases = DeviceOwningTensorf::zero({2}).unwrap();
+    EXPECT_TRUE(Conv2DLayer::with_weights(1, 8, 8, std::move(filters), std::move(biases), 0, 0).is_error());
+}

@@ -2404,6 +2404,49 @@ auto _check_trailing_extents(const Extents &actual, const Extents &expected, con
 #define VIKA_CHECK_TRAILING_EXTENTS(actual, expected)                                                                  \
     ::vika::_check_trailing_extents((actual), (expected), __func__, #actual, __FILE__, __LINE__)
 
+// window_output_extent divides by stride, and transposed_window_output_extent multiplies by it;
+// both document "requires stride > 0" and neither enforced it. A zero stride means a window that
+// never advances, which is not a shape the geometry can express - and unchecked it did two
+// different wrong things. Conv2D and MaxPool2D divided by zero on the host, taking the process
+// down with SIGFPE before any error could be returned. ConvTranspose2D accepted it, because its
+// formula multiplies instead, and deferred the division to a kernel where it is undefined rather
+// than fatal.
+auto _check_stride(usize stride, const char *context, const char *file, i32 line) -> Result<Void, Error>
+{
+    if (stride == 0)
+    {
+        return error(Error::make(ErrorKind::Shape, file, line, "%s: stride must be at least 1, got 0", context));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_STRIDE(stride) ::vika::_check_stride((stride), __func__, __FILE__, __LINE__)
+
+// Construction-time counterpart of VIKA_CHECK_INPUT_COUNT: make_layer reads pred_extents[0] for
+// every single-input spec, which on a node with no predecessors indexed off the end of an empty
+// vector - a segfault, not an error. A graph from the builders always has the right count, but
+// nodes is a public field and a hand-assembled or loaded graph need not. A minimum rather than an
+// exact count, because Add and Concat take any number from two up; the exact arity of the
+// single-input layers is still enforced per call at forward() by VIKA_CHECK_INPUT_COUNT.
+//
+// No context parameter, unlike the checkers above: every call is inside make_layer's std::visit
+// lambda, where __func__ is the useless "operator()". The name is spelled once here instead, and
+// the forwarded line identifies which spec's branch rejected the node.
+auto _check_pred_count(const std::vector<Extents> &pred_extents, usize at_least, const char *file, i32 line)
+    -> Result<Void, Error>
+{
+    if (pred_extents.size() < at_least)
+    {
+        return error(Error::make(ErrorKind::Graph, file, line, "make_layer: this layer needs at least %zu "
+                                                              "predecessor(s), got %zu",
+                                 at_least, pred_extents.size()));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_PRED_COUNT(pred_extents, at_least)                                                                  \
+    ::vika::_check_pred_count((pred_extents), (at_least), __FILE__, __LINE__)
+
 // Two runtime tensors that must line up row for row. _check_trailing_extents above deliberately
 // ignores the leading (batch) dimension - it is expected to vary from call to call - so for a
 // method handed two tensors independently, nothing else catches the two disagreeing with each
@@ -2895,6 +2938,8 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
         return error(VIKA_SHAPE_ERROR("conv2d: biases has %zu channels, filters expects %zu", biases.extent(0), C_out));
     }
 
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+
     const usize out_H = window_output_extent(input_height, kH, stride, padding);
     const usize out_W = window_output_extent(input_width, kW, stride, padding);
 
@@ -3037,6 +3082,8 @@ auto ConvTranspose2DLayer::with_weights(usize batch_size, usize input_height, us
                                       biases.extent(0), C_out));
     }
 
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+
     const usize out_H = transposed_window_output_extent(input_height, kH, stride, padding);
     const usize out_W = transposed_window_output_extent(input_width, kW, stride, padding);
 
@@ -3166,6 +3213,8 @@ auto ConvTranspose2DLayer::update(std::vector<AdamState> &states, const AdamPara
 auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
                                   usize pool_w, usize stride) -> Result<MaxPool2DLayer, Error>
 {
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+
     const usize out_H = window_output_extent(input_height, pool_h, stride, 0);
     const usize out_W = window_output_extent(input_width, pool_w, stride, 0);
 
@@ -3675,6 +3724,8 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
         return error(VIKA_SHAPE_ERROR("conv2d: kernel width exceeds padded input width"));
     }
 
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+
     const auto out_H = window_output_extent(H, kernel_height, stride, padding);
     const auto out_W = window_output_extent(W, kernel_width, stride, padding);
 
@@ -3715,6 +3766,8 @@ auto ComputationGraph::conv_transpose2d(NodeId input, usize kernel_height, usize
         return error(VIKA_SHAPE_ERROR("conv_transpose2d: padding exceeds (input - 1) * stride + kernel width"));
     }
 
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+
     const auto out_H = transposed_window_output_extent(H, kernel_height, stride, padding);
     const auto out_W = transposed_window_output_extent(W, kernel_width, stride, padding);
 
@@ -3753,6 +3806,8 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     {
         return error(VIKA_SHAPE_ERROR("maxpool2d: pool width exceeds input width"));
     }
+
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
 
     const auto out_H = window_output_extent(H, pool_height, stride, 0);
     const auto out_W = window_output_extent(W, pool_width, stride, 0);

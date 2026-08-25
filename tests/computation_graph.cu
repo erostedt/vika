@@ -111,6 +111,26 @@ UTEST(computation_graph, dense_wrong_rank)
     EXPECT_TRUE(result.is_error());
 }
 
+// A zero stride is a window that never advances. window_output_extent divides by it, so this used
+// to be SIGFPE for conv2d and maxpool2d - the process gone before an error could be returned -
+// while conv_transpose2d accepted it (its formula multiplies instead) and deferred the division
+// into a kernel.
+UTEST(computation_graph, rejects_zero_stride)
+{
+    using namespace vika;
+    ComputationGraph graph{4};
+    auto x = graph.input({8, 8, 1});
+
+    EXPECT_TRUE(graph.conv2d(x, 3, 3, 4, 0, 0, 42).is_error());
+    EXPECT_TRUE(graph.maxpool2d(x, 2, 2, 0).is_error());
+    EXPECT_TRUE(graph.conv_transpose2d(x, 3, 3, 4, 0, 0, 42).is_error());
+
+    // A stride of 1 through the same builders still works.
+    EXPECT_TRUE(graph.conv2d(x, 3, 3, 4, 1, 0, 42).is_ok());
+    EXPECT_TRUE(graph.maxpool2d(x, 2, 2, 1).is_ok());
+    EXPECT_TRUE(graph.conv_transpose2d(x, 3, 3, 4, 1, 0, 42).is_ok());
+}
+
 UTEST(computation_graph, conv2d_kernel_too_large)
 {
     using namespace vika;

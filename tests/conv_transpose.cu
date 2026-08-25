@@ -120,3 +120,11 @@ UTEST(conv_transpose, forward_smaller_batch)
     EXPECT_EQ(out.extent(2), 3u);
     ASSERT_TRUE(are_close(out, {1.0f, 4.0f, 4.0f, 6.0f, 20.0f, 16.0f, 9.0f, 24.0f, 16.0f}, 1e-4f));
 }
+
+UTEST(conv_transpose, with_weights_rejects_zero_stride)
+{
+    using namespace vika;
+    auto filters = DeviceOwningTensorf::zero({2, 2, 1, 1}).unwrap();
+    auto biases = DeviceOwningTensorf::zero({1}).unwrap();
+    EXPECT_TRUE(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 0, 0).is_error());
+}
