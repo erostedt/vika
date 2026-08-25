@@ -135,6 +135,46 @@ UTEST(model, compile_out_of_order_nodes)
     EXPECT_EQ(out.extents[1], 3u);
 }
 
+// An optimizer carries one state entry per node, so one built from a different model does not
+// describe this one. While that state was a hash map, the mismatch was invisible: every lookup
+// missed, every layer was skipped, and step() returned Ok having trained nothing.
+UTEST(model, step_rejects_an_optimizer_built_from_another_model)
+{
+    using namespace vika;
+
+    constexpr usize batch_size = 4;
+
+    const auto build = [](usize dense_layers) {
+        ComputationGraph graph{batch_size};
+        auto x = graph.input({2});
+        for (usize i = 0; i < dense_layers; ++i)
+        {
+            x = graph.dense(x, 3, 42).unwrap();
+        }
+        return graph.compile(x).unwrap();
+    };
+
+    auto model = build(1);
+    auto other = build(3);
+
+    const auto inputs = DeviceOwningTensorf::zero({batch_size, 2}).unwrap();
+    const auto loss_grad = DeviceOwningTensorf::zero({batch_size, 3}).unwrap();
+
+    auto foreign = AdamOptimizer::from_model(other, {}).unwrap();
+    auto own = AdamOptimizer::from_model(model, {}).unwrap();
+
+    // Both passes have run, so the only thing left for step() to object to is the optimizer.
+    ASSERT_TRUE(model.forward(inputs.const_view()).is_ok());
+    ASSERT_TRUE(model.backward(loss_grad.const_view()).is_ok());
+
+    EXPECT_TRUE(model.step(foreign).is_error());
+    EXPECT_EQ(foreign.steps_taken, 0u);
+
+    // Same model, same passes - so a failure here would mean the guard rejects too much.
+    ASSERT_TRUE(model.step(own).is_ok());
+    EXPECT_EQ(own.steps_taken, 1u);
+}
+
 UTEST(model, forward_matches_manual_xor)
 {
     using namespace vika;
