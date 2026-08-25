@@ -694,6 +694,21 @@ inline auto checked_byte_count(const Extents &extents) -> Result<usize, Error>
     return ok(elements * sizeof(T));
 }
 
+// Extents as text, for error messages. Every shape error in the file used to fall back to a rank
+// and an element count, because there was no way to print the shape itself - which made messages
+// like "source holds 6 elements, destination holds 6" for a {2, 3} against a {3, 2}. Returns a
+// std::string rather than filling a caller's buffer: error messages are not a hot path, and
+// Error::make copies the formatted result into its own fixed buffer anyway.
+inline auto describe(const Extents &extents) -> std::string
+{
+    std::string out = "{";
+    for (usize i = 0; i < extents.size(); ++i)
+    {
+        out += (i == 0 ? "" : ", ") + std::to_string(extents[i]);
+    }
+    return out + "}";
+}
+
 // Output extent of one spatial dimension for a sliding window. Convolution and pooling
 // share this geometry; pooling is simply the padding == 0 case.
 // Requires stride > 0 and input + 2 * padding >= window.
@@ -1053,8 +1068,8 @@ auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, 
 {
     if (src.extents() != dst.extents())
     {
-        return error(VIKA_SHAPE_ERROR("copy device -> host: source holds %zu elements, destination holds %zu",
-                                      src.element_count(), dst.size()));
+        return error(VIKA_SHAPE_ERROR("copy device -> host: source is %s, destination is %s",
+                                      describe(src.extents()).c_str(), describe(dst.extents()).c_str()));
     }
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost));
@@ -1066,8 +1081,8 @@ auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Vo
 {
     if (dst.extents() != src.extents)
     {
-        return error(VIKA_SHAPE_ERROR("copy view -> host: source holds %zu elements, destination holds %zu",
-                                      src.element_count(), dst.size()));
+        return error(VIKA_SHAPE_ERROR("copy view -> host: source is %s, destination is %s",
+                                      describe(src.extents).c_str(), describe(dst.extents()).c_str()));
     }
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost));
@@ -1079,8 +1094,8 @@ auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, 
 {
     if (src.extents() != dst.extents())
     {
-        return error(VIKA_SHAPE_ERROR("copy host -> device: source holds %zu elements, destination holds %zu",
-                                      src.size(), dst.element_count()));
+        return error(VIKA_SHAPE_ERROR("copy host -> device: source is %s, destination is %s",
+                                      describe(src.extents()).c_str(), describe(dst.extents()).c_str()));
     }
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice));
@@ -1096,8 +1111,8 @@ auto copy(DeviceTensorView<const T> src, DeviceTensorView<T> dst, cudaStream_t s
 {
     if (src.extents != dst.extents)
     {
-        return error(VIKA_SHAPE_ERROR("copy device -> device: source holds %zu elements, destination holds %zu",
-                                      src.element_count(), dst.element_count()));
+        return error(VIKA_SHAPE_ERROR("copy device -> device: source is %s, destination is %s",
+                                      describe(src.extents).c_str(), describe(dst.extents).c_str()));
     }
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpyAsync(dst.data, src.data, src.byte_count(), cudaMemcpyDeviceToDevice, stream));
@@ -2353,9 +2368,8 @@ auto _check_trailing_extents(const Extents &actual, const Extents &expected, con
 {
     if (trailing_extents(actual) != trailing_extents(expected))
     {
-        return error(Error::make(ErrorKind::Shape, file, line,
-                                 "%s: %s is rank %zu with %zu elements, layer expects rank %zu with %zu", context, name,
-                                 actual.size(), element_count(actual), expected.size(), element_count(expected)));
+        return error(Error::make(ErrorKind::Shape, file, line, "%s: %s is %s, layer expects %s (batch aside)",
+                                 context, name, describe(actual).c_str(), describe(expected).c_str()));
     }
     return ok(Void{});
 }
