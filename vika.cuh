@@ -557,6 +557,12 @@ class Error
 #define VIKA_UNSUPPORTED_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Unsupported, __VA_ARGS__)
 #define VIKA_DEVICE_ERROR(code) ::vika::Error::from_cuda((code), __FILE__, __LINE__)
 
+// ===========================================================================
+// Generic Utilities, Result-aware
+// ===========================================================================
+
+// These are as generic as the FixedVector/Result section above, and belong with it - they sit
+// here only because they need Result and Error to be complete types.
 template <typename T, typename UnaryOperation>
 auto map(const std::vector<T> &in, UnaryOperation op)
 {
@@ -1507,6 +1513,10 @@ auto wait_on_all(const std::vector<KernelJob<T>> &jobs) -> std::vector<Result<T,
     return vika::map(jobs, wait_on<T>);
 }
 
+// ===========================================================================
+// Parameters and Optimizer
+// ===========================================================================
+
 struct AdamParameters
 {
     f32 learning_rate = 1e-1f;
@@ -1576,6 +1586,10 @@ struct AdamState
 // in flight before anything blocks.
 auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamState> &states, cudaStream_t stream,
                        const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>;
+
+// ===========================================================================
+// Kernels
+// ===========================================================================
 
 __global__ auto matmul_kernel(DeviceTensorConstViewf a, DeviceTensorConstViewf b, DeviceTensorViewf out) -> void;
 
@@ -2602,6 +2616,10 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
     const dim3 block(256);
     return launch_kernel(xavier_tensor_kernel, Void{}, grid_covering(block, n), block, stream, tensor, seed, limit);
 }
+
+// ===========================================================================
+// Parameters and Optimizer
+// ===========================================================================
 
 // Adam bias-correction scales. These depend only on the step count, so computing them
 // once on the host beats recomputing pow() in every thread.
