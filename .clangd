@@ -6,6 +6,16 @@ CompileFlags:
     - "*includes_CUDA.rsp"
     - "--generate-code=*"
     - "--compiler-options=*"
+    - "-Xcompiler=*"
   Add:
     - "--cuda-gpu-arch=sm_86"
     - "-DVIKA_IMPLEMENTATION"
+    # The warnings CMake forwards to the host compiler through -Xcompiler, which clang does not
+    # understand and which is stripped above. Repeated here so the editor reports what the build
+    # enforces. -Werror is left out on purpose: warnings should not read as errors while typing.
+    - "-Wall"
+    - "-Wextra"
+    - "-Wshadow"
+    - "-Wsign-conversion"
+    - "-Wconversion"
+    - "-Wunreachable-code"
