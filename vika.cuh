@@ -1,8 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <array>
-#include <cassert>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -230,7 +228,7 @@ class FixedVector
 
     auto pop_back() -> void
     {
-        VIKA_PANIC_IF(m_size == 0, "Panicked: FixedVector::pop_back on empty vector\n");
+        VIKA_PANIC_IF(m_size == 0, "FixedVector::pop_back on an empty vector");
         --m_size;
     }
 
@@ -308,12 +306,12 @@ class FixedVector
 
     auto check_bounds(usize idx) const -> void
     {
-        VIKA_PANIC_IF(idx >= m_size, "FixedVector::at index %zu out of bounds (size=%zu)\n", idx, m_size);
+        VIKA_PANIC_IF(idx >= m_size, "FixedVector::at index %zu out of bounds (size=%zu)", idx, m_size);
     }
 
     auto check_not_full() const -> void
     {
-        VIKA_PANIC_IF(m_size >= Capacity, "FixedVector is at capacity (%zu)\n", Capacity);
+        VIKA_PANIC_IF(m_size >= Capacity, "FixedVector is at capacity (%zu)", Capacity);
     }
 };
 
@@ -321,7 +319,7 @@ using Extents = FixedVector<usize, VIKA_MAX_RANK>;
 using Strides = Extents;
 
 template <typename Node>
-using AdjecencyGraph = std::unordered_map<Node, std::vector<Node>>;
+using AdjacencyGraph = std::unordered_map<Node, std::vector<Node>>;
 
 template <typename Node>
 using MinHeap = std::priority_queue<Node, std::vector<Node>, std::greater<Node>>;
@@ -600,7 +598,7 @@ auto all_of(const std::vector<T> &in, Predicate pred) -> bool
 }
 
 template <typename Node>
-auto topological_sort(const AdjecencyGraph<Node> &adj) -> Result<std::vector<Node>, Error>
+auto topological_sort(const AdjacencyGraph<Node> &adj) -> Result<std::vector<Node>, Error>
 {
     std::unordered_map<Node, i32> indegree{};
 
@@ -1305,14 +1303,15 @@ struct DeviceTensorView
     }
 };
 
-// Unsuffixed on purpose: rank lives at runtime in DeviceTensorView::rank, not in the type, so a
-// name like DeviceOwningTensorf used to exist alongside DeviceOwningTensorf as if they were
-// different types - they were always the exact same DeviceOwningTensor<f32>, so the suffix
-// documented nothing and enforced nothing. Every call site now names the type it actually is, and
-// layers assert the rank they expect at their own forward()/backward() boundary instead (see
-// trailing_extents() checks throughout). Dynamic rank was kept deliberately over templating
-// tensors on a compile-time rank: loading an unknown-until-runtime rank from disk (save/load,
-// step 18) is simpler against one type than dispatching to N compile-time-rank types.
+// Unsuffixed on purpose: rank lives at runtime in the extents, reported by
+// DeviceTensorView::rank(), never in the type. Names like DeviceOwningTensor4f used to sit
+// alongside DeviceOwningTensorf as if they were different types - they were always the exact same
+// DeviceOwningTensor<f32>, so the suffix documented nothing and enforced nothing. Every call site
+// now names the type it actually is, and layers assert the rank they expect at their own
+// forward()/backward() boundary instead (see the VIKA_CHECK_TRAILING_EXTENTS calls throughout).
+// Dynamic rank was kept deliberately over templating tensors on a compile-time rank: loading an
+// unknown-until-runtime rank from disk (save/load) is simpler against one type than dispatching to
+// N compile-time-rank types.
 using DeviceOwningTensorf = DeviceOwningTensor<f32>;
 using DeviceOwningTensoru = DeviceOwningTensor<u32>;
 
@@ -3346,7 +3345,7 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
 auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize scale)
     -> Result<Upsample2DLayer, Error>
 {
-    if (scale < 1)
+    if (scale == 0)
     {
         return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
     }
@@ -3878,7 +3877,7 @@ auto ComputationGraph::upsample2d(NodeId input, usize scale) -> Result<NodeId, E
     {
         return error(VIKA_SHAPE_ERROR("upsample2d: input must be rank 4 [N, H, W, C]"));
     }
-    if (scale < 1)
+    if (scale == 0)
     {
         return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
     }
@@ -4096,7 +4095,7 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         }
     }
 
-    AdjecencyGraph<usize> adj{};
+    AdjacencyGraph<usize> adj{};
     for (usize i = 0; i < nodes.size(); ++i)
     {
         if (adj.find(i) == adj.end())

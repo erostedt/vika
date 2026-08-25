@@ -13,7 +13,7 @@ UTEST(topological_sort, no_cyle)
     unique_ptr<int[]> nodes = make_unique<int[]>(node_count);
 
     auto ptr = nodes.get();
-    AdjecencyGraph<int *> adj;
+    AdjacencyGraph<int *> adj;
     adj[ptr + 5] = {ptr + 2, ptr + 0};
     adj[ptr + 4] = {ptr + 0, ptr + 1};
     adj[ptr + 2] = {ptr + 3};
@@ -36,7 +36,7 @@ UTEST(topological_sort, cyle)
     unique_ptr<int[]> nodes = make_unique<int[]>(node_count);
 
     auto ptr = nodes.get();
-    AdjecencyGraph<int *> adj;
+    AdjacencyGraph<int *> adj;
     adj[ptr + 5] = {ptr + 2, ptr + 0};
     adj[ptr + 4] = {ptr + 0, ptr + 1};
     adj[ptr + 2] = {ptr + 3};
