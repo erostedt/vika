@@ -128,3 +128,18 @@ UTEST(conv_transpose, with_weights_rejects_zero_stride)
     auto biases = DeviceOwningTensorf::zero({1}).unwrap();
     EXPECT_TRUE(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 0, 0).is_error());
 }
+
+UTEST(conv_transpose, with_weights_rejects_padding_larger_than_the_output)
+{
+    using namespace vika;
+    // transposed_window_output_extent subtracts 2 * padding from (input - 1) * stride + window.
+    auto filters = DeviceOwningTensorf::zero({3, 3, 1, 1}).unwrap();
+    auto biases = DeviceOwningTensorf::zero({1}).unwrap();
+    EXPECT_TRUE(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 10).is_error());
+
+    // A zero-sized input underflows (input - 1) the same way.
+    auto small_filters = DeviceOwningTensorf::zero({3, 3, 1, 1}).unwrap();
+    auto small_biases = DeviceOwningTensorf::zero({1}).unwrap();
+    EXPECT_TRUE(
+        ConvTranspose2DLayer::with_weights(1, 0, 2, std::move(small_filters), std::move(small_biases), 1, 0).is_error());
+}

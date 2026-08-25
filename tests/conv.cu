@@ -307,3 +307,19 @@ UTEST(conv, with_weights_rejects_zero_stride)
     auto biases = DeviceOwningTensorf::zero({2}).unwrap();
     EXPECT_TRUE(Conv2DLayer::with_weights(1, 8, 8, std::move(filters), std::move(biases), 0, 0).is_error());
 }
+
+UTEST(conv, with_weights_rejects_a_kernel_larger_than_the_input)
+{
+    using namespace vika;
+    // The graph builder always checked this; the factory underflowed window_output_extent and
+    // reported "element count overflows usize" from the allocation three calls later.
+    auto filters = DeviceOwningTensorf::zero({5, 5, 1, 2}).unwrap();
+    auto biases = DeviceOwningTensorf::zero({2}).unwrap();
+    EXPECT_TRUE(Conv2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0).is_error());
+
+    // The same kernel fits once the input is padded enough.
+    auto padded_filters = DeviceOwningTensorf::zero({5, 5, 1, 2}).unwrap();
+    auto padded_biases = DeviceOwningTensorf::zero({2}).unwrap();
+    EXPECT_TRUE(
+        Conv2DLayer::with_weights(1, 2, 2, std::move(padded_filters), std::move(padded_biases), 1, 2).is_ok());
+}

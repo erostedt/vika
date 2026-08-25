@@ -113,3 +113,10 @@ UTEST(maxpool, with_extents_rejects_zero_stride)
     EXPECT_TRUE(MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 0).is_error());
     EXPECT_TRUE(MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 2).is_ok());
 }
+
+UTEST(maxpool, with_extents_rejects_a_pool_larger_than_the_input)
+{
+    using namespace vika;
+    EXPECT_TRUE(MaxPool2DLayer::with_extents(1, 2, 2, 1, 5, 5, 1).is_error());
+    EXPECT_TRUE(MaxPool2DLayer::with_extents(1, 2, 2, 1, 2, 2, 1).is_ok());
+}

@@ -2422,6 +2422,49 @@ auto _check_stride(usize stride, const char *context, const char *file, i32 line
 
 #define VIKA_CHECK_STRIDE(stride) ::vika::_check_stride((stride), __func__, __FILE__, __LINE__)
 
+// window_output_extent's other precondition: the window has to fit the padded input, or the
+// subtraction underflows into an enormous extent. That surfaced three calls later as "element
+// count overflows usize at dimension 2 (extent 18446744073709551614)" from the allocation, naming
+// the symptom rather than the geometry mistake. The graph builders checked it; the layer factories
+// did not, so the standalone-layer API - a first-class one - got the worse message.
+auto _check_window_fits(usize input, usize window, usize padding, const char *axis, const char *context,
+                        const char *file, i32 line) -> Result<Void, Error>
+{
+    if (input + 2 * padding < window)
+    {
+        return error(Error::make(ErrorKind::Shape, file, line,
+                                 "%s: window %s %zu does not fit an input of %zu padded by %zu", context, axis, window,
+                                 input, padding));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_WINDOW_FITS(input, window, padding, axis)                                                           \
+    ::vika::_check_window_fits((input), (window), (padding), (axis), __func__, __FILE__, __LINE__)
+
+// The inverse formula's precondition: transposed_window_output_extent subtracts 2 * padding from
+// (input - 1) * stride + window, so padding beyond that underflows the same way. Its input must
+// also be non-empty, since (input - 1) underflows at zero.
+auto _check_transposed_window_fits(usize input, usize window, usize stride, usize padding, const char *axis,
+                                   const char *context, const char *file, i32 line) -> Result<Void, Error>
+{
+    if (input == 0)
+    {
+        return error(
+            Error::make(ErrorKind::Shape, file, line, "%s: input %s must be at least 1, got 0", context, axis));
+    }
+    if ((input - 1) * stride + window < 2 * padding)
+    {
+        return error(Error::make(ErrorKind::Shape, file, line,
+                                 "%s: padding %zu exceeds (input %s %zu - 1) * stride %zu + window %zu", context,
+                                 padding, axis, input, stride, window));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_TRANSPOSED_WINDOW_FITS(input, window, stride, padding, axis)                                        \
+    ::vika::_check_transposed_window_fits((input), (window), (stride), (padding), (axis), __func__, __FILE__, __LINE__)
+
 // Construction-time counterpart of VIKA_CHECK_INPUT_COUNT: make_layer reads pred_extents[0] for
 // every single-input spec, which on a node with no predecessors indexed off the end of an empty
 // vector - a segfault, not an error. A graph from the builders always has the right count, but
@@ -2939,6 +2982,8 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     }
 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_height, kH, padding, "height"));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_width, kW, padding, "width"));
 
     const usize out_H = window_output_extent(input_height, kH, stride, padding);
     const usize out_W = window_output_extent(input_width, kW, stride, padding);
@@ -3083,6 +3128,8 @@ auto ConvTranspose2DLayer::with_weights(usize batch_size, usize input_height, us
     }
 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(input_height, kH, stride, padding, "height"));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(input_width, kW, stride, padding, "width"));
 
     const usize out_H = transposed_window_output_extent(input_height, kH, stride, padding);
     const usize out_W = transposed_window_output_extent(input_width, kW, stride, padding);
@@ -3214,6 +3261,8 @@ auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize in
                                   usize pool_w, usize stride) -> Result<MaxPool2DLayer, Error>
 {
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_height, pool_h, 0, "height"));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_width, pool_w, 0, "width"));
 
     const usize out_H = window_output_extent(input_height, pool_h, stride, 0);
     const usize out_W = window_output_extent(input_width, pool_w, stride, 0);
@@ -3715,16 +3764,9 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
     const auto H = in_extents[1];
     const auto W = in_extents[2];
 
-    if (H + 2 * padding < kernel_height)
-    {
-        return error(VIKA_SHAPE_ERROR("conv2d: kernel height exceeds padded input height"));
-    }
-    if (W + 2 * padding < kernel_width)
-    {
-        return error(VIKA_SHAPE_ERROR("conv2d: kernel width exceeds padded input width"));
-    }
-
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(H, kernel_height, padding, "height"));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(W, kernel_width, padding, "width"));
 
     const auto out_H = window_output_extent(H, kernel_height, stride, padding);
     const auto out_W = window_output_extent(W, kernel_width, stride, padding);
@@ -3757,16 +3799,9 @@ auto ComputationGraph::conv_transpose2d(NodeId input, usize kernel_height, usize
     const auto H = in_extents[1];
     const auto W = in_extents[2];
 
-    if ((H - 1) * stride + kernel_height < 2 * padding)
-    {
-        return error(VIKA_SHAPE_ERROR("conv_transpose2d: padding exceeds (input - 1) * stride + kernel height"));
-    }
-    if ((W - 1) * stride + kernel_width < 2 * padding)
-    {
-        return error(VIKA_SHAPE_ERROR("conv_transpose2d: padding exceeds (input - 1) * stride + kernel width"));
-    }
-
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(H, kernel_height, stride, padding, "height"));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(W, kernel_width, stride, padding, "width"));
 
     const auto out_H = transposed_window_output_extent(H, kernel_height, stride, padding);
     const auto out_W = transposed_window_output_extent(W, kernel_width, stride, padding);
@@ -3798,16 +3833,9 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     const auto H = in_extents[1];
     const auto W = in_extents[2];
 
-    if (H < pool_height)
-    {
-        return error(VIKA_SHAPE_ERROR("maxpool2d: pool height exceeds input height"));
-    }
-    if (W < pool_width)
-    {
-        return error(VIKA_SHAPE_ERROR("maxpool2d: pool width exceeds input width"));
-    }
-
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(H, pool_height, 0, "height"));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(W, pool_width, 0, "width"));
 
     const auto out_H = window_output_extent(H, pool_height, stride, 0);
     const auto out_W = window_output_extent(W, pool_width, stride, 0);
