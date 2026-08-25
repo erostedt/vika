@@ -195,12 +195,18 @@ class FixedVector
         m_data[m_size++] = std::move(value);
     }
 
+    // Assignment, not placement new: m_data is a T[Capacity], so every slot is already a live,
+    // default-constructed T. Constructing over one without destroying it first is undefined for
+    // any T with a non-trivial destructor - it would leak whatever the slot already owned. The
+    // same reason pop_back() and clear() only move m_size: the objects stay alive, and are
+    // destroyed with the array. Harmless today, since Extents/Strides are the only instantiations
+    // and usize owns nothing, but this is a general-purpose container in Generic Utilities.
     template <typename... Args>
     auto emplace_back(Args &&...args) -> T &
     {
         check_not_full();
         T *slot = &m_data[m_size++];
-        new (slot) T(std::forward<Args>(args)...);
+        *slot = T(std::forward<Args>(args)...);
         return *slot;
     }
 
