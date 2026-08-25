@@ -1,3 +1,107 @@
+// vika - a single-header CUDA library for training small convolutional networks.
+//
+// ---------------------------------------------------------------------------------------------
+// Including it
+// ---------------------------------------------------------------------------------------------
+//
+// Exactly one translation unit defines VIKA_IMPLEMENTATION before the include; every other one
+// just includes it and gets declarations.
+//
+//     #define VIKA_IMPLEMENTATION
+//     #include "vika.cuh"
+//
+// Both are .cu files: the header defines __global__ kernels, so nvcc has to compile it.
+// Configuration, if the defaults do not fit: VIKA_MAX_RANK (6) caps a tensor's rank, and
+// VIKA_MAX_ERROR_MESSAGE (192) the length of an error string. Define either before the include.
+//
+// ---------------------------------------------------------------------------------------------
+// Training a model
+// ---------------------------------------------------------------------------------------------
+//
+//     ComputationGraph graph{batch_size};              // batch_size is a capacity, see below
+//     auto x = graph.input({2});                       // extents after the batch dimension
+//     x = graph.dense(x, 8).unwrap();
+//     x = graph.sigmoid(x).unwrap();
+//     x = graph.dense(x, 1).unwrap();
+//     x = graph.sigmoid(x).unwrap();
+//
+//     auto model = graph.compile(x).unwrap();          // x is the output node
+//     auto loss = MSELoss::with_extents({batch_size, 1}).unwrap();
+//     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
+//
+//     for (usize epoch = 0; epoch < epochs; ++epoch)
+//     {
+//         // inputs and targets are DeviceTensorConstViewf - see Tensors below
+//         const f32 value = train_step(model, loss, inputs, targets, optimizer).unwrap();
+//     }
+//
+// train_step is forward, loss, backward and optimizer step in one call. Run them separately and
+// the order matters, because each reads what the one before it wrote:
+//
+//     const auto predictions = model.forward(inputs).unwrap();
+//     const auto gradient = loss.backward(predictions, targets).wait().unwrap();
+//     model.backward(gradient).unwrap();
+//     model.step(optimizer).unwrap();
+//
+// Calling them out of order is reported, not undefined. The optimizer owns its own step count,
+// so nothing needs to thread a t through the loop.
+//
+// ---------------------------------------------------------------------------------------------
+// Layers on their own
+// ---------------------------------------------------------------------------------------------
+//
+// Every layer works without a graph, and validates its own inputs when used that way:
+//
+//     auto layer = DenseLayer::randomized(batch_size, 4, 3, seed).unwrap();
+//     const auto out = layer.forward({inputs}).wait().unwrap();
+//     const auto grad = layer.backward(upstream)[0].wait().unwrap();
+//
+// forward() takes a vector because a layer may have several inputs (Add, Concat); backward()
+// returns one gradient per input for the same reason. Both hand back a KernelJob, which is work
+// already queued on the layer's stream - wait() blocks until it is done and yields a Result.
+//
+// ---------------------------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------------------------
+//
+// Anything a caller can get wrong comes back as Result<T, Error>, never an exception and never a
+// crash: bad shapes, bad graphs, a stride of zero, calling the passes out of order, CUDA itself
+// failing. Result is [[nodiscard]], and unwrap() aborts on an error, so .unwrap() is a claim that
+// this one cannot fail. describe() renders an error with its originating file and line.
+//
+// Two things do abort, both deliberately. VIKA_PANIC covers invariants whose violation means the
+// library is broken rather than misused (unwrap() on an error, FixedVector bounds), and
+// VIKA_ASSERT the same but compiled out under NDEBUG.
+//
+// ---------------------------------------------------------------------------------------------
+// Tensors
+// ---------------------------------------------------------------------------------------------
+//
+// HostTensor<T> owns host memory, DeviceOwningTensor<T> owns device memory, and DeviceTensorView
+// borrows either - the views are what kernels take. All of them are move-only; copying host data
+// takes an explicit clone(), and upload()/download() move between the two sides.
+//
+//     const auto host = HostTensorf::from({1, 2, 3, 4}, {2, 2}).unwrap();
+//     const auto device = upload(host).unwrap();
+//     const auto back = download(device).unwrap();
+//
+// Rank lives in the extents at runtime, not in the type, and every layer checks the rank it
+// expects at its own boundary.
+//
+// ---------------------------------------------------------------------------------------------
+// Batch size is a capacity
+// ---------------------------------------------------------------------------------------------
+//
+// The batch_size a graph is compiled with sizes every buffer once, up front - a training step
+// never allocates. A forward pass may then use any batch up to that capacity, and the rest of the
+// pass follows it:
+//
+//     auto model = graph.compile(x).unwrap();                  // capacity 64
+//     model.forward(inputs.view().first_n(8).unwrap().const_view()).unwrap();   // runs 8
+//
+// first_n() slices the leading dimension without copying, since row-major storage makes those
+// rows a contiguous prefix. Exceeding the capacity is an error, not a reallocation.
+
 #pragma once
 
 #include <algorithm>
