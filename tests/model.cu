@@ -286,9 +286,9 @@ UTEST(model, branching_add_forward_and_backward)
 {
     using namespace vika;
 
-    // input -> denseA -\
+    // input -> denseA -.
     //                    add -> sigmoid -> output
-    // input -> denseB -/
+    // input -> denseB -'
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
@@ -334,9 +334,9 @@ UTEST(model, branching_concat_forward_and_backward)
 {
     using namespace vika;
 
-    // input -> denseA (-> 3) -\
+    // input -> denseA (-> 3) -.
     //                          concat -> sigmoid -> output (-> 5)
-    // input -> denseB (-> 2) -/
+    // input -> denseB (-> 2) -'
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
@@ -382,9 +382,9 @@ UTEST(model, fan_in_accumulation_across_multiple_backward_calls)
 {
     using namespace vika;
 
-    // input -> trunk -\
+    // input -> trunk -.
     //                   add -> sigmoid -> output
-    //          trunk -/
+    //          trunk -'
     //
     // trunk's output has two consumers (branch_a, branch_b), and trunk itself has its own
     // predecessor (input) - unlike the branching tests above, where the fan-out point is the

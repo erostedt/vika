@@ -151,7 +151,7 @@ UTEST(dense, layer_weight_gradients)
 
     EXPECT_EQ(d_weights_cpu.extent(0), 3u);
     EXPECT_EQ(d_weights_cpu.extent(1), 2u);
-    EXPECT_EQ(d_biases.element_count(), 2);
+    EXPECT_EQ(d_biases.element_count(), 2u);
     ASSERT_TRUE(are_close(d_weights_cpu, expected_d_weights, 1e-5f));
     ASSERT_TRUE(are_close(d_biases_cpu, expected_d_biases, 1e-5f));
 }

@@ -1409,6 +1409,21 @@ struct [[nodiscard]] KernelJob
     }
 };
 
+// The grid needed to cover x * y * z items with blocks of `block`. Counts are usize, because a
+// tensor's element count genuinely needs 64 bits - an 80 GB card holds 2e10 f32 elements - while
+// dim3 is unsigned int, because that is what CUDA's only constructor takes. This is the one place
+// in the library where those two meet, so it is the one place that narrows: a block count large
+// enough to overflow u32 would need ~1e12 elements (4 TB at f32), far past any tensor this library
+// could have allocated. Every launch site used to spell the ceiling division out by hand and
+// narrow implicitly at each one.
+inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
+{
+    const auto blocks = [](usize count, u32 block_size) -> u32 {
+        return (u32)((count + block_size - 1) / block_size);
+    };
+    return dim3(blocks(x, block.x), blocks(y, block.y), blocks(z, block.z));
+}
+
 // Launches `kernel` and immediately reads back cudaGetLastError(), since
 // cudaStreamSynchronize (what KernelJob::wait() checks) does not surface launch-configuration
 // failures such as cudaErrorInvalidConfiguration. On success the launch's `output` view rides
@@ -2042,7 +2057,7 @@ struct Model
     // the input node included (InputLayer::forward hands its input straight back as a ready job),
     // so after a successful forward() every slot holds a value. Empty means forward() has not run,
     // which is what forward_output() below reports.
-    std::vector<std::optional<KernelJob<DeviceTensorConstViewf>>> forward_jobs;
+    std::vector<std::optional<KernelJob<DeviceTensorConstViewf>>> forward_jobs{};
 
     // One slot per node, each accumulating zero or more incoming gradient jobs - one per
     // consumer that has run so far, in the order they ran. A node with a single consumer (the
@@ -2052,7 +2067,7 @@ struct Model
     // it's never been visited, or - just as validly - it has no consumer reachable from
     // output_node at all (a dead branch left over from a fan-out that was never merged back in);
     // backward() treats that as nothing to propagate, not an error.
-    std::vector<std::vector<KernelJob<DeviceTensorConstViewf>>> backward_jobs;
+    std::vector<std::vector<KernelJob<DeviceTensorConstViewf>>> backward_jobs{};
 
     // Gradient of the loss w.r.t. each node's output, indexed like forward_jobs/backward_jobs -
     // same quantity every node has, but only given real storage where it actually needs summing.
@@ -2128,7 +2143,7 @@ auto train_step(Model &model, Loss &loss_fn, DeviceTensorConstViewf inputs, Devi
 struct ComputationGraph
 {
     usize batch_size;
-    std::vector<Node> nodes;
+    std::vector<Node> nodes{};
     u32 seed = 0;
 
     auto input(Extents spatial_extents) -> NodeId;
@@ -2379,9 +2394,8 @@ __device__ inline auto uniform_f32(u32 seed) -> f32
 auto uniform_tensor(DeviceTensorViewf tensor, u32 seed, cudaStream_t stream) -> KernelJob<Void>
 {
     const usize n = tensor.element_count();
-    const usize threads = 256;
-    return launch_kernel(uniform_tensor_kernel, Void{}, dim3((n + threads - 1) / threads), dim3(threads), stream,
-                         tensor, seed);
+    const dim3 block(256);
+    return launch_kernel(uniform_tensor_kernel, Void{}, grid_covering(block, n), block, stream, tensor, seed);
 }
 
 auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out, cudaStream_t stream)
@@ -2389,9 +2403,8 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
 {
     const f32 limit = std::sqrt(6.0f / (f32)(fan_in + fan_out));
     const usize n = tensor.element_count();
-    const usize threads = 256;
-    return launch_kernel(xavier_tensor_kernel, Void{}, dim3((n + threads - 1) / threads), dim3(threads), stream, tensor,
-                         seed, limit);
+    const dim3 block(256);
+    return launch_kernel(xavier_tensor_kernel, Void{}, grid_covering(block, n), block, stream, tensor, seed, limit);
 }
 
 // Adam bias-correction scales. These depend only on the step count, so computing them
@@ -2426,15 +2439,15 @@ auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamS
     }
 
     const auto [m_hat_scale, v_hat_scale] = adam_bias_correction(params, t);
-    const usize threads = 256;
+    const dim3 block(256);
 
     std::vector<KernelJob<Void>> jobs;
     jobs.reserve(parameters.size());
     for (usize i = 0; i < parameters.size(); ++i)
     {
         const auto count = parameters[i].value.element_count();
-        jobs.push_back(launch_kernel(adam_update, Void{}, dim3((count + threads - 1) / threads), dim3(threads), stream,
-                                     params, m_hat_scale, v_hat_scale, parameters[i].grad, parameters[i].value,
+        jobs.push_back(launch_kernel(adam_update, Void{}, grid_covering(block, count), block, stream, params,
+                                     m_hat_scale, v_hat_scale, parameters[i].grad, parameters[i].value,
                                      states[i].m.view(), states[i].v.view()));
     }
     return jobs;
@@ -2507,10 +2520,10 @@ auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> K
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
     auto sliced_outputs_const = sliced_outputs.const_view();
 
-    const u32 M = (u32)k;
-    const u32 N = outputs.extent(1);
-    dim3 block(16, 16);
-    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    const usize M = k;
+    const usize N = outputs.extent(1);
+    const dim3 block(16, 16);
+    const dim3 grid = grid_covering(block, N, M);
     auto matmul_job = launch_kernel(matmul_kernel, sliced_outputs_const, grid, block, stream.handle(), input,
                                     weights.value.const_view(), sliced_outputs);
     if (matmul_job.is_error())
@@ -2530,10 +2543,10 @@ auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     const usize k = upstream_gradient.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const u32 M = (u32)k;
-    const u32 N = d_inputs.extent(1);
-    dim3 block(16, 16);
-    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    const usize M = k;
+    const usize N = d_inputs.extent(1);
+    const dim3 block(16, 16);
+    const dim3 grid = grid_covering(block, N, M);
     return {launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream_gradient,
                           transposed(weights.value.const_view()), sliced_d_inputs)};
 }
@@ -2552,10 +2565,10 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
     // matmul below actually writes - not d_inputs' (batch_capacity x feature_count). Sizing from
     // the wrong tensor silently under-covers weights.grad whenever feature_count or neuron_count
     // exceeds batch_capacity, leaving stale data in the uncovered elements.
-    const u32 M = weights.grad.extent(0);
-    const u32 N = weights.grad.extent(1);
-    dim3 block(16, 16);
-    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    const usize M = weights.grad.extent(0);
+    const usize N = weights.grad.extent(1);
+    const dim3 block(16, 16);
+    const dim3 grid = grid_covering(block, N, M);
     const auto gradients = std::make_tuple(weights.grad.const_view(), biases.grad.const_view());
 
     // NOTE: Run in separate streams?
@@ -2566,9 +2579,9 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
         return matmul_job;
     }
 
-    const auto block_dim = dim3(256);
-    const auto grid_dim = dim3((upstream_gradient.extents[1] + block_dim.x - 1) / block_dim.x);
-    return launch_kernel(sum_rows, gradients, grid_dim, block_dim, stream.handle(), transposed(upstream_gradient),
+    const dim3 row_block(256);
+    const auto row_grid = grid_covering(row_block, upstream_gradient.extents[1]);
+    return launch_kernel(sum_rows, gradients, row_grid, row_block, stream.handle(), transposed(upstream_gradient),
                          biases.grad.view());
 }
 
@@ -2611,11 +2624,10 @@ auto SigmoidLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
     const usize k = input_extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    usize threads = 256;
-    usize blocks = (input.element_count() + threads - 1) / threads;
-
-    return launch_kernel(sigmoid_forward, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                         input, sliced_outputs);
+    const dim3 block(256);
+    const auto grid = grid_covering(block, input.element_count());
+    return launch_kernel(sigmoid_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
+                         sliced_outputs);
 }
 
 auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
@@ -2635,10 +2647,9 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     const usize k = upstream_extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    usize threads = 256;
-    usize blocks = (upstream_gradient.element_count() + threads - 1) / threads;
-
-    return {launch_kernel(sigmoid_backward, sliced_d_inputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+    const dim3 block(256);
+    const auto grid = grid_covering(block, upstream_gradient.element_count());
+    return {launch_kernel(sigmoid_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
                           outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
 }
 
@@ -2666,11 +2677,10 @@ auto SoftmaxLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
     // One thread per row, not per element - see softmax_forward's own doc comment for why.
     const usize width = input.extents.back();
     const usize row_count = input.element_count() / width;
-    const usize threads = 256;
-    const usize blocks = (row_count + threads - 1) / threads;
-
-    return launch_kernel(softmax_forward, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                         input, sliced_outputs);
+    const dim3 block(256);
+    const auto grid = grid_covering(block, row_count);
+    return launch_kernel(softmax_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
+                         sliced_outputs);
 }
 
 auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
@@ -2692,10 +2702,9 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
 
     const usize width = upstream_gradient.extents.back();
     const usize row_count = upstream_gradient.element_count() / width;
-    const usize threads = 256;
-    const usize blocks = (row_count + threads - 1) / threads;
-
-    return {launch_kernel(softmax_backward, sliced_d_inputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
+    const dim3 block(256);
+    const auto grid = grid_covering(block, row_count);
+    return {launch_kernel(softmax_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
                           outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
 }
 
@@ -2824,8 +2833,8 @@ auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     const usize W_out = outputs.extent(2);
     const usize C_out = outputs.extent(3);
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C_out);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_out, H_out, k * C_out);
 
     return launch_kernel(conv_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
@@ -2842,8 +2851,8 @@ auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
     const usize W_in = d_inputs.extent(2);
     const usize C_in = d_inputs.extent(3);
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C_in);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_in, H_in, k * C_in);
 
     return {launch_kernel(conv_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           filters.value.const_view(), sliced_d_inputs, stride, padding)};
@@ -2862,19 +2871,19 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
 
     const usize filter_count = filters.grad.element_count();
     const usize C_out = biases.grad.element_count();
-    const usize threads = 256;
+    const dim3 block(256);
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
     auto weight_job =
-        launch_kernel(conv_weight_gradients, gradients, dim3((filter_count + threads - 1) / threads), dim3(threads),
-                      stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
+        launch_kernel(conv_weight_gradients, gradients, grid_covering(block, filter_count), block, stream.handle(),
+                      inputs, upstream, filters.grad.view(), stride, padding);
     if (weight_job.is_error())
     {
         return weight_job;
     }
-    return launch_kernel(conv_bias_gradients, gradients, dim3((C_out + threads - 1) / threads), dim3(threads),
-                         stream.handle(), upstream, biases.grad.view());
+    return launch_kernel(conv_bias_gradients, gradients, grid_covering(block, C_out), block, stream.handle(), upstream,
+                         biases.grad.view());
 }
 
 auto Conv2DLayer::parameters() -> std::vector<ParameterView>
@@ -2977,8 +2986,8 @@ auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &in
     const usize W_out = outputs.extent(2);
     const usize C_out = outputs.extent(3);
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C_out);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_out, H_out, k * C_out);
 
     return launch_kernel(conv_transpose_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
@@ -2997,8 +3006,8 @@ auto ConvTranspose2DLayer::backward(const DeviceTensorConstViewf &upstream)
     const usize W_in = d_inputs.extent(2);
     const usize C_in = d_inputs.extent(3);
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C_in);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_in, H_in, k * C_in);
 
     return {launch_kernel(conv_transpose_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           filters.value.const_view(), sliced_d_inputs, stride, padding)};
@@ -3017,21 +3026,21 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
 
     const usize filter_count = filters.grad.element_count();
     const usize C_out = biases.grad.element_count();
-    const usize threads = 256;
+    const dim3 block(256);
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
     auto weight_job =
-        launch_kernel(conv_transpose_weight_gradients, gradients, dim3((filter_count + threads - 1) / threads),
-                      dim3(threads), stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
+        launch_kernel(conv_transpose_weight_gradients, gradients, grid_covering(block, filter_count), block,
+                      stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
     if (weight_job.is_error())
     {
         return weight_job;
     }
     // Identical in shape to Conv2D's own bias gradient - see conv_transpose_forward's doc comment
     // for why conv_bias_gradients is reused here unchanged rather than getting its own variant.
-    return launch_kernel(conv_bias_gradients, gradients, dim3((C_out + threads - 1) / threads), dim3(threads),
-                         stream.handle(), upstream, biases.grad.view());
+    return launch_kernel(conv_bias_gradients, gradients, grid_covering(block, C_out), block, stream.handle(), upstream,
+                         biases.grad.view());
 }
 
 auto ConvTranspose2DLayer::parameters() -> std::vector<ParameterView>
@@ -3090,8 +3099,8 @@ auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
     const usize W_out = outputs.extent(2);
     const usize C = outputs.extent(3);
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_out, H_out, k * C);
 
     return launch_kernel(maxpool_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs, sliced_argmax, pool_h, pool_w, stride);
@@ -3110,8 +3119,8 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
 
     VIKA_UNWRAP_OR_RETURN(zero(d_inputs.view(), stream.handle()));
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_out, H_out, k * C);
 
     return {launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           VIKA_UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs)};
@@ -3153,8 +3162,8 @@ auto Upsample2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs)
     const usize W_out = outputs.extent(2);
     const usize C = outputs.extent(3);
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_out + block.x - 1) / block.x, (H_out + block.y - 1) / block.y, k * C);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_out, H_out, k * C);
 
     return launch_kernel(upsample2d_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs, scale);
@@ -3172,8 +3181,8 @@ auto Upsample2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::v
     const usize W_in = d_inputs.extent(2);
     const usize C = d_inputs.extent(3);
 
-    dim3 block(16, 16, 1);
-    dim3 grid((W_in + block.x - 1) / block.x, (H_in + block.y - 1) / block.y, k * C);
+    const dim3 block(16, 16, 1);
+    const dim3 grid = grid_covering(block, W_in, H_in, k * C);
 
     // No zero() first, unlike MaxPool2DLayer::backward - see upsample2d_backward's own doc comment
     // for why: every d_inputs slot is written exactly once, so there is nothing left over to clear.
@@ -3218,8 +3227,8 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
     // elementwise add.
     VIKA_UNWRAP_OR_RETURN(copy(inputs[0], sliced_outputs, stream.handle()));
 
-    const usize threads = 256;
-    const usize blocks = (inputs[0].element_count() + threads - 1) / threads;
+    const dim3 block(256);
+    const auto grid = grid_covering(block, inputs[0].element_count());
     for (usize i = 1; i < inputs.size() - 1; ++i)
     {
         // Checked, not waited: every launch here shares one stream, which already serializes
@@ -3229,15 +3238,15 @@ auto AddLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> Ker
         // consumed immediately and won't reappear on a later wait(). A runtime failure inside the
         // kernel itself, if any, still surfaces correctly on whichever job the caller eventually
         // waits on, since cudaStreamSynchronize reports the stream's accumulated status.
-        auto job = launch_kernel(accumulate_into, sliced_outputs.const_view(), dim3(blocks), dim3(threads),
-                                 stream.handle(), inputs[i], sliced_outputs);
+        auto job = launch_kernel(accumulate_into, sliced_outputs.const_view(), grid, block, stream.handle(), inputs[i],
+                                 sliced_outputs);
         if (job.is_error())
         {
             return job;
         }
     }
-    return launch_kernel(accumulate_into, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                         inputs.back(), sliced_outputs);
+    return launch_kernel(accumulate_into, sliced_outputs.const_view(), grid, block, stream.handle(), inputs.back(),
+                         sliced_outputs);
 }
 
 auto AddLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
@@ -3286,16 +3295,16 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     const usize k = inputs[0].extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    const usize threads = 256;
+    const dim3 block(256);
     usize col_offset = 0;
     for (usize i = 0; i < inputs.size() - 1; ++i)
     {
         // Checked, not waited - see the identical comment in AddLayer::forward for why this is
         // safe: same stream already serializes these launches, and a runtime failure (as opposed
         // to a bad launch config) still surfaces on whichever job the caller eventually waits on.
-        const usize blocks = (inputs[i].element_count() + threads - 1) / threads;
-        auto job = launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                                 inputs[i], sliced_outputs, col_offset);
+        const auto grid = grid_covering(block, inputs[i].element_count());
+        auto job = launch_kernel(concat_copy, sliced_outputs.const_view(), grid, block, stream.handle(), inputs[i],
+                                 sliced_outputs, col_offset);
         if (job.is_error())
         {
             return job;
@@ -3304,9 +3313,9 @@ auto ConcatLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     }
 
     const auto &last_input = inputs.back();
-    const usize blocks = (last_input.element_count() + threads - 1) / threads;
-    return launch_kernel(concat_copy, sliced_outputs.const_view(), dim3(blocks), dim3(threads), stream.handle(),
-                         last_input, sliced_outputs, col_offset);
+    const auto grid = grid_covering(block, last_input.element_count());
+    return launch_kernel(concat_copy, sliced_outputs.const_view(), grid, block, stream.handle(), last_input,
+                         sliced_outputs, col_offset);
 }
 
 auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>
@@ -3319,7 +3328,7 @@ auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
     }
 
     const usize k = upstream.extents[0];
-    const usize threads = 256;
+    const dim3 block(256);
     std::vector<KernelJob<DeviceTensorConstViewf>> jobs;
     jobs.reserve(d_inputs.size());
 
@@ -3337,9 +3346,9 @@ auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
         }
         auto sliced_d_input = sliced_result.unwrap();
 
-        const usize blocks = (sliced_d_input.element_count() + threads - 1) / threads;
-        jobs.push_back(launch_kernel(concat_split, sliced_d_input.const_view(), dim3(blocks), dim3(threads),
-                                     stream.handle(), upstream, col_offset, sliced_d_input));
+        const auto grid = grid_covering(block, sliced_d_input.element_count());
+        jobs.push_back(launch_kernel(concat_split, sliced_d_input.const_view(), grid, block, stream.handle(), upstream,
+                                     col_offset, sliced_d_input));
 
         col_offset += sliced_d_input.extents.back();
     }
@@ -3366,9 +3375,9 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
     VIKA_UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
 
     const usize n = predictions.element_count();
-    const usize threads = 256;
-    return launch_kernel(mse_kernel, loss.const_view(), dim3((n + threads - 1) / threads), dim3(threads),
-                         stream.handle(), predictions, targets, loss.view());
+    const dim3 block(256);
+    return launch_kernel(mse_kernel, loss.const_view(), grid_covering(block, n), block, stream.handle(), predictions,
+                         targets, loss.view());
 }
 
 auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
@@ -3383,9 +3392,9 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize n = predictions.element_count();
-    const usize threads = 256;
-    return launch_kernel(mse_gradient_kernel, sliced_d_inputs.const_view(), dim3((n + threads - 1) / threads),
-                         dim3(threads), stream.handle(), predictions, targets, sliced_d_inputs);
+    const dim3 block(256);
+    return launch_kernel(mse_gradient_kernel, sliced_d_inputs.const_view(), grid_covering(block, n), block,
+                         stream.handle(), predictions, targets, sliced_d_inputs);
 }
 
 auto CCELoss::with_extents(const Extents &extents) -> Result<CCELoss, Error>
@@ -3408,9 +3417,9 @@ auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
     VIKA_UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
 
     const usize n = predictions.element_count();
-    const usize threads = 256;
-    return launch_kernel(cce_kernel, loss.const_view(), dim3((n + threads - 1) / threads), dim3(threads),
-                         stream.handle(), predictions, targets, loss.view());
+    const dim3 block(256);
+    return launch_kernel(cce_kernel, loss.const_view(), grid_covering(block, n), block, stream.handle(), predictions,
+                         targets, loss.view());
 }
 
 auto CCELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
@@ -3425,9 +3434,9 @@ auto CCELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize n = predictions.element_count();
-    const usize threads = 256;
-    return launch_kernel(cce_gradient_kernel, sliced_d_inputs.const_view(), dim3((n + threads - 1) / threads),
-                         dim3(threads), stream.handle(), predictions, targets, sliced_d_inputs);
+    const dim3 block(256);
+    return launch_kernel(cce_gradient_kernel, sliced_d_inputs.const_view(), grid_covering(block, n), block,
+                         stream.handle(), predictions, targets, sliced_d_inputs);
 }
 
 // =============================================================================
@@ -4003,14 +4012,13 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
 
     VIKA_UNWRAP_OR_RETURN(copy(first, sliced_accum, stream.handle()));
 
-    const usize threads = 256;
-    const usize blocks = (first.element_count() + threads - 1) / threads;
+    const dim3 block(256);
     for (usize i = 1; i < jobs.size(); ++i)
     {
         const auto contribution = VIKA_UNWRAP_OR_RETURN(jobs[i].wait());
-        VIKA_UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_accum.const_view(), dim3(blocks), dim3(threads),
-                                       stream.handle(), contribution, sliced_accum)
-                             .wait());
+        const auto grid = grid_covering(block, first.element_count());
+        VIKA_UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_accum.const_view(), grid, block, stream.handle(),
+                                            contribution, sliced_accum) .wait());
     }
 
     return ok(sliced_accum.const_view());
