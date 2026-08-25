@@ -3908,23 +3908,28 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             }
             else if constexpr (std::is_same_v<T, DenseSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return DenseLayer::randomized(batch_size, pred_extents[0].at(1), s.output_features, s.seed)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, SigmoidSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return SigmoidLayer::with_extents(pred_extents[0]).map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, SoftmaxSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return SoftmaxLayer::with_extents(pred_extents[0]).map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, FlattenSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return ok(Layer::trainable(LayerKind{Flatten2DLayer::with_extents(pred_extents[0])}));
             }
             else if constexpr (std::is_same_v<T, Conv2DSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return Conv2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                s.kernel_height, s.kernel_width, pred_extents[0].at(3), s.channels_out,
                                                s.stride, s.padding, s.seed)
@@ -3932,6 +3937,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             }
             else if constexpr (std::is_same_v<T, ConvTranspose2DSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return ConvTranspose2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                         s.kernel_height, s.kernel_width, pred_extents[0].at(3),
                                                         s.channels_out, s.stride, s.padding, s.seed)
@@ -3939,18 +3945,21 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             }
             else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return MaxPool2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                     pred_extents[0].at(3), s.pool_height, s.pool_width, s.stride)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, Upsample2DSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 return Upsample2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                      pred_extents[0].at(3), s.scale)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, AddSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 2));
                 return AddLayer::with_extents(pred_extents[0], pred_extents.size()).map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, ConcatSpec>)

@@ -99,6 +99,28 @@ UTEST(model, compile_multiple_input_nodes)
     EXPECT_TRUE(result.is_error());
 }
 
+// make_layer reads pred_extents[0] for every single-input spec, so a node with no predecessors
+// indexed off the end of an empty vector - a segfault rather than an error. The builders always
+// produce the right count, but nodes is public and a graph assembled by hand or loaded from disk
+// need not have been through them.
+UTEST(model, compile_rejects_a_node_with_no_predecessors)
+{
+    using namespace vika;
+
+    constexpr usize batch_size = 2;
+
+    ComputationGraph graph{batch_size};
+    graph.nodes.push_back(Node{InputSpec{}, Extents{batch_size, 4}, {}});
+    graph.nodes.push_back(Node{DenseSpec{3, 42}, Extents{batch_size, 3}, {}});   // no inputs
+    EXPECT_TRUE(graph.compile(NodeId{1}).is_error());
+
+    // The same graph, wired up, still compiles.
+    ComputationGraph wired{batch_size};
+    wired.nodes.push_back(Node{InputSpec{}, Extents{batch_size, 4}, {}});
+    wired.nodes.push_back(Node{DenseSpec{3, 42}, Extents{batch_size, 3}, {NodeId{0}}});
+    EXPECT_TRUE(wired.compile(NodeId{1}).is_ok());
+}
+
 // compile() fills layers/layer_inputs by NodeId, not by position in the topological order, so a
 // node vector that isn't already topologically ordered still wires up correctly. The builders
 // cannot produce one (they reject a NodeId that does not exist yet, so edges only ever run from
