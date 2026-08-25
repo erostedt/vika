@@ -3950,6 +3950,43 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         return error(VIKA_GRAPH_ERROR("compile: graph must have exactly one input node"));
     }
 
+    for (usize i = 0; i < nodes.size(); ++i)
+    {
+        for (const auto &pred : nodes[i].inputs)
+        {
+            if (pred.value >= nodes.size())
+            {
+                // The builders reject an unknown NodeId, but nodes is public and a hand-assembled
+                // or loaded graph need not have been through them - and the walk below would
+                // index straight off the end.
+                return error(VIKA_GRAPH_ERROR("compile: node %zu names predecessor %zu, which does not exist", i,
+                                              pred.value));
+            }
+        }
+    }
+
+    // The nodes `output` actually depends on. A graph can hold branches nothing merges back -
+    // graph.dense(x, ...) twice on the same x, with only one of them compiled as the output - and
+    // those used to be built anyway, allocating their weights and workspace, then run on every
+    // forward pass for a result nothing reads. Slots outside this set are left default
+    // constructed and never appear in execution_order, so nothing touches them.
+    std::vector<bool> reachable(nodes.size(), false);
+    std::vector<usize> pending{output.value};
+    reachable[output.value] = true;
+    while (!pending.empty())
+    {
+        const auto idx = pending.back();
+        pending.pop_back();
+        for (const auto &pred : nodes[idx].inputs)
+        {
+            if (!reachable[pred.value])
+            {
+                reachable[pred.value] = true;
+                pending.push_back(pred.value);
+            }
+        }
+    }
+
     AdjecencyGraph<usize> adj{};
     for (usize i = 0; i < nodes.size(); ++i)
     {
@@ -3991,6 +4028,11 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
 
     for (const auto idx : topo_order)
     {
+        if (!reachable[idx])
+        {
+            continue;
+        }
+
         const auto &node = nodes[idx];
         layer_inputs_result[idx] = node.inputs;
 
@@ -4005,7 +4047,15 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
         layers[idx] = std::move(layer_result.unwrap());
     }
 
-    auto execution_order = map(topo_order, [](usize idx) { return NodeId{idx}; });
+    std::vector<NodeId> execution_order;
+    execution_order.reserve(topo_order.size());
+    for (const auto idx : topo_order)
+    {
+        if (reachable[idx])
+        {
+            execution_order.push_back(NodeId{idx});
+        }
+    }
 
     // Pre-allocated here, once, for every node with more than one consumer (adj[idx] - built
     // above for the topological sort - is already exactly "who consumes idx", so this is free
@@ -4015,7 +4065,19 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
     std::vector<std::optional<DeviceOwningTensorf>> d_outputs(nodes.size());
     for (usize idx = 0; idx < nodes.size(); ++idx)
     {
-        if (adj[idx].size() > 1)
+        if (!reachable[idx])
+        {
+            continue;
+        }
+
+        // Reachable consumers only: a consumer the output does not depend on never runs, so it
+        // never contributes a gradient, so it does not make this node a fan-out.
+        usize live_consumers = 0;
+        for (const auto consumer : adj[idx])
+        {
+            live_consumers += reachable[consumer] ? 1u : 0u;
+        }
+        if (live_consumers > 1)
         {
             d_outputs[idx] = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(nodes[idx].output_extents));
         }
