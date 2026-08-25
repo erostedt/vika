@@ -1409,6 +1409,24 @@ struct [[nodiscard]] KernelJob
     }
 };
 
+// A thread's global index along one grid dimension. The multiply is done in usize on purpose:
+// blockIdx and blockDim are both unsigned int, so `blockIdx.x * blockDim.x` computes in 32 bits
+// and wraps before any widening on the receiving end can help. A grid.x large enough to wrap
+// needs 4.29e9 threads - 17 GB of f32 - so it is unreachable on a 12 GB card but ordinary on an
+// A100 or H100, where the result would be a thread silently processing the wrong element rather
+// than reading out of bounds: the wrapped index still passes an element_count() check. grid.y and
+// grid.z are capped at 65535 blocks and so cannot wrap, but they use the same helpers rather than
+// leave an idiom with an exception in it.
+__device__ inline auto global_thread_x() -> usize
+{
+    return (usize)blockIdx.x * blockDim.x + threadIdx.x;
+}
+
+__device__ inline auto global_thread_y() -> usize
+{
+    return (usize)blockIdx.y * blockDim.y + threadIdx.y;
+}
+
 // The grid needed to cover x * y * z items with blocks of `block`. Counts are usize, because a
 // tensor's element count genuinely needs 64 bits - an 80 GB card holds 2e10 f32 elements - while
 // dim3 is unsigned int, because that is what CUDA's only constructor takes. This is the one place
@@ -4218,7 +4236,7 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
 
 __global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= tensor.element_count())
     {
         return;
@@ -4228,7 +4246,7 @@ __global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> voi
 
 __global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 limit) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= tensor.element_count())
     {
         return;
@@ -4239,7 +4257,7 @@ __global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 lim
 __global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
     -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= predictions.element_count())
     {
         return;
@@ -4251,7 +4269,7 @@ __global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConst
 __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= predictions.element_count())
     {
         return;
@@ -4262,7 +4280,7 @@ __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
 __global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
     -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= predictions.element_count())
     {
         return;
@@ -4276,7 +4294,7 @@ __global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConst
 __global__ auto cce_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= predictions.element_count())
     {
         return;
@@ -4289,7 +4307,7 @@ __global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f3
                             DeviceTensorConstViewf d_weights, DeviceTensorViewf weights, DeviceTensorViewf m_weights,
                             DeviceTensorViewf v_weights) -> void
 {
-    usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    usize i = global_thread_x();
     if (i >= weights.element_count())
     {
         return;
@@ -4318,7 +4336,7 @@ __global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f3
 
 __global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i < a.element_count())
     {
         out[i] = sigmoid(a[i]);
@@ -4328,7 +4346,7 @@ __global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out)
 __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream_gradient,
                                  DeviceTensorViewf out) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i < a.element_count())
     {
 
@@ -4341,7 +4359,7 @@ __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf 
     const usize width = input.extents.back();
     const usize row_count = input.element_count() / width;
 
-    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize row = global_thread_x();
     if (row >= row_count)
     {
         return;
@@ -4379,7 +4397,7 @@ __global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorCon
     const usize width = outputs.extents.back();
     const usize row_count = outputs.element_count() / width;
 
-    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize row = global_thread_x();
     if (row >= row_count)
     {
         return;
@@ -4399,7 +4417,7 @@ __global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorCon
 
 __global__ auto accumulate_into(DeviceTensorConstViewf delta, DeviceTensorViewf accum) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i < accum.element_count())
     {
         accum[i] += delta[i];
@@ -4408,7 +4426,7 @@ __global__ auto accumulate_into(DeviceTensorConstViewf delta, DeviceTensorViewf 
 
 __global__ auto concat_copy(DeviceTensorConstViewf src, DeviceTensorViewf dst, usize dst_col_offset) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= src.element_count())
     {
         return;
@@ -4422,7 +4440,7 @@ __global__ auto concat_copy(DeviceTensorConstViewf src, DeviceTensorViewf dst, u
 
 __global__ auto concat_split(DeviceTensorConstViewf src, usize src_col_offset, DeviceTensorViewf dst) -> void
 {
-    const usize i = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize i = global_thread_x();
     if (i >= dst.element_count())
     {
         return;
@@ -4437,7 +4455,7 @@ __global__ auto concat_split(DeviceTensorConstViewf src, usize src_col_offset, D
 __global__ auto sum_rows(DeviceTensorConstViewf matrix, DeviceTensorViewf out) -> void
 {
     // NOTE: Reduce in blocks?
-    const usize row = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize row = global_thread_x();
     const usize row_count = matrix.extents[0];
 
     if (row >= row_count)
@@ -4456,8 +4474,8 @@ __global__ auto sum_rows(DeviceTensorConstViewf matrix, DeviceTensorViewf out) -
 
 __global__ auto add_bias(DeviceTensorConstViewf biases, DeviceTensorViewf out) -> void
 {
-    const usize sample_index = blockIdx.y * blockDim.y + threadIdx.y;
-    const usize col = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize sample_index = global_thread_y();
+    const usize col = global_thread_x();
 
     const usize sample_count = out.extents[0];
     const usize bias_count = biases.extents[0];
@@ -4473,8 +4491,8 @@ __global__ auto add_bias(DeviceTensorConstViewf biases, DeviceTensorViewf out) -
 __global__ auto matmul_kernel(DeviceTensorConstViewf a, DeviceTensorConstViewf b, DeviceTensorViewf out) -> void
 {
     // NOTE: Multiply in tiles?
-    const usize row = blockIdx.y * blockDim.y + threadIdx.y;
-    const usize col = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize row = global_thread_y();
+    const usize col = global_thread_x();
 
     const usize m = a.extents[0];
     const usize k = a.extents[1];
@@ -4497,8 +4515,8 @@ __global__ auto matmul_kernel(DeviceTensorConstViewf a, DeviceTensorConstViewf b
 __global__ auto conv_forward(DeviceTensorConstViewf inputs, DeviceTensorConstViewf filters,
                              DeviceTensorConstViewf biases, DeviceTensorViewf out, usize stride, usize padding) -> void
 {
-    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize ow = global_thread_x();
+    const usize oh = global_thread_y();
     const usize oc = blockIdx.z % out.extents[3];
     const usize n = blockIdx.z / out.extents[3];
 
@@ -4539,8 +4557,8 @@ __global__ auto conv_forward(DeviceTensorConstViewf inputs, DeviceTensorConstVie
 __global__ auto conv_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewf filters,
                               DeviceTensorViewf d_inputs, usize stride, usize padding) -> void
 {
-    const usize w = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize h = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize w = global_thread_x();
+    const usize h = global_thread_y();
     const usize ic = blockIdx.z % d_inputs.extents[3];
     const usize n = blockIdx.z / d_inputs.extents[3];
 
@@ -4591,7 +4609,7 @@ __global__ auto conv_backward(DeviceTensorConstViewf upstream, DeviceTensorConst
 __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTensorConstViewf upstream,
                                       DeviceTensorViewf d_filters, usize stride, usize padding) -> void
 {
-    const usize idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize idx = global_thread_x();
     if (idx >= d_filters.element_count())
     {
         return;
@@ -4640,7 +4658,7 @@ __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTenso
 
 __global__ auto conv_bias_gradients(DeviceTensorConstViewf upstream, DeviceTensorViewf d_biases) -> void
 {
-    const usize oc = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize oc = global_thread_x();
     if (oc >= d_biases.extents[0])
     {
         return;
@@ -4668,8 +4686,8 @@ __global__ auto conv_transpose_forward(DeviceTensorConstViewf inputs, DeviceTens
                                        DeviceTensorConstViewf biases, DeviceTensorViewf out, usize stride,
                                        usize padding) -> void
 {
-    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize ow = global_thread_x();
+    const usize oh = global_thread_y();
     const usize oc = blockIdx.z % out.extents[3];
     const usize n = blockIdx.z / out.extents[3];
 
@@ -4721,8 +4739,8 @@ __global__ auto conv_transpose_forward(DeviceTensorConstViewf inputs, DeviceTens
 __global__ auto conv_transpose_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewf filters,
                                         DeviceTensorViewf d_inputs, usize stride, usize padding) -> void
 {
-    const usize iw = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize ih = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize iw = global_thread_x();
+    const usize ih = global_thread_y();
     const usize ic = blockIdx.z % d_inputs.extents[3];
     const usize n = blockIdx.z / d_inputs.extents[3];
 
@@ -4765,7 +4783,7 @@ __global__ auto conv_transpose_backward(DeviceTensorConstViewf upstream, DeviceT
 __global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, DeviceTensorConstViewf upstream,
                                                 DeviceTensorViewf d_filters, usize stride, usize padding) -> void
 {
-    const usize idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const usize idx = global_thread_x();
     if (idx >= d_filters.element_count())
     {
         return;
@@ -4834,8 +4852,8 @@ __global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, D
 __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, DeviceTensorViewu argmax,
                                 usize pool_h, usize pool_w, usize stride) -> void
 {
-    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize ow = global_thread_x();
+    const usize oh = global_thread_y();
     const usize c = blockIdx.z % out.extents[3];
     const usize n = blockIdx.z / out.extents[3];
 
@@ -4879,8 +4897,8 @@ __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf
 __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewu argmax,
                                  DeviceTensorViewf d_inputs) -> void
 {
-    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize ow = global_thread_x();
+    const usize oh = global_thread_y();
     const usize c = blockIdx.z % upstream.extents[3];
     const usize n = blockIdx.z / upstream.extents[3];
 
@@ -4899,8 +4917,8 @@ __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorCo
 
 __global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, usize scale) -> void
 {
-    const usize ow = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize oh = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize ow = global_thread_x();
+    const usize oh = global_thread_y();
     const usize c = blockIdx.z % out.extents[3];
     const usize n = blockIdx.z / out.extents[3];
 
@@ -4914,8 +4932,8 @@ __global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorVi
 
 __global__ auto upsample2d_backward(DeviceTensorConstViewf upstream, DeviceTensorViewf d_inputs, usize scale) -> void
 {
-    const usize iw = blockIdx.x * blockDim.x + threadIdx.x;
-    const usize ih = blockIdx.y * blockDim.y + threadIdx.y;
+    const usize iw = global_thread_x();
+    const usize ih = global_thread_y();
     const usize c = blockIdx.z % d_inputs.extents[3];
     const usize n = blockIdx.z / d_inputs.extents[3];
 
