@@ -28,3 +28,4 @@ set(BUILD_PATH ${CMAKE_CURRENT_SOURCE_DIR}/build)
 
 add_subdirectory(tests)
 add_subdirectory(examples)
+add_subdirectory(benchmarks)
