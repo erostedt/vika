@@ -3848,6 +3848,12 @@ auto ComputationGraph::add(std::vector<NodeId> inputs) -> Result<NodeId, Error>
 
 auto ComputationGraph::concat(std::vector<NodeId> inputs) -> Result<NodeId, Error>
 {
+    // Ahead of concat_output_extents' own arity check, which would otherwise report a graph
+    // mistake - the wrong number of nodes named here - as a shape error, unlike add() beside it.
+    if (inputs.size() < 2)
+    {
+        return error(VIKA_GRAPH_ERROR("concat: expects at least 2 inputs, got %zu", inputs.size()));
+    }
     if (!all_of(inputs, [&](const NodeId &n) { return n.value < nodes.size(); }))
     {
         return error(VIKA_GRAPH_ERROR("concat: invalid NodeId"));
@@ -3937,6 +3943,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             }
             else if constexpr (std::is_same_v<T, ConcatSpec>)
             {
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 2));
                 return ConcatLayer::with_extents(pred_extents).map(as_trainable);
             }
             else
