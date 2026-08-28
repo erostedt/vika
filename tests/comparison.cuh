@@ -22,7 +22,9 @@ inline auto are_close(const vika::HostTensor<T> &actual, const vika::HostTensor<
     }
     for (vika::usize i = 0; i < actual.size(); ++i)
     {
-        if (std::abs(actual[i] - expected[i]) > tol)
+        // Negated rather than written as `> tol`: every comparison against a NaN is false, so the
+        // direct form lets a NaN fall through to `return true` and pass. This way it fails.
+        if (!(std::abs(actual[i] - expected[i]) <= tol))
         {
             return false;
         }
@@ -39,7 +41,9 @@ inline auto are_close(const vika::HostTensor<T> &actual, const std::vector<T> &e
     }
     for (vika::usize i = 0; i < actual.size(); ++i)
     {
-        if (std::abs(actual[i] - expected[i]) > tol)
+        // Negated rather than written as `> tol`: every comparison against a NaN is false, so the
+        // direct form lets a NaN fall through to `return true` and pass. This way it fails.
+        if (!(std::abs(actual[i] - expected[i]) <= tol))
         {
             return false;
         }
