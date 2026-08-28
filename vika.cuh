@@ -1667,7 +1667,7 @@ __global__ auto upsample2d_backward(DeviceTensorConstViewf upstream, DeviceTenso
 __global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void;
 __global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 limit) -> void;
 __global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out) -> void;
-__global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream_gradient,
+__global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream,
                                  DeviceTensorViewf out) -> void;
 
 // Normalizes along the last axis only - both tensors treated as flattened [rows, width]
@@ -1681,7 +1681,7 @@ __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf 
 // outputs: this layer's own forward() result (the softmax probabilities), not its input - the
 // Jacobian-vector product only needs y, never the pre-softmax input. d_input_i = y_i * (upstream_i
 // - dot), where dot = sum_j(y_j * upstream_j) over the same row.
-__global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorConstViewf upstream_gradient,
+__global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorConstViewf upstream,
                                  DeviceTensorViewf out) -> void;
 
 __global__ auto adam_update(const AdamParameters parameters, f32 m_hat_scale, f32 v_hat_scale,
@@ -1746,9 +1746,9 @@ struct DenseLayer
 
     auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
-    auto weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream_gradient)
+    auto weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream)
         -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>;
 
     auto parameters() -> std::vector<ParameterView>;
@@ -1757,10 +1757,9 @@ struct DenseLayer
     auto update(std::vector<AdamState> &states, const AdamParameters &params, usize t) -> std::vector<KernelJob<Void>>;
 
     DeviceOwningTensorf outputs;
+    DeviceOwningTensorf d_inputs;
     OwningParameter weights;
     OwningParameter biases;
-
-    DeviceOwningTensorf d_inputs;
 
     Stream stream;
 };
@@ -1771,7 +1770,7 @@ struct SigmoidLayer
 
     auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     DeviceOwningTensorf outputs;
     DeviceOwningTensorf d_inputs;
@@ -1785,7 +1784,7 @@ struct SoftmaxLayer
 
     auto forward(const std::vector<DeviceTensorConstViewf> &inputs) -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(const DeviceTensorConstViewf &upstream_gradient) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+    auto backward(const DeviceTensorConstViewf &upstream) -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     DeviceOwningTensorf outputs;
     DeviceOwningTensorf d_inputs;
@@ -1801,7 +1800,7 @@ struct Flatten2DLayer
 
     auto forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>;
 
-    auto backward(DeviceTensorConstViewf upstream_gradient) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+    auto backward(const DeviceTensorConstViewf &upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 
     // The shape forward() produces. Stands in for the outputs.extents() a buffer-owning layer
     // checks its upstream against; this layer owns no buffer, it only reinterprets its input's.
@@ -2075,7 +2074,7 @@ struct Node
 struct InputLayer
 {
     auto forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>;
-    auto backward(DeviceTensorConstViewf upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
+    auto backward(const DeviceTensorConstViewf &upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>;
 };
 
 using LayerKind = std::variant<InputLayer, DenseLayer, SigmoidLayer, SoftmaxLayer, Conv2DLayer, ConvTranspose2DLayer,
@@ -2655,9 +2654,9 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensorf weights, Dev
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok<DenseLayer>({
         .outputs = std::move(outputs),
+        .d_inputs = std::move(d_inputs),
         .weights = {std::move(weights), std::move(d_weights)},
         .biases = {std::move(biases), std::move(d_biases)},
-        .d_inputs = std::move(d_inputs),
         .stream = std::move(stream),
     });
 }
@@ -2701,12 +2700,12 @@ auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> K
                          sliced_outputs);
 }
 
-auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
+auto DenseLayer::backward(const DeviceTensorConstViewf &upstream)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
 
-    const usize k = upstream_gradient.extents[0];
+    const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize M = k;
@@ -2715,17 +2714,17 @@ auto DenseLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
 
     const dim3 block(16, 16);
     const dim3 grid = grid_covering(block, N, M);
-    return {launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream_gradient,
+    return {launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           transposed_weights, sliced_d_inputs)};
 }
 
-auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream_gradient)
+auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const DeviceTensorConstViewf &upstream)
     -> KernelJob<std::tuple<DeviceTensorConstViewf, DeviceTensorConstViewf>>
 {
 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(inputs.extents, d_inputs.extents()));
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_gradient.extents, outputs.extents()));
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream_gradient));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(inputs, upstream));
 
     // Grid must cover weights.grad's own shape (feature_count x neuron_count) - the tensor the
     // matmul below actually writes - not d_inputs' (batch_capacity x feature_count). Sizing from
@@ -2737,18 +2736,18 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
     const dim3 grid = grid_covering(block, N, M);
     const auto gradients = std::make_tuple(weights.grad.const_view(), biases.grad.const_view());
     const auto transposed_inputs = VIKA_UNWRAP_OR_RETURN(transposed(inputs));
-    const auto transposed_upstream = VIKA_UNWRAP_OR_RETURN(transposed(upstream_gradient));
+    const auto transposed_upstream = VIKA_UNWRAP_OR_RETURN(transposed(upstream));
 
     // NOTE: Run in separate streams?
     auto matmul_job = launch_kernel(matmul_kernel, gradients, grid, block, stream.handle(), transposed_inputs,
-                                    upstream_gradient, weights.grad.view());
+                                    upstream, weights.grad.view());
     if (matmul_job.is_error())
     {
         return matmul_job;
     }
 
     const dim3 row_block(256);
-    const auto row_grid = grid_covering(row_block, upstream_gradient.extents[1]);
+    const auto row_grid = grid_covering(row_block, upstream.extents[1]);
     return launch_kernel(sum_rows, gradients, row_grid, row_block, stream.handle(), transposed_upstream,
                          biases.grad.view());
 }
@@ -2798,10 +2797,10 @@ auto SigmoidLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
                          sliced_outputs);
 }
 
-auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
+auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    const auto upstream_extents = upstream_gradient.extents;
+    const auto upstream_extents = upstream.extents;
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
@@ -2816,9 +2815,9 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const dim3 block(256);
-    const auto grid = grid_covering(block, upstream_gradient.element_count());
+    const auto grid = grid_covering(block, upstream.element_count());
     return {launch_kernel(sigmoid_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
-                          VIKA_UNWRAP_OR_RETURN(outputs.const_view().first_n(k)), upstream_gradient,
+                          VIKA_UNWRAP_OR_RETURN(outputs.const_view().first_n(k)), upstream,
                           sliced_d_inputs)};
 }
 
@@ -2852,10 +2851,10 @@ auto SoftmaxLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
                          sliced_outputs);
 }
 
-auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
+auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    const auto upstream_extents = upstream_gradient.extents;
+    const auto upstream_extents = upstream.extents;
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
@@ -2869,12 +2868,12 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     const usize k = upstream_extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const usize width = upstream_gradient.extents.back();
-    const usize row_count = upstream_gradient.element_count() / width;
+    const usize width = upstream.extents.back();
+    const usize row_count = upstream.element_count() / width;
     const dim3 block(256);
     const auto grid = grid_covering(block, row_count);
     return {launch_kernel(softmax_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
-                          VIKA_UNWRAP_OR_RETURN(outputs.const_view().first_n(k)), upstream_gradient,
+                          VIKA_UNWRAP_OR_RETURN(outputs.const_view().first_n(k)), upstream,
                           sliced_d_inputs)};
 }
 
@@ -2911,22 +2910,23 @@ auto InputLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) cons
     return KernelJob<DeviceTensorConstViewf>::ready(inputs[0]);
 }
 
-auto InputLayer::backward(DeviceTensorConstViewf upstream) const -> std::vector<KernelJob<DeviceTensorConstViewf>>
+auto InputLayer::backward(const DeviceTensorConstViewf &upstream) const
+    -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     return {KernelJob<DeviceTensorConstViewf>::ready(upstream)};
 }
 
-auto Flatten2DLayer::backward(DeviceTensorConstViewf upstream_gradient) const
+auto Flatten2DLayer::backward(const DeviceTensorConstViewf &upstream) const
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
     // Against output_extents(), not extents: upstream is the gradient of the flattened output,
     // so it is rank 2 [batch, features].
-    const auto upstream_extents = upstream_gradient.extents;
+    const auto upstream_extents = upstream.extents;
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, output_extents()));
 
     Extents input_extents = extents;
     input_extents[0] = upstream_extents[0];
-    return {KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream_gradient.data, input_extents))};
+    return {KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream.data, input_extents))};
 }
 
 auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input_width, DeviceOwningTensorf filters,
@@ -4527,14 +4527,14 @@ __global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out)
     }
 }
 
-__global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream_gradient,
+__global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream,
                                  DeviceTensorViewf out) -> void
 {
     const usize i = global_thread_x();
     if (i < a.element_count())
     {
 
-        out[i] = a[i] * (1.0f - a[i]) * upstream_gradient[i];
+        out[i] = a[i] * (1.0f - a[i]) * upstream[i];
     }
 }
 
@@ -4575,7 +4575,7 @@ __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf 
     }
 }
 
-__global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorConstViewf upstream_gradient,
+__global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorConstViewf upstream,
                                  DeviceTensorViewf out) -> void
 {
     const usize width = outputs.extents.back();
@@ -4590,12 +4590,12 @@ __global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorCon
     f32 dot = 0.0f;
     for (usize col = 0; col < width; ++col)
     {
-        dot += outputs[row * width + col] * upstream_gradient[row * width + col];
+        dot += outputs[row * width + col] * upstream[row * width + col];
     }
     for (usize col = 0; col < width; ++col)
     {
         const usize idx = row * width + col;
-        out[idx] = outputs[idx] * (upstream_gradient[idx] - dot);
+        out[idx] = outputs[idx] * (upstream[idx] - dot);
     }
 }
 
