@@ -3630,6 +3630,31 @@ auto ComputationGraph::input(Extents spatial_extents) -> Result<NodeId, Error>
                                       spatial_extents.size(), Extents::capacity()));
     }
 
+    // Without one, the shape is [N] and the last axis is the batch axis - so Softmax normalizes
+    // across samples and Concat joins along the batch, both silently. Nothing that could do real
+    // work accepts rank 1 anyway (Dense wants rank 2, Conv2D rank 4), so there is nothing to lose
+    // and {1} says "a batch of scalars" without conflating the two axes.
+    if (spatial_extents.empty())
+    {
+        return error(VIKA_SHAPE_ERROR(
+            "input: expects at least one dimension after the batch; use {1} for a batch of scalars"));
+    }
+
+    // A zero anywhere in here is caught eventually - checked_size rejects it when the first layer
+    // allocates - but by then the message names neither this node nor the dimension, and arrives
+    // from compile() rather than from the line that wrote the shape.
+    if (batch_size == 0)
+    {
+        return error(VIKA_SHAPE_ERROR("input: the graph's batch size must be at least 1, got 0"));
+    }
+    for (usize i = 0; i < spatial_extents.size(); ++i)
+    {
+        if (spatial_extents[i] == 0)
+        {
+            return error(VIKA_SHAPE_ERROR("input: dimension %zu is 0, every extent must be at least 1", i));
+        }
+    }
+
     Extents output_extents{};
     output_extents.push_back(batch_size);
     for (const auto dim : spatial_extents)
