@@ -2824,10 +2824,9 @@ auto SigmoidLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    const auto input_extents = input.extents;
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input_extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, outputs.extents()));
 
-    const usize k = input_extents[0];
+    const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     const dim3 block(256);
@@ -2839,8 +2838,7 @@ auto SigmoidLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
 auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    const auto upstream_extents = upstream.extents;
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
     if (d_inputs.extents() != outputs.extents())
@@ -2850,7 +2848,7 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream)
                              d_inputs.element_count(), outputs.element_count()))};
     }
 
-    const usize k = upstream_extents[0];
+    const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const dim3 block(256);
@@ -2875,10 +2873,9 @@ auto SoftmaxLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_INPUT_COUNT(inputs, 1));
     const auto &input = inputs[0];
 
-    const auto input_extents = input.extents;
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input_extents, outputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(input.extents, outputs.extents()));
 
-    const usize k = input_extents[0];
+    const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     // One thread per row, not per element - see softmax_forward's own doc comment for why.
@@ -2893,8 +2890,7 @@ auto SoftmaxLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
 auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream)
     -> std::vector<KernelJob<DeviceTensorConstViewf>>
 {
-    const auto upstream_extents = upstream.extents;
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, d_inputs.extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
     if (d_inputs.extents() != outputs.extents())
@@ -2904,7 +2900,7 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream)
                              d_inputs.element_count(), outputs.element_count()))};
     }
 
-    const usize k = upstream_extents[0];
+    const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const usize width = upstream.extents.back();
@@ -2960,11 +2956,10 @@ auto Flatten2DLayer::backward(const DeviceTensorConstViewf &upstream) const
 {
     // Against output_extents(), not extents: upstream is the gradient of the flattened output,
     // so it is rank 2 [batch, features].
-    const auto upstream_extents = upstream.extents;
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream_extents, output_extents()));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, output_extents()));
 
     Extents input_extents = extents;
-    input_extents[0] = upstream_extents[0];
+    input_extents[0] = upstream.extents[0];
     return {KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(upstream.data, input_extents))};
 }
 
