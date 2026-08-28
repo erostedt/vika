@@ -2573,6 +2573,43 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
 // Parameters and Optimizer
 // ===========================================================================
 
+// Nothing else stands between these and the arithmetic that uses them. A beta of exactly 1 makes
+// the bias correction below divide by zero, which reaches every weight as NaN with no error
+// raised anywhere; a beta outside [0, 1) is what lets v go negative, which is what adam_update's
+// v_hat clamp exists for; and epsilon at 0 divides by zero the moment a gradient is.
+//
+// Written !(in range) rather than (out of range) so a NaN fails the test instead of passing it.
+auto _check_adam_parameters(const AdamParameters &params, const char *context, const char *file, i32 line)
+    -> Result<Void, Error>
+{
+    const auto check_beta = [&](f32 beta, const char *name) -> Result<Void, Error> {
+        if (!(beta >= 0.0f && beta < 1.0f))
+        {
+            return error(
+                Error::make(ErrorKind::Unsupported, file, line, "%s: %s must be in [0, 1), got %g", context, name,
+                            (double)beta));
+        }
+        return ok(Void{});
+    };
+
+    VIKA_UNWRAP_OR_RETURN(check_beta(params.beta1, "beta1"));
+    VIKA_UNWRAP_OR_RETURN(check_beta(params.beta2, "beta2"));
+
+    if (!(params.epsilon > 0.0f))
+    {
+        return error(Error::make(ErrorKind::Unsupported, file, line, "%s: epsilon must be greater than 0, got %g",
+                                 context, (double)params.epsilon));
+    }
+    if (!std::isfinite(params.learning_rate))
+    {
+        return error(Error::make(ErrorKind::Unsupported, file, line, "%s: learning_rate must be finite, got %g",
+                                 context, (double)params.learning_rate));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_ADAM_PARAMETERS(params) ::vika::_check_adam_parameters((params), __func__, __FILE__, __LINE__)
+
 // Adam bias-correction scales. These depend only on the step count, so computing them
 // once on the host beats recomputing pow() in every thread.
 inline auto adam_bias_correction(const AdamParameters &params, usize t) -> std::pair<f32, f32>
@@ -2591,6 +2628,8 @@ auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamS
         // t = 0 does to the bias correction.
         return {error(VIKA_UNSUPPORTED_ERROR("adam: step t must be at least 1, got 0"))};
     }
+
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_ADAM_PARAMETERS(params));
 
     if (states.size() != parameters.size())
     {
@@ -4329,6 +4368,8 @@ auto AdamState::from_parameters(const ConstParameterView &parameters) -> Result<
 
 auto AdamOptimizer::from_model(const Model &model, AdamParameters params) -> Result<AdamOptimizer, Error>
 {
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_ADAM_PARAMETERS(params));
+
     AdamOptimizer optimizer{params, std::vector<std::vector<AdamState>>(model.layers.size()), 0};
     for (const auto node_id : model.execution_order)
     {
