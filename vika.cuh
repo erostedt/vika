@@ -3280,7 +3280,9 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
     const usize W_out = upstream.extents[2];
     const usize C = d_inputs.extent(3);
 
-    VIKA_UNWRAP_OR_RETURN(zero(d_inputs.view(), stream.handle()));
+    // The slice, not the whole buffer: pooling scatters, so d_inputs has to start clean, but only
+    // the k rows this call writes and hands back are part of the result.
+    VIKA_UNWRAP_OR_RETURN(zero(sliced_d_inputs, stream.handle()));
 
     const dim3 block(16, 16, 1);
     const dim3 grid = grid_covering(block, W_out, H_out, k * C);
