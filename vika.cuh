@@ -4384,6 +4384,17 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
             continue;
         }
 
+        // Only a layer with parameters gets this far, and weight_gradients() takes exactly one
+        // forward input - so preds[0] is the whole story only while every trainable layer is
+        // single-input. It is the arity counterpart of backward()'s gradient-count check.
+        if (preds.size() != 1)
+        {
+            return error(
+                VIKA_UNSUPPORTED_ERROR("step: node %zu has %zu predecessors, but a trainable layer must have exactly "
+                                       "one to differentiate against",
+                                       node_id.value, preds.size()));
+        }
+
         const auto forward_input = VIKA_UNWRAP_OR_RETURN(forward_output(preds[0]));
         const auto upstream = VIKA_UNWRAP_OR_RETURN(backward_jobs[node_id.value][0].wait());
 
