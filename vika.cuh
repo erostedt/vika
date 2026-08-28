@@ -4192,6 +4192,16 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
         return jobs[0].wait();
     }
 
+    // compile() allocates this slot for exactly the nodes that can reach the line below - those
+    // with more than one consumer. Reaching it without one means the two have drifted apart, which
+    // a hand-assembled Model can do, so say so rather than dereference an empty optional.
+    if (node_id.value >= d_outputs.size() || !d_outputs[node_id.value].has_value())
+    {
+        return error(VIKA_GRAPH_ERROR("accumulate_output_gradient: node %zu has %zu contributions to sum but no "
+                                      "accumulation buffer; was this model built by compile()?",
+                                      node_id.value, jobs.size()));
+    }
+
     const auto first = VIKA_UNWRAP_OR_RETURN(jobs[0].wait());
     const usize k = first.extents[0];
     auto sliced_accum = VIKA_UNWRAP_OR_RETURN(d_outputs[node_id.value]->view().first_n(k));
