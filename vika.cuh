@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------------------------
 //
 //     ComputationGraph graph{batch_size};              // batch_size is a capacity, see below
-//     auto x = graph.input({2});                       // extents after the batch dimension
+//     auto x = graph.input({2}).unwrap();              // extents after the batch dimension
 //     x = graph.dense(x, 8).unwrap();
 //     x = graph.sigmoid(x).unwrap();
 //     x = graph.dense(x, 1).unwrap();
@@ -2205,7 +2205,7 @@ struct ComputationGraph
     std::vector<Node> nodes{};
     u32 seed = 0;
 
-    auto input(Extents spatial_extents) -> NodeId;
+    auto input(Extents spatial_extents) -> Result<NodeId, Error>;
     auto dense(NodeId input, usize output_features, std::optional<u32> requested_seed = std::nullopt)
         -> Result<NodeId, Error>;
     auto sigmoid(NodeId input) -> Result<NodeId, Error>;
@@ -3596,8 +3596,16 @@ auto ComputationGraph::next_seed() -> u32
     return seed;
 }
 
-auto ComputationGraph::input(Extents spatial_extents) -> NodeId
+auto ComputationGraph::input(Extents spatial_extents) -> Result<NodeId, Error>
 {
+    // The batch dimension is prepended, so one fewer than the maximum rank is available here.
+    // Unchecked, the push_back below would panic on extents a caller can legitimately construct.
+    if (spatial_extents.size() + 1 > Extents::capacity())
+    {
+        return error(VIKA_SHAPE_ERROR("input: %zu spatial dimensions plus the batch exceed the maximum rank of %zu",
+                                      spatial_extents.size(), Extents::capacity()));
+    }
+
     Extents output_extents{};
     output_extents.push_back(batch_size);
     for (const auto dim : spatial_extents)
@@ -3610,7 +3618,7 @@ auto ComputationGraph::input(Extents spatial_extents) -> NodeId
         .output_extents = output_extents,
         .inputs = {},
     });
-    return id;
+    return ok(id);
 }
 
 auto ComputationGraph::dense(NodeId input, usize output_features, std::optional<u32> requested_seed)

@@ -46,7 +46,7 @@ int main()
     //   Flatten:                                     [N, 3, 3, 8] -> [N, 72]
     //   Dense(72 -> 16) -> Sigmoid -> Dense(16 -> 1) -> Sigmoid
     ComputationGraph graph{batch_size};
-    auto x = graph.input({IMG_H, IMG_W, 1});
+    auto x = graph.input({IMG_H, IMG_W, 1}).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 1u).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();

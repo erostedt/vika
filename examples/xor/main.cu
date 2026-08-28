@@ -17,7 +17,7 @@ int main()
     const auto targets = upload(cpu_targets).unwrap();
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 8, 42u).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, 43u).unwrap();

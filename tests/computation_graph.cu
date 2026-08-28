@@ -9,7 +9,7 @@ UTEST(computation_graph, input_node)
     using namespace vika;
 
     ComputationGraph graph{4};
-    const auto id = graph.input({8, 8, 1});
+    const auto id = graph.input({8, 8, 1}).unwrap();
 
     EXPECT_EQ(graph.nodes.size(), 1u);
     EXPECT_EQ(id.value, 0u);
@@ -25,8 +25,8 @@ UTEST(computation_graph, input_node_id_increments)
     using namespace vika;
 
     ComputationGraph graph{2};
-    const auto id0 = graph.input({4, 4, 3});
-    const auto id1 = graph.input({4, 4, 3});
+    const auto id0 = graph.input({4, 4, 3}).unwrap();
+    const auto id1 = graph.input({4, 4, 3}).unwrap();
 
     EXPECT_EQ(graph.nodes.size(), 2u);
     EXPECT_EQ(id0.value, 0u);
@@ -39,7 +39,7 @@ UTEST(computation_graph, xor_graph_shape)
 
     // input [4, 2] -> dense [4, 8] -> sigmoid [4, 8] -> dense [4, 1] -> sigmoid [4, 1]
     ComputationGraph graph{4};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 8, 42).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, 43).unwrap();
@@ -74,7 +74,7 @@ UTEST(computation_graph, line_cnn_graph_shape)
     // -> dense(1)                     -> [8, 1]
     // -> sigmoid                      -> [8, 1]
     ComputationGraph graph{8};
-    auto x = graph.input({8, 8, 1});
+    auto x = graph.input({8, 8, 1}).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 42).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -106,7 +106,7 @@ UTEST(computation_graph, dense_wrong_rank)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8, 8, 1}); // rank 4, not rank 2
+    auto x = graph.input({8, 8, 1}).unwrap(); // rank 4, not rank 2
     const auto result = graph.dense(x, 8, 42);
     EXPECT_TRUE(result.is_error());
 }
@@ -119,7 +119,7 @@ UTEST(computation_graph, rejects_zero_stride)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8, 8, 1});
+    auto x = graph.input({8, 8, 1}).unwrap();
 
     EXPECT_TRUE(graph.conv2d(x, 3, 3, 4, 0, 0, 42).is_error());
     EXPECT_TRUE(graph.maxpool2d(x, 2, 2, 0).is_error());
@@ -135,7 +135,7 @@ UTEST(computation_graph, conv2d_kernel_too_large)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({4, 4, 1});
+    auto x = graph.input({4, 4, 1}).unwrap();
     const auto result = graph.conv2d(x, 8, 8, 16, 1, 0, 42);
     EXPECT_TRUE(result.is_error());
 }
@@ -144,7 +144,7 @@ UTEST(computation_graph, maxpool2d_pool_too_large)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({4, 4, 1});
+    auto x = graph.input({4, 4, 1}).unwrap();
     const auto result = graph.maxpool2d(x, 8, 8, 1);
     EXPECT_TRUE(result.is_error());
 }
@@ -153,7 +153,7 @@ UTEST(computation_graph, sigmoid_passthrough_extents)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8, 8, 3});
+    auto x = graph.input({8, 8, 3}).unwrap();
     x = graph.sigmoid(x).unwrap();
     EXPECT_EXTENTS(graph.nodes[1].output_extents, graph.nodes[0].output_extents);
 }
@@ -162,7 +162,7 @@ UTEST(computation_graph, flatten_shape)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({6, 6, 8}); // [4, 6, 6, 8]
+    auto x = graph.input({6, 6, 8}).unwrap(); // [4, 6, 6, 8]
     x = graph.flatten(x).unwrap();
     EXPECT_EXTENTS(graph.nodes[1].output_extents, Extents({4, 288})); // 6*6*8 = 288
 }
@@ -171,7 +171,7 @@ UTEST(computation_graph, add_shape)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     auto b = graph.dense(x, 16, 43).unwrap();
     auto sum = graph.add({a, b}).unwrap();
@@ -186,7 +186,7 @@ UTEST(computation_graph, add_n_ary)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     auto b = graph.dense(x, 16, 43).unwrap();
     auto c = graph.dense(x, 16, 44).unwrap();
@@ -200,7 +200,7 @@ UTEST(computation_graph, add_too_few_inputs)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     const auto result = graph.add({a});
     EXPECT_TRUE(result.is_error());
@@ -210,7 +210,7 @@ UTEST(computation_graph, concat_shape)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     auto b = graph.dense(x, 8, 43).unwrap();
     auto joined = graph.concat({a, b}).unwrap();
@@ -225,7 +225,7 @@ UTEST(computation_graph, concat_n_ary)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     auto b = graph.dense(x, 8, 43).unwrap();
     auto c = graph.dense(x, 4, 44).unwrap();
@@ -239,7 +239,7 @@ UTEST(computation_graph, concat_invalid_node_id)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     const auto result = graph.concat({a, NodeId{99}});
     EXPECT_TRUE(result.is_error());
@@ -249,7 +249,7 @@ UTEST(computation_graph, concat_rank_mismatch)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8, 8, 1});
+    auto x = graph.input({8, 8, 1}).unwrap();
     auto flat = graph.flatten(x).unwrap();
     const auto result = graph.concat({x, flat}); // rank 4 vs rank 2
     EXPECT_TRUE(result.is_error());
@@ -259,7 +259,7 @@ UTEST(computation_graph, add_invalid_node_id)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     const auto result = graph.add({a, NodeId{99}});
     EXPECT_TRUE(result.is_error());
@@ -269,7 +269,7 @@ UTEST(computation_graph, add_shape_mismatch)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({8});
+    auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     auto b = graph.dense(x, 8, 43).unwrap();
     const auto result = graph.add({a, b});

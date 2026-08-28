@@ -8,7 +8,7 @@ UTEST(model, xor_compile_execution_order)
     using namespace vika;
 
     ComputationGraph graph{4};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 8, 42).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, 43).unwrap();
@@ -48,7 +48,7 @@ UTEST(model, line_cnn_compile_execution_order)
     using namespace vika;
 
     ComputationGraph graph{8};
-    auto x = graph.input({8, 8, 1});
+    auto x = graph.input({8, 8, 1}).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 42).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -72,7 +72,7 @@ UTEST(model, compile_invalid_output_node)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    graph.input({2});
+    graph.input({2}).unwrap();
     const auto result = graph.compile(NodeId{99});
     EXPECT_TRUE(result.is_error());
 }
@@ -81,7 +81,7 @@ UTEST(model, compile_no_input_node)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 4, 42).unwrap();
     graph.nodes[0].spec = DenseSpec{2, 0};
     const auto result = graph.compile(x);
@@ -92,8 +92,8 @@ UTEST(model, compile_multiple_input_nodes)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    graph.input({2});
-    auto x = graph.input({2});
+    graph.input({2}).unwrap();
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 4, 42).unwrap();
     const auto result = graph.compile(x);
     EXPECT_TRUE(result.is_error());
@@ -168,7 +168,7 @@ UTEST(model, step_rejects_an_optimizer_built_from_another_model)
 
     const auto build = [](usize dense_layers) {
         ComputationGraph graph{batch_size};
-        auto x = graph.input({2});
+        auto x = graph.input({2}).unwrap();
         for (usize i = 0; i < dense_layers; ++i)
         {
             x = graph.dense(x, 3, 42).unwrap();
@@ -210,7 +210,7 @@ UTEST(model, forward_matches_manual_xor)
 
     // graph API forward
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 8, seed1).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, seed2).unwrap();
@@ -246,7 +246,7 @@ UTEST(model, out_of_order_passes_return_errors)
     constexpr usize batch_size = 4;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 3, 42).unwrap();
     auto model = graph.compile(x).unwrap();
     auto optimizer = AdamOptimizer::from_model(model, {}).unwrap();
@@ -284,7 +284,7 @@ UTEST(model, forward_output_shape)
     constexpr usize batch_size = 8;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({8, 8, 1});
+    auto x = graph.input({8, 8, 1}).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 42).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -318,7 +318,7 @@ UTEST(model, smaller_batch_matches_the_first_rows_of_a_full_batch)
     // conv -> maxpool -> flatten -> dense: the line_cnn shape, and the only path through a
     // flatten in the suite.
     ComputationGraph graph{capacity};
-    auto x = graph.input({4, 4, 1});
+    auto x = graph.input({4, 4, 1}).unwrap();
     x = graph.conv2d(x, 3, 3, 2, 1, 0, 7).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -377,7 +377,7 @@ UTEST(model, xor_trains_to_convergence)
     const auto gpu_targets = upload(cpu_targets).unwrap();
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 8, 42).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, 43).unwrap();
@@ -416,7 +416,7 @@ UTEST(model, branching_add_forward_and_backward)
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     auto a = graph.dense(x, 3, 42).unwrap();
     auto b = graph.dense(x, 3, 43).unwrap();
     auto sum = graph.add({a, b}).unwrap();
@@ -464,7 +464,7 @@ UTEST(model, branching_concat_forward_and_backward)
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     auto a = graph.dense(x, 3, 42).unwrap();
     auto b = graph.dense(x, 2, 43).unwrap();
     auto joined = graph.concat({a, b}).unwrap();
@@ -521,7 +521,7 @@ UTEST(model, fan_in_accumulation_across_multiple_backward_calls)
     constexpr usize batch_size = 4;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2});
+    auto x = graph.input({2}).unwrap();
     auto trunk = graph.dense(x, 4, 42).unwrap();
     auto branch_a = graph.dense(trunk, 3, 43).unwrap();
     auto branch_b = graph.dense(trunk, 3, 44).unwrap();

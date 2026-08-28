@@ -69,7 +69,7 @@ auto benchmark_train_step() -> void
     constexpr usize batch = 16;
 
     ComputationGraph graph{batch};
-    auto x = graph.input({8, 8, 1});
+    auto x = graph.input({8, 8, 1}).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 1).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
