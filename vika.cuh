@@ -1487,6 +1487,15 @@ inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
     return dim3(blocks(x, block.x), blocks(y, block.y), blocks(z, block.z));
 }
 
+// The launch geometry every [N, H, W, C] layer uses: one thread per output column and row, with
+// the grid's z dimension covering batch * channels. Sized from the extents of the tensor the
+// kernel writes - taking them from the other one silently under-covers it whenever the two differ,
+// which is what 76ee8e7 fixed in DenseLayer::weight_gradients.
+inline auto nhwc_grid(dim3 block, const Extents &target, usize batch) -> dim3
+{
+    return grid_covering(block, target.at(2), target.at(1), batch * target.at(3));
+}
+
 // Launches `kernel` and reads cudaGetLastError() immediately, because cudaStreamSynchronize -
 // what KernelJob::wait() checks - does not report launch-configuration failures such as
 // cudaErrorInvalidConfiguration. A rejected launch becomes a failed job rather than a job holding
@@ -2993,12 +3002,8 @@ auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    const usize H_out = outputs.extent(1);
-    const usize W_out = outputs.extent(2);
-    const usize C_out = outputs.extent(3);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_out, H_out, k * C_out);
+    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
 
     return launch_kernel(conv_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
@@ -3011,12 +3016,8 @@ auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const usize H_in = d_inputs.extent(1);
-    const usize W_in = d_inputs.extent(2);
-    const usize C_in = d_inputs.extent(3);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_in, H_in, k * C_in);
+    const dim3 grid = nhwc_grid(block, d_inputs.extents(), k);
 
     return {launch_kernel(conv_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           filters.value.const_view(), sliced_d_inputs, stride, padding)};
@@ -3145,12 +3146,8 @@ auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &in
     const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    const usize H_out = outputs.extent(1);
-    const usize W_out = outputs.extent(2);
-    const usize C_out = outputs.extent(3);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_out, H_out, k * C_out);
+    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
 
     return launch_kernel(conv_transpose_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
@@ -3164,12 +3161,8 @@ auto ConvTranspose2DLayer::backward(const DeviceTensorConstViewf &upstream)
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const usize H_in = d_inputs.extent(1);
-    const usize W_in = d_inputs.extent(2);
-    const usize C_in = d_inputs.extent(3);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_in, H_in, k * C_in);
+    const dim3 grid = nhwc_grid(block, d_inputs.extents(), k);
 
     return {launch_kernel(conv_transpose_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           filters.value.const_view(), sliced_d_inputs, stride, padding)};
@@ -3258,12 +3251,8 @@ auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
     auto sliced_argmax = VIKA_UNWRAP_OR_RETURN(argmax.view().first_n(k));
 
-    const usize H_out = outputs.extent(1);
-    const usize W_out = outputs.extent(2);
-    const usize C = outputs.extent(3);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_out, H_out, k * C);
+    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
 
     return launch_kernel(maxpool_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs, sliced_argmax, pool_h, pool_w, stride);
@@ -3276,16 +3265,14 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const usize H_out = upstream.extents[1];
-    const usize W_out = upstream.extents[2];
-    const usize C = d_inputs.extent(3);
-
     // The slice, not the whole buffer: pooling scatters, so d_inputs has to start clean, but only
     // the k rows this call writes and hands back are part of the result.
     VIKA_UNWRAP_OR_RETURN(zero(sliced_d_inputs, stream.handle()));
 
+    // One thread per *output* position, unlike every other backward here - maxpool_backward
+    // scatters from the pooled grid back into d_inputs rather than gathering into it.
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_out, H_out, k * C);
+    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
 
     return {launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           VIKA_UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs)};
@@ -3323,12 +3310,8 @@ auto Upsample2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs)
     const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    const usize H_out = outputs.extent(1);
-    const usize W_out = outputs.extent(2);
-    const usize C = outputs.extent(3);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_out, H_out, k * C);
+    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
 
     return launch_kernel(upsample2d_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs, scale);
@@ -3341,12 +3324,8 @@ auto Upsample2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::v
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const usize H_in = d_inputs.extent(1);
-    const usize W_in = d_inputs.extent(2);
-    const usize C = d_inputs.extent(3);
-
     const dim3 block(16, 16, 1);
-    const dim3 grid = grid_covering(block, W_in, H_in, k * C);
+    const dim3 grid = nhwc_grid(block, d_inputs.extents(), k);
 
     // No zero() first, unlike MaxPool2DLayer::backward - see upsample2d_backward's own doc comment
     // for why: every d_inputs slot is written exactly once, so there is nothing left over to clear.
