@@ -4221,14 +4221,26 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
     VIKA_UNWRAP_OR_RETURN(copy(first, sliced_accum, stream.handle()));
 
     const dim3 block(256);
-    for (usize i = 1; i < jobs.size(); ++i)
+    const auto grid = grid_covering(block, first.element_count());
+    for (usize i = 1; i + 1 < jobs.size(); ++i)
     {
         const auto contribution = VIKA_UNWRAP_OR_RETURN(jobs[i].wait());
-        const auto grid = grid_covering(block, first.element_count());
-        VIKA_UNWRAP_OR_RETURN(launch_kernel(accumulate_into, sliced_accum.const_view(), grid, block, stream.handle(),
-                                            contribution, sliced_accum)
-                                  .wait());
+        // Checked, not waited - see AddLayer::forward. These share one stream, so they are already
+        // ordered against each other and against the copy above.
+        auto job = launch_kernel(accumulate_into, sliced_accum.const_view(), grid, block, stream.handle(), contribution,
+                                 sliced_accum);
+        if (job.is_error())
+        {
+            return error(job.result.unwrap_error());
+        }
     }
+
+    // Only the last one is waited, and it has to be: what this returns is read by the node's own
+    // backward() on a different stream, and travels on as a `ready` job that nothing waits on.
+    const auto last = VIKA_UNWRAP_OR_RETURN(jobs.back().wait());
+    VIKA_UNWRAP_OR_RETURN(
+        launch_kernel(accumulate_into, sliced_accum.const_view(), grid, block, stream.handle(), last, sliced_accum)
+            .wait());
 
     return ok(sliced_accum.const_view());
 }
