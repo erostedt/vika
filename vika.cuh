@@ -46,6 +46,12 @@
 // Calling them out of order is reported, not undefined. The optimizer owns its own step count,
 // so nothing needs to thread a t through the loop.
 //
+// forward() borrows the input rather than copying it, and step() reads it back: the first layer's
+// weight gradients are computed against whatever its predecessor produced, which for a layer sitting
+// on the input node is the caller's own buffer. So the input has to outlive step(), not just
+// forward() - for train_step, the whole call. The same goes for a flatten in between, which
+// reinterprets its input's memory instead of allocating any.
+//
 // ---------------------------------------------------------------------------------------------
 // Layers on their own
 // ---------------------------------------------------------------------------------------------
