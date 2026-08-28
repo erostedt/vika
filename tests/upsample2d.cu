@@ -58,7 +58,7 @@ UTEST(upsample2d, forward_batch_exceeds_capacity)
     const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 1, 2, 1}).unwrap();
     // Layer only has capacity for 1 sample, but the input has batch 2.
     auto layer = Upsample2DLayer::with_extents(1, 1, 2, 1, 2).unwrap();
-    ASSERT_TRUE(layer.forward({inputs.const_view()}).is_error());
+    ASSERT_TRUE(failed_with(layer.forward({inputs.const_view()}), ErrorKind::Shape, "rows but tensor only has"));
 }
 
 UTEST(upsample2d, backward)
@@ -90,5 +90,5 @@ UTEST(upsample2d, backward)
 UTEST(upsample2d, with_extents_rejects_zero_scale)
 {
     using namespace vika;
-    ASSERT_TRUE(Upsample2DLayer::with_extents(1, 2, 2, 1, 0).is_error());
+    ASSERT_TRUE(failed_with(Upsample2DLayer::with_extents(1, 2, 2, 1, 0), ErrorKind::Shape, "upsample2d: scale must be at least"));
 }

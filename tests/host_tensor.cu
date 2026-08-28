@@ -1,5 +1,6 @@
 #include "utest.h"
 
+#include "comparison.cuh"
 #include "vika.cuh"
 
 using namespace vika;
@@ -66,10 +67,10 @@ UTEST(tensor, row_major_indexing)
 UTEST(tensor, device_from_rejects_wrong_length)
 {
     const auto too_short = DeviceOwningTensorf::from(std::vector<f32>{1.0f, 2.0f}, {8});
-    EXPECT_TRUE(too_short.is_error());
+    EXPECT_TRUE(failed_with(too_short, ErrorKind::Shape, "holds 2 elements but extents describe 8"));
 
     const auto too_long = DeviceOwningTensorf::from(std::vector<f32>(8, 1.0f), {2});
-    EXPECT_TRUE(too_long.is_error());
+    EXPECT_TRUE(failed_with(too_long, ErrorKind::Shape, "holds 8 elements but extents describe 2"));
 
     const auto exact = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3});
     ASSERT_TRUE(exact.is_ok());
@@ -83,9 +84,9 @@ UTEST(tensor, device_from_rejects_wrong_length)
 // allocation respectively, failing much later as an invalid launch configuration.
 UTEST(tensor, device_empty_rejects_degenerate_extents)
 {
-    EXPECT_TRUE(DeviceOwningTensorf::empty({0, 5}).is_error());
-    EXPECT_TRUE(DeviceOwningTensorf::empty({}).is_error());
-    EXPECT_TRUE(HostTensorf::zero({0, 5}).is_error());
+    EXPECT_TRUE(failed_with(DeviceOwningTensorf::empty({0, 5}), ErrorKind::Shape, "tensor extents contain a zero extent"));
+    EXPECT_TRUE(failed_with(DeviceOwningTensorf::empty({}), ErrorKind::Shape, "tensor extents are empty"));
+    EXPECT_TRUE(failed_with(HostTensorf::zero({0, 5}), ErrorKind::Shape, "tensor extents contain a zero extent"));
 
     ASSERT_TRUE(DeviceOwningTensorf::empty({2, 3}).is_ok());
 }
@@ -103,8 +104,8 @@ UTEST(tensor, transposed_requires_rank_2)
     EXPECT_EQ(flipped.unwrap().strides[1], 3u);
 
     const auto vector = DeviceOwningTensorf::from({1.0f, 2.0f}, {2}).unwrap();
-    EXPECT_TRUE(transposed(vector.const_view()).is_error());
+    EXPECT_TRUE(failed_with(transposed(vector.const_view()), ErrorKind::Shape, "got rank 1"));
 
     const auto cube = DeviceOwningTensorf::zero({2, 2, 2}).unwrap();
-    EXPECT_TRUE(transposed(cube.const_view()).is_error());
+    EXPECT_TRUE(failed_with(transposed(cube.const_view()), ErrorKind::Shape, "got rank 3"));
 }

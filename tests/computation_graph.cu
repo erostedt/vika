@@ -1,5 +1,6 @@
 #include "utest.h"
 
+#include "comparison.cuh"
 #include "vika.cuh"
 
 #define EXPECT_EXTENTS(actual, expected) EXPECT_TRUE((actual) == (expected))
@@ -99,7 +100,7 @@ UTEST(computation_graph, dense_invalid_node_id)
     using namespace vika;
     ComputationGraph graph{4};
     const auto result = graph.dense(NodeId{99}, 8, 42);
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Graph, "dense: invalid NodeId"));
 }
 
 UTEST(computation_graph, dense_wrong_rank)
@@ -108,7 +109,7 @@ UTEST(computation_graph, dense_wrong_rank)
     ComputationGraph graph{4};
     auto x = graph.input({8, 8, 1}).unwrap(); // rank 4, not rank 2
     const auto result = graph.dense(x, 8, 42);
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Shape, "dense: input must be rank"));
 }
 
 // A zero stride is a window that never advances. window_output_extent divides by it, so this used
@@ -121,9 +122,9 @@ UTEST(computation_graph, rejects_zero_stride)
     ComputationGraph graph{4};
     auto x = graph.input({8, 8, 1}).unwrap();
 
-    EXPECT_TRUE(graph.conv2d(x, 3, 3, 4, 0, 0, 42).is_error());
-    EXPECT_TRUE(graph.maxpool2d(x, 2, 2, 0).is_error());
-    EXPECT_TRUE(graph.conv_transpose2d(x, 3, 3, 4, 0, 0, 42).is_error());
+    EXPECT_TRUE(failed_with(graph.conv2d(x, 3, 3, 4, 0, 0, 42), ErrorKind::Shape, "conv2d: stride must be at least"));
+    EXPECT_TRUE(failed_with(graph.maxpool2d(x, 2, 2, 0), ErrorKind::Shape, "maxpool2d: stride must be at least"));
+    EXPECT_TRUE(failed_with(graph.conv_transpose2d(x, 3, 3, 4, 0, 0, 42), ErrorKind::Shape, "conv_transpose2d: stride must be at least"));
 
     // A stride of 1 through the same builders still works.
     EXPECT_TRUE(graph.conv2d(x, 3, 3, 4, 1, 0, 42).is_ok());
@@ -137,7 +138,7 @@ UTEST(computation_graph, conv2d_kernel_too_large)
     ComputationGraph graph{4};
     auto x = graph.input({4, 4, 1}).unwrap();
     const auto result = graph.conv2d(x, 8, 8, 16, 1, 0, 42);
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Shape, "does not fit an input of"));
 }
 
 UTEST(computation_graph, maxpool2d_pool_too_large)
@@ -146,7 +147,7 @@ UTEST(computation_graph, maxpool2d_pool_too_large)
     ComputationGraph graph{4};
     auto x = graph.input({4, 4, 1}).unwrap();
     const auto result = graph.maxpool2d(x, 8, 8, 1);
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Shape, "does not fit an input of"));
 }
 
 UTEST(computation_graph, sigmoid_passthrough_extents)
@@ -203,7 +204,7 @@ UTEST(computation_graph, add_too_few_inputs)
     auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     const auto result = graph.add({a});
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Graph, "add: expects at least"));
 }
 
 UTEST(computation_graph, concat_shape)
@@ -242,7 +243,7 @@ UTEST(computation_graph, concat_invalid_node_id)
     auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     const auto result = graph.concat({a, NodeId{99}});
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Graph, "concat: invalid NodeId"));
 }
 
 UTEST(computation_graph, concat_rank_mismatch)
@@ -252,7 +253,7 @@ UTEST(computation_graph, concat_rank_mismatch)
     auto x = graph.input({8, 8, 1}).unwrap();
     auto flat = graph.flatten(x).unwrap();
     const auto result = graph.concat({x, flat}); // rank 4 vs rank 2
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Shape, "expected rank"));
 }
 
 UTEST(computation_graph, add_invalid_node_id)
@@ -262,7 +263,7 @@ UTEST(computation_graph, add_invalid_node_id)
     auto x = graph.input({8}).unwrap();
     auto a = graph.dense(x, 16, 42).unwrap();
     const auto result = graph.add({a, NodeId{99}});
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Graph, "add: invalid NodeId"));
 }
 
 UTEST(computation_graph, add_shape_mismatch)
@@ -273,5 +274,5 @@ UTEST(computation_graph, add_shape_mismatch)
     auto a = graph.dense(x, 16, 42).unwrap();
     auto b = graph.dense(x, 8, 43).unwrap();
     const auto result = graph.add({a, b});
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Shape, "add: inputs must have the same shape"));
 }

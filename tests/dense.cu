@@ -51,7 +51,7 @@ UTEST(dense, layer_forward_batch_exceeds_capacity)
 
     // Layer only has capacity for 1 sample, but the input batch has 2.
     auto layer = DenseLayer::with_weights(1, std::move(weights), std::move(bias)).unwrap();
-    ASSERT_TRUE(layer.forward({inputs.const_view()}).is_error());
+    ASSERT_TRUE(failed_with(layer.forward({inputs.const_view()}), ErrorKind::Shape, "rows but tensor only has"));
 }
 
 UTEST(dense, layer_backward)
@@ -175,7 +175,7 @@ UTEST(dense, layer_adam_update_rejects_step_zero)
     auto jobs = layer.update(states, AdamParameters{}, 0);
     for (auto &result : wait_on_all(jobs))
     {
-        EXPECT_TRUE(result.is_error());
+        EXPECT_TRUE(failed_with(result, ErrorKind::Unsupported, "adam: step t must be at least"));
     }
 
     // Rejected before any launch, so the weights are untouched rather than NaN.

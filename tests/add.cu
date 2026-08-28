@@ -78,7 +78,7 @@ UTEST(add, layer_forward_batch_exceeds_capacity)
 
     // Layer only has capacity for 1 sample, but the inputs have batch 2.
     auto layer = AddLayer::with_extents({1, 2}, 2).unwrap();
-    ASSERT_TRUE(layer.forward({a.const_view(), b.const_view()}).is_error());
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view()}), ErrorKind::Shape, "rows but tensor only has"));
 }
 
 UTEST(add, layer_forward_wrong_input_count)
@@ -87,8 +87,8 @@ UTEST(add, layer_forward_wrong_input_count)
     const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
 
     auto layer = AddLayer::with_extents({2, 2}, 2).unwrap();
-    ASSERT_TRUE(layer.forward({a.const_view()}).is_error());
-    ASSERT_TRUE(layer.forward({a.const_view(), a.const_view(), a.const_view()}).is_error());
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view()}), ErrorKind::Shape, "expects exactly 2 input(s), got 1"));
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), a.const_view(), a.const_view()}), ErrorKind::Shape, "expects exactly 2 input(s), got 3"));
 }
 
 UTEST(add, layer_forward_shape_mismatch)
@@ -98,7 +98,7 @@ UTEST(add, layer_forward_shape_mismatch)
     const auto b = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
 
     auto layer = AddLayer::with_extents({2, 2}, 2).unwrap();
-    ASSERT_TRUE(layer.forward({a.const_view(), b.const_view()}).is_error());
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view()}), ErrorKind::Shape, "forward: input 1 is"));
 }
 
 UTEST(add, layer_backward)

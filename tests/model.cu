@@ -74,7 +74,7 @@ UTEST(model, compile_invalid_output_node)
     ComputationGraph graph{4};
     graph.input({2}).unwrap();
     const auto result = graph.compile(NodeId{99});
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Graph, "compile: invalid output NodeId"));
 }
 
 UTEST(model, compile_no_input_node)
@@ -85,7 +85,7 @@ UTEST(model, compile_no_input_node)
     x = graph.dense(x, 4, 42).unwrap();
     graph.nodes[0].spec = DenseSpec{2, 0};
     const auto result = graph.compile(x);
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Graph, "compile: graph must have exactly one input node"));
 }
 
 UTEST(model, compile_multiple_input_nodes)
@@ -96,7 +96,7 @@ UTEST(model, compile_multiple_input_nodes)
     auto x = graph.input({2}).unwrap();
     x = graph.dense(x, 4, 42).unwrap();
     const auto result = graph.compile(x);
-    EXPECT_TRUE(result.is_error());
+    EXPECT_TRUE(failed_with(result, ErrorKind::Graph, "compile: graph must have exactly one input node"));
 }
 
 // make_layer reads pred_extents[0] for every single-input spec, so a node with no predecessors
@@ -112,7 +112,7 @@ UTEST(model, compile_rejects_a_node_with_no_predecessors)
     ComputationGraph graph{batch_size};
     graph.nodes.push_back(Node{InputSpec{}, Extents{batch_size, 4}, {}});
     graph.nodes.push_back(Node{DenseSpec{3, 42}, Extents{batch_size, 3}, {}});   // no inputs
-    EXPECT_TRUE(graph.compile(NodeId{1}).is_error());
+    EXPECT_TRUE(failed_with(graph.compile(NodeId{1}), ErrorKind::Graph, "make_layer: this layer needs at least"));
 
     // The same graph, wired up, still compiles.
     ComputationGraph wired{batch_size};
@@ -189,7 +189,7 @@ UTEST(model, step_rejects_an_optimizer_built_from_another_model)
     ASSERT_TRUE(model.forward(inputs.const_view()).is_ok());
     ASSERT_TRUE(model.backward(loss_grad.const_view()).is_ok());
 
-    EXPECT_TRUE(model.step(foreign).is_error());
+    EXPECT_TRUE(failed_with(model.step(foreign), ErrorKind::Graph, "step: optimizer holds state for"));
     EXPECT_EQ(foreign.steps_taken, 0u);
 
     // Same model, same passes - so a failure here would mean the guard rejects too much.
@@ -254,17 +254,17 @@ UTEST(model, out_of_order_passes_return_errors)
     const auto inputs = DeviceOwningTensorf::zero({batch_size, 2}).unwrap();
     const auto loss_grad = DeviceOwningTensorf::zero({batch_size, 3}).unwrap();
 
-    EXPECT_TRUE(model.step(optimizer).is_error());
-    EXPECT_TRUE(model.backward(loss_grad.const_view()).is_error());
+    EXPECT_TRUE(failed_with(model.step(optimizer), ErrorKind::Graph, "step: no forward pass to step from; call forward() first"));
+    EXPECT_TRUE(failed_with(model.backward(loss_grad.const_view()), ErrorKind::Graph, "backward: no forward pass to differentiate; call forward() first"));
     EXPECT_EQ(optimizer.steps_taken, 0u);   // a rejected step must not consume a step count
-    EXPECT_TRUE(model.accumulate_output_gradient(model.output_node).is_error());
-    EXPECT_TRUE(model.forward_output(model.output_node).is_error());
+    EXPECT_TRUE(failed_with(model.accumulate_output_gradient(model.output_node), ErrorKind::Graph, "is out of range; was backward() called?"));
+    EXPECT_TRUE(failed_with(model.forward_output(model.output_node), ErrorKind::Graph, "node 1 has no forward output"));
 
     ASSERT_TRUE(model.forward(inputs.const_view()).is_ok());
-    EXPECT_TRUE(model.forward_output(NodeId{99}).is_error());
+    EXPECT_TRUE(failed_with(model.forward_output(NodeId{99}), ErrorKind::Graph, "node 99 has no forward output"));
 
     // Forward has run, backward has not.
-    EXPECT_TRUE(model.step(optimizer).is_error());
+    EXPECT_TRUE(failed_with(model.step(optimizer), ErrorKind::Graph, "step: no backward pass to step from; call backward() first"));
 
     // In order, and repeatable. The optimizer owns the step count, so the first successful step
     // is t = 1 no matter what a caller's own loop variable does.

@@ -97,7 +97,7 @@ UTEST(conv_transpose, with_weights_rejects_bias_channel_mismatch)
     auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2, 1, 1}).unwrap();
     // Wrong bias count (2 instead of 1 - filters' C_out is 1).
     auto biases = DeviceOwningTensorf::from({0.0f, 0.0f}).unwrap();
-    ASSERT_TRUE(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0).is_error());
+    ASSERT_TRUE(failed_with(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0), ErrorKind::Shape, "channels, filters expects"));
 }
 
 UTEST(conv_transpose, forward_smaller_batch)
@@ -126,7 +126,7 @@ UTEST(conv_transpose, with_weights_rejects_zero_stride)
     using namespace vika;
     auto filters = DeviceOwningTensorf::zero({2, 2, 1, 1}).unwrap();
     auto biases = DeviceOwningTensorf::zero({1}).unwrap();
-    EXPECT_TRUE(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 0, 0).is_error());
+    EXPECT_TRUE(failed_with(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 0, 0), ErrorKind::Shape, "with_weights: stride must be at least"));
 }
 
 UTEST(conv_transpose, with_weights_rejects_padding_larger_than_the_output)
@@ -135,11 +135,11 @@ UTEST(conv_transpose, with_weights_rejects_padding_larger_than_the_output)
     // transposed_window_output_extent subtracts 2 * padding from (input - 1) * stride + window.
     auto filters = DeviceOwningTensorf::zero({3, 3, 1, 1}).unwrap();
     auto biases = DeviceOwningTensorf::zero({1}).unwrap();
-    EXPECT_TRUE(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 10).is_error());
+    EXPECT_TRUE(failed_with(ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 10), ErrorKind::Shape, "exceeds (input height"));
 
     // A zero-sized input underflows (input - 1) the same way.
     auto small_filters = DeviceOwningTensorf::zero({3, 3, 1, 1}).unwrap();
     auto small_biases = DeviceOwningTensorf::zero({1}).unwrap();
-    EXPECT_TRUE(
-        ConvTranspose2DLayer::with_weights(1, 0, 2, std::move(small_filters), std::move(small_biases), 1, 0).is_error());
+    EXPECT_TRUE(failed_with(
+        ConvTranspose2DLayer::with_weights(1, 0, 2, std::move(small_filters), std::move(small_biases), 1, 0), ErrorKind::Shape, "with_weights: input height must be at least"));
 }

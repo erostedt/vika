@@ -66,6 +66,6 @@ UTEST(mse, rejects_predictions_and_targets_of_different_batch)
     const auto targets = DeviceOwningTensorf::zero({1, 2}).unwrap();
     auto loss = MSELoss::with_extents({2, 2}).unwrap();
 
-    EXPECT_TRUE(loss.forward(predictions.const_view(), targets.const_view()).wait().is_error());
-    EXPECT_TRUE(loss.backward(predictions.const_view(), targets.const_view()).wait().is_error());
+    EXPECT_TRUE(failed_with(loss.forward(predictions.const_view(), targets.const_view()).wait(), ErrorKind::Shape, "forward: predictions has batch"));
+    EXPECT_TRUE(failed_with(loss.backward(predictions.const_view(), targets.const_view()).wait(), ErrorKind::Shape, "backward: predictions has batch"));
 }

@@ -1,5 +1,6 @@
 #include "utest.h"
 
+#include "comparison.cuh"
 #include "vika.cuh"
 #include <algorithm>
 #include <memory>
@@ -44,5 +45,5 @@ UTEST(topological_sort, cyle)
     adj[ptr + 1] = {ptr + 3};
 
     const auto actual = topological_sort(adj);
-    EXPECT_TRUE(actual.is_error());
+    EXPECT_TRUE(failed_with(actual, ErrorKind::Graph, "Cycle detected"));
 }
