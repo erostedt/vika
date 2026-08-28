@@ -4103,6 +4103,14 @@ auto ComputationGraph::compile(NodeId output) -> Result<Model, Error>
             continue;
         }
 
+        // backward() skips a node with no predecessors before it accumulates anything, having
+        // nothing to propagate the sum to, so a buffer here would be a batch-sized allocation
+        // nothing ever reads. Spelled the way backward() spells it, so the two cannot drift.
+        if (nodes[idx].inputs.empty())
+        {
+            continue;
+        }
+
         // Reachable consumers only: one that never runs never contributes a gradient.
         usize live_consumers = 0;
         for (const auto consumer : adj[idx])
