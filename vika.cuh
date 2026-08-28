@@ -105,9 +105,11 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include <functional>
 #include <initializer_list>
