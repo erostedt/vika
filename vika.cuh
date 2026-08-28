@@ -736,7 +736,7 @@ auto topological_sort(const AdjacencyGraph<Node> &adj) -> Result<std::vector<Nod
 
     if (order.size() == indegree.size())
     {
-        return ok(order);
+        return ok(std::move(order));
     }
     return error(VIKA_GRAPH_ERROR("Cycle detected"));
 }
