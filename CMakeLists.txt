@@ -21,10 +21,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # this codebase uses on purpose - statement expressions in VIKA_UNWRAP_OR_RETURN, C++20
 # designated initializers at C++17, and ##__VA_ARGS__ in VIKA_PANIC.
 set(VIKA_WARNINGS "-Wall,-Wextra,-Werror,-Wshadow,-Wsign-conversion,-Wconversion,-Wunreachable-code")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=${VIKA_WARNINGS}")
-
-set(BUILD_PATH ${CMAKE_CURRENT_SOURCE_DIR}/build)
 
 add_subdirectory(tests)
 add_subdirectory(examples)
