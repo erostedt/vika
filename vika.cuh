@@ -1252,6 +1252,10 @@ struct DeviceTensorView
     // contiguous prefix of the same buffer, so this reinterprets extents and copies nothing.
     auto first_n(usize n) const -> Result<DeviceTensorView, Error>
     {
+        if (n == 0)
+        {
+            return error(VIKA_SHAPE_ERROR("first_n: requested 0 rows; every pass needs at least one"));
+        }
         if (n > extents[0])
         {
             return error(VIKA_SHAPE_ERROR("first_n: requested %zu rows but tensor only has %zu", n, extents[0]));
