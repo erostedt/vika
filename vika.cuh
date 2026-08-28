@@ -4119,6 +4119,9 @@ auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstVie
     forward_jobs.clear();
     forward_jobs.resize(layers.size());
 
+    // The last backward differentiated outputs this pass overwrites, so it does not survive.
+    backward_jobs.clear();
+
     for (const auto node_id : execution_order)
     {
         const auto &preds = layer_inputs[node_id.value];
