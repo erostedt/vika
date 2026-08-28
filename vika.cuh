@@ -2809,7 +2809,8 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     const dim3 block(256);
     const auto grid = grid_covering(block, upstream_gradient.element_count());
     return {launch_kernel(sigmoid_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
-                          outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
+                          VIKA_UNWRAP_OR_RETURN(outputs.const_view().first_n(k)), upstream_gradient,
+                          sliced_d_inputs)};
 }
 
 auto SoftmaxLayer::with_extents(const Extents &extents) -> Result<SoftmaxLayer, Error>
@@ -2864,7 +2865,8 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream_gradient)
     const dim3 block(256);
     const auto grid = grid_covering(block, row_count);
     return {launch_kernel(softmax_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
-                          outputs.const_view().first_n(k).unwrap(), upstream_gradient, sliced_d_inputs)};
+                          VIKA_UNWRAP_OR_RETURN(outputs.const_view().first_n(k)), upstream_gradient,
+                          sliced_d_inputs)};
 }
 
 auto Flatten2DLayer::with_extents(const Extents &extents) -> Result<Flatten2DLayer, Error>
