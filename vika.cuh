@@ -2379,10 +2379,16 @@ auto _check_stride(usize stride, const char *context, const char *file, i32 line
 #define VIKA_CHECK_STRIDE(stride) ::vika::_check_stride((stride), __func__, __FILE__, __LINE__)
 
 // The window has to fit the padded input, or window_output_extent's subtraction underflows into
-// an enormous extent that surfaces much later as an allocation failure.
+// an enormous extent that surfaces much later as an allocation failure. A window of zero fits any
+// input, so the size check below never sees it, and it is just as unusable: it selects nothing.
 auto _check_window_fits(usize input, usize window, usize padding, const char *axis, const char *context,
                         const char *file, i32 line) -> Result<Void, Error>
 {
+    if (window == 0)
+    {
+        return error(
+            Error::make(ErrorKind::Shape, file, line, "%s: window %s must be at least 1, got 0", context, axis));
+    }
     if (input + 2 * padding < window)
     {
         return error(Error::make(ErrorKind::Shape, file, line,
@@ -2400,6 +2406,11 @@ auto _check_window_fits(usize input, usize window, usize padding, const char *ax
 auto _check_transposed_window_fits(usize input, usize window, usize stride, usize padding, const char *axis,
                                    const char *context, const char *file, i32 line) -> Result<Void, Error>
 {
+    if (window == 0)
+    {
+        return error(
+            Error::make(ErrorKind::Shape, file, line, "%s: window %s must be at least 1, got 0", context, axis));
+    }
     if (input == 0)
     {
         return error(
