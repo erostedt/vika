@@ -2197,6 +2197,10 @@ struct Model
     // The gradient of the loss w.r.t. node_id's output, summed if several consumers produced one.
     // A single consumer is just a wait; more than one accumulates into d_outputs[node_id].
     auto accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorConstViewf, Error>;
+
+  private:
+    // forward()'s body, so forward() can undo a half-finished pass in one place.
+    auto run_forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>;
 };
 
 struct AdamOptimizer
@@ -4218,6 +4222,18 @@ auto Model::forward_output(NodeId node_id) -> Result<DeviceTensorConstViewf, Err
 }
 
 auto Model::forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>
+{
+    auto result = run_forward(input);
+    if (result.is_error())
+    {
+        // backward() and step() read forward_jobs.size() as "a pass ran", and run_forward() sizes
+        // it before launching anything - so a pass that died halfway would read as a complete one.
+        forward_jobs.clear();
+    }
+    return result;
+}
+
+auto Model::run_forward(DeviceTensorConstViewf input) -> Result<DeviceTensorConstViewf, Error>
 {
     forward_jobs.clear();
     forward_jobs.resize(layers.size());
