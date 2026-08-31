@@ -1764,8 +1764,8 @@ __global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorVi
 // grid: (ceil(W_in/bx), ceil(H_in/by), N*C), block: (bx, by, 1)
 __global__ auto upsample2d_backward(DeviceTensorConstViewf upstream, DeviceTensorViewf d_inputs, usize scale) -> void;
 
-__global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void;
-__global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 limit) -> void;
+__global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed_hash) -> void;
+__global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed_hash, f32 limit) -> void;
 __global__ auto sigmoid_forward(DeviceTensorConstViewf a, DeviceTensorViewf out) -> void;
 __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstViewf upstream,
                                  DeviceTensorViewf out) -> void;
@@ -2657,11 +2657,14 @@ __device__ inline auto uniform_f32(u32 seed) -> f32
     return hash_to_float(pcg_hash(seed));
 }
 
+// The seed is hashed here, once, rather than xored into the index raw: `i ^ seed` only permutes
+// which index draws which value, so every seed below the element count draws the same multiset.
 auto uniform_tensor(DeviceTensorViewf tensor, u32 seed, cudaStream_t stream) -> KernelJob<Void>
 {
     const usize n = tensor.element_count();
     const dim3 block(256);
-    return launch_kernel(uniform_tensor_kernel, Void{}, grid_covering(block, n), block, stream, tensor, seed);
+    return launch_kernel(uniform_tensor_kernel, Void{}, grid_covering(block, n), block, stream, tensor,
+                         pcg_hash(seed));
 }
 
 auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_out, cudaStream_t stream)
@@ -2670,7 +2673,8 @@ auto xavier_tensor(DeviceTensorViewf tensor, u32 seed, usize fan_in, usize fan_o
     const f32 limit = std::sqrt(6.0f / (f32)(fan_in + fan_out));
     const usize n = tensor.element_count();
     const dim3 block(256);
-    return launch_kernel(xavier_tensor_kernel, Void{}, grid_covering(block, n), block, stream, tensor, seed, limit);
+    return launch_kernel(xavier_tensor_kernel, Void{}, grid_covering(block, n), block, stream, tensor,
+                         pcg_hash(seed), limit);
 }
 
 // ===========================================================================
@@ -4592,24 +4596,24 @@ auto Model::step(AdamOptimizer &optimizer) -> Result<Void, Error>
 // Kernels
 // =============================================================================
 
-__global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed) -> void
+__global__ auto uniform_tensor_kernel(DeviceTensorViewf tensor, u32 seed_hash) -> void
 {
     const usize i = global_thread_x();
     if (i >= tensor.element_count())
     {
         return;
     }
-    tensor[i] = uniform_f32((u32)i ^ seed);
+    tensor[i] = uniform_f32(seed_hash ^ (u32)i);
 }
 
-__global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed, f32 limit) -> void
+__global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed_hash, f32 limit) -> void
 {
     const usize i = global_thread_x();
     if (i >= tensor.element_count())
     {
         return;
     }
-    tensor[i] = (uniform_f32((u32)i ^ seed) * 2.0f - 1.0f) * limit;
+    tensor[i] = (uniform_f32(seed_hash ^ (u32)i) * 2.0f - 1.0f) * limit;
 }
 
 __global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
