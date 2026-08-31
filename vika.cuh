@@ -1743,9 +1743,12 @@ __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf
                                 usize pool_h, usize pool_w, usize stride) -> void;
 
 // upstream: [N, out_H, out_W, C], argmax: [N, out_H, out_W, C], d_inputs: [N, H, W, C]
-// grid: (ceil(W_out/bx), ceil(H_out/by), N*C), block: (bx, by, 1)
+// grid: (ceil(C/bx), ceil(W/by), N*H), block: (bx, by, 1)
+//
+// One thread per *input* pixel, gathering the windows that cover it. Scattering with atomicAdd
+// instead would leave the summation order to the hardware, and fp addition is not associative.
 __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewu argmax,
-                                 DeviceTensorViewf d_inputs) -> void;
+                                 DeviceTensorViewf d_inputs, usize pool_h, usize pool_w, usize stride) -> void;
 
 // Nearest-neighbor upsampling: out(n, oh, ow, c) = inputs(n, oh/scale, ow/scale, c), i.e. every
 // input pixel is replicated into a scale x scale block of output pixels.
@@ -3400,17 +3403,14 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    // The slice, not the whole buffer: pooling scatters, so d_inputs has to start clean, but only
-    // the k rows this call writes and hands back are part of the result.
-    VIKA_UNWRAP_OR_RETURN(zero(sliced_d_inputs, stream.handle()));
-
-    // One thread per *output* position, unlike every other backward here - maxpool_backward
-    // scatters from the pooled grid back into d_inputs rather than gathering into it.
-    const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
+    // Each thread writes its own slot exactly once, so no zero() prefill. Its own geometry rather
+    // than nhwc_grid's: x walks the channel axis, and the row index shares grid.z with the batch.
+    const dim3 block(32, 4, 1);
+    const dim3 grid = grid_covering(block, d_inputs.extent(3), d_inputs.extent(2), k * d_inputs.extent(1));
 
     return {launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
-                          VIKA_UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs)};
+                          VIKA_UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs, pool_h, pool_w,
+                          stride)};
 }
 
 auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize scale)
@@ -5258,34 +5258,49 @@ __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf
 }
 
 __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewu argmax,
-                                 DeviceTensorViewf d_inputs) -> void
+                                 DeviceTensorViewf d_inputs, usize pool_h, usize pool_w, usize stride) -> void
 {
-    const usize ow = global_thread_x();
-    const usize oh = global_thread_y();
-    const usize c = blockIdx.z % upstream.extents[3];
-    const usize n = blockIdx.z / upstream.extents[3];
-
-    if (ow >= upstream.extents[2] || oh >= upstream.extents[1] || n >= upstream.extents[0])
-    {
-        return;
-    }
-
+    // x is the channel, not the width: NHWC makes that the contiguous axis, so a warp coalesces.
+    const usize c = global_thread_x();
+    const usize iw = global_thread_y();
     const usize H_in = d_inputs.extents[1];
-    const usize W_in = d_inputs.extents[2];
-    const u32 idx = argmax(n, oh, ow, c);
+    const usize ih = blockIdx.z % H_in;
+    const usize n = blockIdx.z / H_in;
 
-    // argmax is written by forward() and read here, and a standalone layer's backward() can be
-    // called first - on memory from empty(). Unchecked, the scatter below would write at an
-    // arbitrary offset.
-    if (idx >= H_in * W_in)
+    if (c >= d_inputs.extents[3] || iw >= d_inputs.extents[2] || n >= d_inputs.extents[0])
     {
         return;
     }
 
-    const usize ih = idx / W_in;
-    const usize iw = idx % W_in;
+    const usize H_out = upstream.extents[1];
+    const usize W_out = upstream.extents[2];
 
-    atomicAdd(&d_inputs(n, ih, iw, c), upstream(n, oh, ow, c));
+    // Windows covering (ih, iw): oh * stride <= ih < oh * stride + pool_h. Guarded against
+    // underflow, these being unsigned.
+    const usize oh_begin = (ih + 1 > pool_h) ? (ih + 1 - pool_h + stride - 1) / stride : 0;
+    const usize ow_begin = (iw + 1 > pool_w) ? (iw + 1 - pool_w + stride - 1) / stride : 0;
+    const usize oh_last = ih / stride + 1;
+    const usize ow_last = iw / stride + 1;
+    const usize oh_end = oh_last < H_out ? oh_last : H_out;
+    const usize ow_end = ow_last < W_out ? ow_last : W_out;
+
+    // An argmax forward() never wrote matches nothing, which is what the old bounds check was for.
+    const u32 flat = (u32)(ih * d_inputs.extents[2] + iw);
+
+    f32 sum = 0.0f;
+    for (usize oh = oh_begin; oh < oh_end; ++oh)
+    {
+        for (usize ow = ow_begin; ow < ow_end; ++ow)
+        {
+            if (argmax(n, oh, ow, c) == flat)
+            {
+                sum += upstream(n, oh, ow, c);
+            }
+        }
+    }
+
+    // Written once, not accumulated, so no prefill and no cross-thread ordering.
+    d_inputs(n, ih, iw, c) = sum;
 }
 
 __global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, usize scale) -> void
