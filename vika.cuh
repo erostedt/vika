@@ -1031,6 +1031,18 @@ using HostTensoru = HostTensor<u32>;
 // Device Tensors
 // =============================================================================
 
+// Waits for `stream` to drain, defaulting to the default stream (0).
+//
+// The host-to-device paths below need it: a cudaMemcpy from pageable memory returns once the source
+// is staged, while the transfer itself may still be in flight, and layer streams are non-blocking
+// so nothing would order the first kernel after the upload feeding it. Not cudaStreamLegacy (0x1):
+// under --default-stream per-thread that is not the stream the transfer used.
+inline auto sync(cudaStream_t stream = nullptr) -> Result<Void, Error>
+{
+    VIKA_RETURN_ON_CUDA_ERROR(cudaStreamSynchronize(stream));
+    return ok(Void{});
+}
+
 template <typename T>
 struct DeviceDeleter
 {
@@ -1069,6 +1081,7 @@ class DeviceOwningTensor
 
         auto tensor = VIKA_UNWRAP_OR_RETURN(empty(extents));
         VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(tensor.data(), data.data(), tensor.byte_count(), cudaMemcpyHostToDevice));
+        VIKA_UNWRAP_OR_RETURN(sync());
         return ok(std::move(tensor));
     }
 
@@ -1086,6 +1099,7 @@ class DeviceOwningTensor
     {
         auto tensor = VIKA_UNWRAP_OR_RETURN(empty(extents));
         VIKA_RETURN_ON_CUDA_ERROR(cudaMemset(tensor.data(), 0, tensor.byte_count()));
+        VIKA_UNWRAP_OR_RETURN(sync());
         return ok(std::move(tensor));
     }
 
@@ -1180,6 +1194,7 @@ auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, 
     }
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice));
+    VIKA_UNWRAP_OR_RETURN(sync());
     return ok(Void{});
 }
 
