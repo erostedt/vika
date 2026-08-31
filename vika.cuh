@@ -4563,6 +4563,13 @@ __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
     out[i] = 2.0f * (predictions[i] - targets[i]) / (f32)predictions.element_count();
 }
 
+// Away from 0 so log() cannot give -inf, and as low as f32 allows: Softmax's backward cancels
+// against the -t/p division, so a clamp above the true p shrinks the gradient when it matters most.
+__device__ inline auto cce_clamped_prediction(f32 p) -> f32
+{
+    return p < 1e-38f ? 1e-38f : p;
+}
+
 __global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
     -> void
 {
@@ -4571,9 +4578,7 @@ __global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConst
     {
         return;
     }
-    // Clamped away from 0, not the raw prediction - a probability that's genuinely (or numerically)
-    // zero at the one-hot target class would otherwise make log() produce -inf.
-    const f32 p = predictions[i] < 1e-12f ? 1e-12f : predictions[i];
+    const f32 p = cce_clamped_prediction(predictions[i]);
     atomicAdd(&out[0], -targets[i] * std::log(p) / (f32)predictions.extents[0]);
 }
 
@@ -4585,7 +4590,7 @@ __global__ auto cce_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
     {
         return;
     }
-    const f32 p = predictions[i] < 1e-12f ? 1e-12f : predictions[i];
+    const f32 p = cce_clamped_prediction(predictions[i]);
     out[i] = -targets[i] / p / (f32)predictions.extents[0];
 }
 
