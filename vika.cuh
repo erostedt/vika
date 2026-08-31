@@ -1158,6 +1158,26 @@ class DeviceOwningTensor
     Extents _extents;
 };
 
+// The memcpy and memset below move a run of bytes, so they can only serve a view whose elements
+// are that run. transposed() deliberately makes one whose elements are not.
+//
+// Here rather than beside the other _check helpers: these callers are templates, so every
+// translation unit that instantiates one needs this declared, not just the implementation unit.
+template <typename T>
+auto _check_contiguous(const DeviceTensorView<T> &view, const char *context, const char *name, const char *file,
+                       i32 line) -> Result<Void, Error>
+{
+    if (!view.is_contiguous())
+    {
+        return error(Error::make(ErrorKind::Shape, file, line,
+                                 "%s: %s is strided, not contiguous - this moves bytes in buffer order", context,
+                                 name));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_CONTIGUOUS(view) ::vika::_check_contiguous((view), __func__, #view, __FILE__, __LINE__)
+
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
@@ -1174,6 +1194,7 @@ auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_CONTIGUOUS(src));
     if (dst.extents() != src.extents)
     {
         return error(VIKA_SHAPE_ERROR("copy view -> host: source is %s, destination is %s",
@@ -1210,6 +1231,9 @@ auto copy(DeviceTensorView<const T> src, DeviceTensorView<T> dst, cudaStream_t s
                                       describe(src.extents).c_str(), describe(dst.extents).c_str()));
     }
 
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_CONTIGUOUS(src));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_CONTIGUOUS(dst));
+
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpyAsync(dst.data, src.data, src.byte_count(), cudaMemcpyDeviceToDevice, stream));
     return ok(Void{});
 }
@@ -1218,6 +1242,7 @@ auto copy(DeviceTensorView<const T> src, DeviceTensorView<T> dst, cudaStream_t s
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto zero(DeviceTensorView<T> dst, cudaStream_t stream) -> Result<Void, Error>
 {
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_CONTIGUOUS(dst));
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemsetAsync(dst.data, 0, dst.byte_count(), stream));
     return ok(Void{});
 }
@@ -1260,6 +1285,13 @@ struct DeviceTensorView
         }
     }
 
+    // Keeps `strides_` instead of deriving them, so a view that is deliberately not row-major -
+    // transposed(), or a slice of one - survives being re-wrapped.
+    DeviceTensorView(T *data_, const Extents &extents_, const Strides &strides_)
+        : data(data_), extents(extents_), strides(strides_)
+    {
+    }
+
     T *data = nullptr;
     Extents extents{};
     Strides strides{};
@@ -1267,6 +1299,22 @@ struct DeviceTensorView
     __host__ __device__ auto rank() const -> usize
     {
         return extents.size();
+    }
+
+    // Whether this view walks the buffer in its own row-major order, which is what every whole-
+    // buffer memcpy and memset here assumes. False for transposed() and anything derived from it.
+    __host__ __device__ auto is_contiguous() const -> bool
+    {
+        usize stride = 1;
+        for (usize i = extents.size(); i-- > 0;)
+        {
+            if (strides[i] != stride)
+            {
+                return false;
+            }
+            stride *= extents[i];
+        }
+        return true;
     }
 
     // Slices the leading dimension to its first n rows. Row-major storage makes those a
@@ -1283,12 +1331,12 @@ struct DeviceTensorView
         }
         auto sliced_extents = extents;
         sliced_extents[0] = n;
-        return ok(DeviceTensorView(data, sliced_extents));
+        return ok(DeviceTensorView(data, sliced_extents, strides));
     }
 
     auto const_view() const -> DeviceTensorView<const T>
     {
-        return DeviceTensorView<const T>(data, extents);
+        return DeviceTensorView<const T>(data, extents, strides);
     }
 
     __host__ __device__ inline usize element_count() const
