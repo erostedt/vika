@@ -11,8 +11,9 @@
 //     #include "vika.cuh"
 //
 // Both are .cu files: the header defines __global__ kernels, so nvcc has to compile it.
-// Configuration, if the defaults do not fit: VIKA_MAX_RANK (6) caps a tensor's rank, and
-// VIKA_MAX_ERROR_MESSAGE (192) the length of an error string. Define either before the include.
+// Nothing about it is configurable by macro: a tensor's rank is capped at 5 and an error string at
+// 256 chars, both fixed, because either one differing between two translation units would link
+// cleanly and then disagree about the layout of every tensor view.
 //
 // ---------------------------------------------------------------------------------------------
 // Training a model
@@ -133,14 +134,6 @@
 #include <variant>
 #include <vector>
 
-#ifndef VIKA_MAX_RANK
-#define VIKA_MAX_RANK 6
-#endif
-
-#ifndef VIKA_MAX_ERROR_MESSAGE
-#define VIKA_MAX_ERROR_MESSAGE 192
-#endif
-
 #define VIKA_PANIC(fmt, ...)                                                                                           \
     do                                                                                                                 \
     {                                                                                                                  \
@@ -199,6 +192,13 @@ using i32 = int32_t;
 using u32 = uint32_t;
 using f32 = float;
 using usize = size_t;
+
+// Fixed, not configurable. Both size a type that crosses a translation unit boundary - Extents
+// sits inside every DeviceTensorView, the message inside every Error - so two units built with
+// different values would link cleanly and then disagree about where the fields are. 5 is NHWC plus
+// one spare axis; 8 measured 3.6% slower on train_step, views being kernel parameters.
+constexpr usize MAX_RANK = 5;
+constexpr usize MAX_ERROR_MESSAGE = 256;
 
 // =============================================================================
 // Generic Utilities
@@ -409,7 +409,7 @@ class FixedVector
     }
 };
 
-using Extents = FixedVector<usize, VIKA_MAX_RANK>;
+using Extents = FixedVector<usize, MAX_RANK>;
 using Strides = Extents;
 
 template <typename Node>
@@ -637,7 +637,7 @@ class Error
     cudaError_t _code = cudaSuccess;
     const char *_file = "";
     i32 _line = 0;
-    char _message[VIKA_MAX_ERROR_MESSAGE] = {};
+    char _message[MAX_ERROR_MESSAGE] = {};
 };
 
 #define VIKA_ERROR(kind, ...) ::vika::Error::make((kind), __FILE__, __LINE__, __VA_ARGS__)
