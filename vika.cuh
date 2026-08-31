@@ -1108,6 +1108,30 @@ class DeviceOwningTensor
         return zero(other.extents());
     }
 
+    // Declared rather than left implicit: the implicit move takes _data but *copies* _extents,
+    // leaving the source a null pointer wearing the shape it used to have. A view of that indexes
+    // off nullptr, and the resulting cudaErrorIllegalAddress is sticky - every later CUDA call in
+    // the process fails, allocation included.
+    //
+    // Extents{0} rather than Extents{}: an empty product is 1, so empty extents would still claim
+    // one element and launch. A zero extent describes nothing, so the shape checks and the launch
+    // geometry both refuse it while the context stays usable.
+    DeviceOwningTensor(Self &&other) noexcept : _data(std::move(other._data)), _extents(other._extents)
+    {
+        other._extents = Extents{0};
+    }
+
+    auto operator=(Self &&other) noexcept -> Self &
+    {
+        if (this != &other)
+        {
+            _data = std::move(other._data);
+            _extents = other._extents;
+            other._extents = Extents{0};
+        }
+        return *this;
+    }
+
     auto element_count() const -> usize
     {
         return vika::element_count(_extents);
