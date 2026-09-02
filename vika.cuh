@@ -2620,11 +2620,14 @@ auto _check_transposed_window_fits(usize input, usize window, usize stride, usiz
         return error(
             Error::make(ErrorKind::Shape, file, line, "%s: input %s must be at least 1, got 0", context, axis));
     }
-    if ((input - 1) * stride + window < 2 * padding)
+    // <=, not <: at equality the output extent is exactly 0.
+    if ((input - 1) * stride + window <= 2 * padding)
     {
         return error(Error::make(ErrorKind::Shape, file, line,
-                                 "%s: padding %zu exceeds (input %s %zu - 1) * stride %zu + window %zu", context,
-                                 padding, axis, input, stride, window));
+                                 "%s: padding %zu leaves no output %s: (input %zu - 1) * stride %zu + window %zu "
+                                 "is %zu",
+                                 context, padding, axis, input, stride, window,
+                                 (input - 1) * stride + window));
     }
     return ok(Void{});
 }
@@ -4463,6 +4466,9 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
     for (usize i = 1; i + 1 < jobs.size(); ++i)
     {
         const auto contribution = VIKA_UNWRAP_OR_RETURN(jobs[i].wait());
+        // accumulate_into indexes the contribution at the accumulator's bound, so a shorter one
+        // reads past its end. Only the first was checked, by copy().
+        VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(contribution.extents, sliced_accum.extents));
         // Checked, not waited - see AddLayer::forward. These share one stream, so they are already
         // ordered against each other and against the copy above.
         auto job = launch_kernel(accumulate_into, sliced_accum.const_view(), grid, block, stream.handle(), contribution,
@@ -4476,6 +4482,7 @@ auto Model::accumulate_output_gradient(NodeId node_id) -> Result<DeviceTensorCon
     // Only the last one is waited, and it has to be: what this returns is read by the node's own
     // backward() on a different stream, and travels on as a `ready` job that nothing waits on.
     const auto last = VIKA_UNWRAP_OR_RETURN(jobs.back().wait());
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(last.extents, sliced_accum.extents));
     VIKA_UNWRAP_OR_RETURN(
         launch_kernel(accumulate_into, sliced_accum.const_view(), grid, block, stream.handle(), last, sliced_accum)
             .wait());
