@@ -1372,6 +1372,7 @@ struct DeviceTensorView
             strides[i] = stride;
             stride *= extents[i];
         }
+        count = stride;
     }
 
     // Keeps `strides_` instead of deriving them, so a view that is deliberately not row-major -
@@ -1379,11 +1380,20 @@ struct DeviceTensorView
     DeviceTensorView(T *data_, const Extents &extents_, const Strides &strides_)
         : data(data_), extents(extents_), strides(strides_)
     {
+        for (usize i = 0; i < extents.size(); ++i)
+        {
+            count *= extents[i];
+        }
     }
 
     T *data = nullptr;
     Extents extents{};
     Strides strides{};
+
+    // The product of `extents`, kept rather than recomputed. Kernels take this view by value and
+    // call element_count() per thread; walking a dynamically indexed array there costs the whole
+    // view a local-memory frame, in 16 of 28 kernels. Both constructors set it; nothing else may.
+    usize count = 1;
 
     __host__ __device__ auto rank() const -> usize
     {
@@ -1430,11 +1440,6 @@ struct DeviceTensorView
 
     __host__ __device__ inline usize element_count() const
     {
-        usize count = 1;
-        for (usize i = 0; i < extents.size(); ++i)
-        {
-            count *= extents[i];
-        }
         return count;
     }
 
