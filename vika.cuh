@@ -2489,8 +2489,12 @@ auto _check_rank(const Extents &extents, usize expected, const char *layout, con
     return ok(Void{});
 }
 
-#define VIKA_CHECK_RANK(extents, expected, layout)                                                                     \
-    ::vika::_check_rank((extents), (expected), (layout), __func__, #extents, __FILE__, __LINE__)
+// The explicit-context form is for callers where __func__ says nothing useful - inside a
+// std::visit lambda it expands to the lambda's own "operator()". See make_layer.
+#define VIKA_CHECK_RANK_AT(context, extents, expected, layout)                                                         \
+    ::vika::_check_rank((extents), (expected), (layout), (context), #extents, __FILE__, __LINE__)
+
+#define VIKA_CHECK_RANK(extents, expected, layout) VIKA_CHECK_RANK_AT(__func__, extents, expected, layout)
 
 #define VIKA_CHECK_TRAILING_EXTENTS(actual, expected)                                                                  \
     ::vika::_check_trailing_extents((actual), (expected), __func__, #actual, __FILE__, __LINE__)
@@ -4050,6 +4054,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, DenseSpec>)
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 2, "[N, features]"));
                 return DenseLayer::randomized(batch_size, pred_extents[0].at(1), s.output_features, s.seed)
                     .map(as_trainable);
             }
@@ -4071,6 +4076,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, Conv2DSpec>)
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
                 return Conv2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                s.kernel_height, s.kernel_width, pred_extents[0].at(3), s.channels_out,
                                                s.stride, s.padding, s.seed)
@@ -4079,6 +4085,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, ConvTranspose2DSpec>)
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
                 return ConvTranspose2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                         s.kernel_height, s.kernel_width, pred_extents[0].at(3),
                                                         s.channels_out, s.stride, s.padding, s.seed)
@@ -4087,6 +4094,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, MaxPool2DSpec>)
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
                 return MaxPool2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                     pred_extents[0].at(3), s.pool_height, s.pool_width, s.stride)
                     .map(as_trainable);
@@ -4094,6 +4102,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             else if constexpr (std::is_same_v<T, Upsample2DSpec>)
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
+                VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
                 return Upsample2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
                                                      pred_extents[0].at(3), s.scale)
                     .map(as_trainable);
