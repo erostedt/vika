@@ -226,7 +226,7 @@ constexpr u32 CONV_BACKWARD_Y = 64;
 // channels for the biases, filter taps for the weights - and y splitting the sum so it is not left
 // to one thread. Both feed a fixed-size shared array, so they must be constants.
 constexpr usize GRAD_REDUCE_X = 64;
-constexpr usize GRAD_REDUCE_Y = 4;
+constexpr usize GRAD_REDUCE_Y = 8;
 
 constexpr usize MAX_RANK = 5;
 constexpr usize MAX_ERROR_MESSAGE = 256;
@@ -3388,7 +3388,6 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
 
     const usize filter_count = filters.grad.element_count();
     const usize C_out = biases.grad.element_count();
-    const dim3 block(256);
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
@@ -3539,7 +3538,6 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
 
     const usize filter_count = filters.grad.element_count();
     const usize C_out = biases.grad.element_count();
-    const dim3 block(256);
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
