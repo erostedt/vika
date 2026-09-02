@@ -4525,6 +4525,14 @@ auto Model::backward(DeviceTensorConstViewf loss_grad) -> Result<Void, Error>
         // needs the sum, not the pieces.
         contributions = {KernelJob<DeviceTensorConstViewf>::ready(upstream)};
 
+        // Nothing reads a source node's gradient: the loop skips a node with no predecessors, and
+        // so does step(). If every predecessor is one, this layer's backward() would compute an
+        // input gradient for no one. Spelled the way both skips are, so the three cannot drift.
+        if (all_of(preds, [&](const NodeId &pred) { return layer_inputs[pred.value].empty(); }))
+        {
+            continue;
+        }
+
         // One job per predecessor, in the same order as preds - every layer type returns this
         // uniformly now (a 1-element vector for every single-input layer), so no per-type
         // special-casing is needed here regardless of how many inputs a layer takes.
