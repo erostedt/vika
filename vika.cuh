@@ -490,13 +490,15 @@ class [[nodiscard]] Result
 
     auto unwrap() & -> T &
     {
-        VIKA_PANIC_IF(is_error(), "called unwrap() on Err Result");
+        VIKA_PANIC_IF(is_error(), "called unwrap() on an Err Result: %s",
+                      std::get<E>(storage).describe().c_str());
         return std::get<T>(storage);
     }
 
     auto unwrap() const & -> const T &
     {
-        VIKA_PANIC_IF(is_error(), "called unwrap() on Err Result");
+        VIKA_PANIC_IF(is_error(), "called unwrap() on an Err Result: %s",
+                      std::get<E>(storage).describe().c_str());
         return std::get<T>(storage);
     }
 
@@ -504,7 +506,19 @@ class [[nodiscard]] Result
     // reference into its storage would dangle as soon as the full expression ends.
     auto unwrap() && -> T
     {
-        VIKA_PANIC_IF(is_error(), "called unwrap() on Err Result");
+        VIKA_PANIC_IF(is_error(), "called unwrap() on an Err Result: %s",
+                      std::get<E>(storage).describe().c_str());
+        return std::move(std::get<T>(storage));
+    }
+
+    // unwrap() with something to say, for a Result the caller is claiming cannot fail: it names
+    // the invariant that was broken, and the error names where it came from.
+    //
+    // Not assert(): <cassert> makes that a function-like macro, so x.assert(...) would expand and
+    // break for anyone who includes it, transitively included.
+    auto expect(const char *message) && -> T
+    {
+        VIKA_PANIC_IF(is_error(), "%s: %s", message, std::get<E>(storage).describe().c_str());
         return std::move(std::get<T>(storage));
     }
 
