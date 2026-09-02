@@ -200,7 +200,11 @@ using usize = size_t;
 // sits inside every DeviceTensorView, the message inside every Error - so two units built with
 // different values would link cleanly and then disagree about where the fields are. 5 is NHWC plus
 // one spare axis; 8 measured 3.6% slower on train_step, views being kernel parameters.
-constexpr usize warp_size = 32;
+constexpr usize WARP_SIZE = 32;
+
+// Threads per block in the loss reductions. with_extents sizes its partials buffer from this, so
+// the two have to agree.
+constexpr usize LOSS_REDUCE_BLOCK = 256;
 
 constexpr usize MAX_RANK = 5;
 constexpr usize MAX_ERROR_MESSAGE = 256;
@@ -1657,10 +1661,33 @@ __device__ inline auto warp_reduce_sum(f32 value) -> f32
     return value;
 }
 
+// Whole block, via one warp reduction per warp and a second over their totals. Only warp 0 holds
+// the result. The tree is fixed, so it gives the same answer every run.
+__device__ inline auto block_reduce_sum(f32 value) -> f32
+{
+    __shared__ f32 warp_totals[WARP_SIZE];
+    const usize lane = threadIdx.x % WARP_SIZE;
+    const usize warp = threadIdx.x / WARP_SIZE;
+
+    value = warp_reduce_sum(value);
+    if (lane == 0)
+    {
+        warp_totals[warp] = value;
+    }
+    __syncthreads();
+
+    if (warp != 0)
+    {
+        return 0.0f;
+    }
+    const usize warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+    return warp_reduce_sum(lane < warps ? warp_totals[lane] : 0.0f);
+}
+
 // The row a warp of this block is responsible for, and the lane's offset within it.
 __device__ inline auto warp_row() -> usize
 {
-    return blockIdx.x * (blockDim.x / warp_size) + threadIdx.x / warp_size;
+    return blockIdx.x * (blockDim.x / WARP_SIZE) + threadIdx.x / WARP_SIZE;
 }
 
 __device__ inline auto global_thread_x() -> usize
@@ -1677,10 +1704,10 @@ __device__ inline auto global_thread_y() -> usize
 // element count needs 64 bits on a large card; dim3 is unsigned int because that is CUDA's only
 // constructor. This is the one place the two meet, so the one place that narrows - overflowing a
 // u32 block count would take ~1e12 elements, 4 TB at f32.
-// A warp per row: the launch covers blockDim.x / warp_size rows per block.
+// A warp per row: the launch covers blockDim.x / WARP_SIZE rows per block.
 inline auto warp_per_row_grid(dim3 block, usize row_count) -> dim3
 {
-    const usize rows_per_block = block.x / warp_size;
+    const usize rows_per_block = block.x / WARP_SIZE;
     return dim3((u32)((row_count + rows_per_block - 1) / rows_per_block));
 }
 
@@ -1898,18 +1925,25 @@ __global__ auto add_bias(DeviceTensorConstViewf biases, DeviceTensorViewf out) -
 
 __global__ auto sum_rows(DeviceTensorConstViewf matrix, DeviceTensorViewf out) -> void;
 
-__global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
+// Reduced in two stages so the answer does not depend on the order blocks finish in: each block
+// sums its own slice into partials[blockIdx.x], then reduce_partials sums those and applies the
+// scale. Both trees are fixed, unlike the per-element atomicAdd onto one address this replaces,
+// which gave a different result run to run and lost precision accumulating one float at a time.
+__global__ auto mse_partials(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                             DeviceTensorViewf partials) -> void;
+__global__ auto cce_partials(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                             DeviceTensorViewf partials) -> void;
+__global__ auto reduce_partials(DeviceTensorConstViewf partials, usize count, f32 scale, DeviceTensorViewf out)
     -> void;
+
 __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void;
 
-// Averaged per sample (divides by row count, i.e. batch size), not per element like mse_kernel
+// Averaged per sample (divides by row count, i.e. batch size), not per element like mse_partials
 // above - the standard cross-entropy convention, since targets are one-hot along the last axis
 // and dividing by element count too would shrink the loss as the class count grows for no
 // meaningful reason. predictions are expected to already be probabilities (e.g. Softmax's own
 // output), not raw logits - this loss does not fuse a softmax internally.
-__global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
-    -> void;
 __global__ auto cce_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void;
 
@@ -2175,13 +2209,16 @@ struct MSELoss
         -> KernelJob<DeviceTensorConstViewf>;
 
     DeviceOwningTensorf loss;
+    // One entry per block of the first reduction stage, sized for the capacity this was built
+    // with. Read only by reduce_partials.
+    DeviceOwningTensorf partials;
     DeviceOwningTensorf d_inputs;
 
     Stream stream;
 };
 
 // Categorical cross-entropy. Same forward(predictions, targets)/backward(predictions, targets)
-// shape as MSELoss - see cce_kernel's doc comment for the normalization convention, and
+// shape as MSELoss - see cce_partials' doc comment for the normalization convention, and
 // train_step's for why sharing that shape is what actually matters (it's what lets train_step be
 // templated on Loss rather than needing a LossKind variant).
 struct CCELoss
@@ -2195,6 +2232,9 @@ struct CCELoss
         -> KernelJob<DeviceTensorConstViewf>;
 
     DeviceOwningTensorf loss;
+    // One entry per block of the first reduction stage, sized for the capacity this was built
+    // with. Read only by reduce_partials.
+    DeviceOwningTensorf partials;
     DeviceOwningTensorf d_inputs;
 
     Stream stream;
@@ -3765,8 +3805,15 @@ auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
     auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(1)));
     auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
+    const usize count = VIKA_UNWRAP_OR_RETURN(checked_element_count(extents));
+    const usize blocks = (count + LOSS_REDUCE_BLOCK - 1) / LOSS_REDUCE_BLOCK;
+    auto partials = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(blocks)));
+
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
-    return ok(MSELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
+    return ok(MSELoss{.loss = std::move(loss),
+                 .partials = std::move(partials),
+                 .d_inputs = std::move(d_inputs),
+                 .stream = std::move(stream)});
 }
 
 auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
@@ -3776,12 +3823,18 @@ auto MSELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
-    VIKA_UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
-
     const usize n = predictions.element_count();
-    const dim3 block(256);
-    return launch_kernel(mse_kernel, loss.const_view(), grid_covering(block, n), block, stream.handle(), predictions,
-                         targets, loss.view());
+    const dim3 block((u32)LOSS_REDUCE_BLOCK);
+    const auto grid = grid_covering(block, n);
+
+    auto blockwise = launch_kernel(mse_partials, loss.const_view(), grid, block, stream.handle(), predictions, targets,
+                                   partials.view());
+    if (blockwise.is_error())
+    {
+        return blockwise;
+    }
+    return launch_kernel(reduce_partials, loss.const_view(), dim3(1), block, stream.handle(), partials.const_view(),
+                         (usize)grid.x, 1.0f / (f32)n, loss.view());
 }
 
 auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
@@ -3805,8 +3858,15 @@ auto CCELoss::with_extents(const Extents &extents) -> Result<CCELoss, Error>
     auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(1)));
     auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
+    const usize count = VIKA_UNWRAP_OR_RETURN(checked_element_count(extents));
+    const usize blocks = (count + LOSS_REDUCE_BLOCK - 1) / LOSS_REDUCE_BLOCK;
+    auto partials = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(blocks)));
+
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
-    return ok(CCELoss{.loss = std::move(loss), .d_inputs = std::move(d_inputs), .stream = std::move(stream)});
+    return ok(CCELoss{.loss = std::move(loss),
+                 .partials = std::move(partials),
+                 .d_inputs = std::move(d_inputs),
+                 .stream = std::move(stream)});
 }
 
 auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
@@ -3816,12 +3876,19 @@ auto CCELoss::forward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(targets.extents, d_inputs.extents()));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_BATCH_AGREEMENT(predictions, targets));
 
-    VIKA_UNWRAP_OR_RETURN(zero(loss.view(), stream.handle()));
-
     const usize n = predictions.element_count();
-    const dim3 block(256);
-    return launch_kernel(cce_kernel, loss.const_view(), grid_covering(block, n), block, stream.handle(), predictions,
-                         targets, loss.view());
+    const dim3 block((u32)LOSS_REDUCE_BLOCK);
+    const auto grid = grid_covering(block, n);
+
+    auto blockwise = launch_kernel(cce_partials, loss.const_view(), grid, block, stream.handle(), predictions, targets,
+                                   partials.view());
+    if (blockwise.is_error())
+    {
+        return blockwise;
+    }
+    // Per sample, not per element - see cce_partials' doc comment.
+    return launch_kernel(reduce_partials, loss.const_view(), dim3(1), block, stream.handle(), partials.const_view(),
+                         (usize)grid.x, 1.0f / (f32)predictions.extents[0], loss.view());
 }
 
 auto CCELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets)
@@ -4748,16 +4815,64 @@ __global__ auto xavier_tensor_kernel(DeviceTensorViewf tensor, u32 seed_hash, f3
     tensor[i] = (uniform_f32(seed_hash ^ (u32)i) * 2.0f - 1.0f) * limit;
 }
 
-__global__ auto mse_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
-    -> void
+// Away from 0 so log() cannot give -inf, and as low as f32 allows: Softmax's backward cancels
+// against the -t/p division, so a clamp above the true p shrinks the gradient when it matters most.
+__device__ inline auto cce_clamped_prediction(f32 p) -> f32
+{
+    return p < 1e-38f ? 1e-38f : p;
+}
+
+__global__ auto mse_partials(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                             DeviceTensorViewf partials) -> void
 {
     const usize i = global_thread_x();
-    if (i >= predictions.element_count())
+    f32 value = 0.0f;
+    if (i < predictions.element_count())
     {
-        return;
+        const f32 diff = predictions[i] - targets[i];
+        value = diff * diff;
     }
-    const f32 diff = predictions[i] - targets[i];
-    atomicAdd(&out[0], diff * diff / (f32)predictions.element_count());
+
+    const f32 total = block_reduce_sum(value);
+    if (threadIdx.x == 0)
+    {
+        partials[blockIdx.x] = total;
+    }
+}
+
+__global__ auto cce_partials(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
+                             DeviceTensorViewf partials) -> void
+{
+    const usize i = global_thread_x();
+    f32 value = 0.0f;
+    if (i < predictions.element_count())
+    {
+        value = -targets[i] * std::log(cce_clamped_prediction(predictions[i]));
+    }
+
+    const f32 total = block_reduce_sum(value);
+    if (threadIdx.x == 0)
+    {
+        partials[blockIdx.x] = total;
+    }
+}
+
+// One block. The scale is applied here rather than per element, which is both cheaper and more
+// accurate - the sum is formed at full magnitude before being divided once.
+__global__ auto reduce_partials(DeviceTensorConstViewf partials, usize count, f32 scale, DeviceTensorViewf out)
+    -> void
+{
+    f32 sum = 0.0f;
+    for (usize i = threadIdx.x; i < count; i += blockDim.x)
+    {
+        sum += partials[i];
+    }
+
+    const f32 total = block_reduce_sum(sum);
+    if (threadIdx.x == 0)
+    {
+        out[0] = total * scale;
+    }
 }
 
 __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
@@ -4771,24 +4886,6 @@ __global__ auto mse_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTe
     out[i] = 2.0f * (predictions[i] - targets[i]) / (f32)predictions.element_count();
 }
 
-// Away from 0 so log() cannot give -inf, and as low as f32 allows: Softmax's backward cancels
-// against the -t/p division, so a clamp above the true p shrinks the gradient when it matters most.
-__device__ inline auto cce_clamped_prediction(f32 p) -> f32
-{
-    return p < 1e-38f ? 1e-38f : p;
-}
-
-__global__ auto cce_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets, DeviceTensorViewf out)
-    -> void
-{
-    const usize i = global_thread_x();
-    if (i >= predictions.element_count())
-    {
-        return;
-    }
-    const f32 p = cce_clamped_prediction(predictions[i]);
-    atomicAdd(&out[0], -targets[i] * std::log(p) / (f32)predictions.extents[0]);
-}
 
 __global__ auto cce_gradient_kernel(DeviceTensorConstViewf predictions, DeviceTensorConstViewf targets,
                                     DeviceTensorViewf out) -> void
@@ -4864,14 +4961,14 @@ __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf 
         return;
     }
 
-    const usize lane = threadIdx.x % warp_size;
+    const usize lane = threadIdx.x % WARP_SIZE;
     const usize base = row * width;
 
     // Subtract the row max before exponentiating - same shift-invariance trick as every softmax
     // implementation, so a row of large logits doesn't overflow expf into inf/nan. Lanes past the
     // end of a short row contribute -inf, which cannot win the max.
     f32 max_val = -INFINITY;
-    for (usize col = lane; col < width; col += warp_size)
+    for (usize col = lane; col < width; col += WARP_SIZE)
     {
         const f32 val = input[base + col];
         max_val = val > max_val ? val : max_val;
@@ -4879,7 +4976,7 @@ __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf 
     max_val = warp_reduce_max(max_val);
 
     f32 sum = 0.0f;
-    for (usize col = lane; col < width; col += warp_size)
+    for (usize col = lane; col < width; col += WARP_SIZE)
     {
         const f32 e = std::exp(input[base + col] - max_val);
         out[base + col] = e;
@@ -4887,7 +4984,7 @@ __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf 
     }
     sum = warp_reduce_sum(sum);
 
-    for (usize col = lane; col < width; col += warp_size)
+    for (usize col = lane; col < width; col += WARP_SIZE)
     {
         out[base + col] /= sum;
     }
@@ -4905,17 +5002,17 @@ __global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorCon
         return;
     }
 
-    const usize lane = threadIdx.x % warp_size;
+    const usize lane = threadIdx.x % WARP_SIZE;
     const usize base = row * width;
 
     f32 dot = 0.0f;
-    for (usize col = lane; col < width; col += warp_size)
+    for (usize col = lane; col < width; col += WARP_SIZE)
     {
         dot += outputs[base + col] * upstream[base + col];
     }
     dot = warp_reduce_sum(dot);
 
-    for (usize col = lane; col < width; col += warp_size)
+    for (usize col = lane; col < width; col += WARP_SIZE)
     {
         const usize idx = base + col;
         out[idx] = outputs[idx] * (upstream[idx] - dot);
