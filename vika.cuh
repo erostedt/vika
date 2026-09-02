@@ -1731,6 +1731,14 @@ inline auto nhwc_grid(dim3 block, const Extents &target, usize batch) -> dim3
     return grid_covering(block, target[2], target[1], batch * target[3]);
 }
 
+// x over the channel axis, which row-major NHWC makes the contiguous one, y over width, and the
+// row sharing grid.z with the batch. nhwc_grid above puts width on x instead, so a warp there
+// strides by the channel count on every access.
+inline auto nhwc_channel_grid(dim3 block, const Extents &target, usize batch) -> dim3
+{
+    return grid_covering(block, target[3], target[2], batch * target[1]);
+}
+
 // Launches `kernel` and reads cudaGetLastError() immediately, because cudaStreamSynchronize -
 // what KernelJob::wait() checks - does not report launch-configuration failures such as
 // cudaErrorInvalidConfiguration. A rejected launch becomes a failed job rather than a job holding
@@ -3325,8 +3333,8 @@ auto Conv2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> 
     const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
+    const dim3 block(32, 8, 1);
+    const dim3 grid = nhwc_channel_grid(block, outputs.extents(), k);
 
     return launch_kernel(conv_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
@@ -3593,10 +3601,9 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    // Each thread writes its own slot exactly once, so no zero() prefill. Its own geometry rather
-    // than nhwc_grid's: x walks the channel axis, and the row index shares grid.z with the batch.
+    // Each thread writes its own slot exactly once, so no zero() prefill.
     const dim3 block(32, 4, 1);
-    const dim3 grid = grid_covering(block, d_inputs.extent(3), d_inputs.extent(2), k * d_inputs.extent(1));
+    const dim3 grid = nhwc_channel_grid(block, d_inputs.extents(), k);
 
     return {launch_kernel(maxpool_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           VIKA_UNWRAP_OR_RETURN(argmax.const_view().first_n(k)), sliced_d_inputs, pool_h, pool_w,
@@ -5132,12 +5139,15 @@ __global__ auto matmul_kernel(DeviceTensorConstViewf a, DeviceTensorConstViewf b
 __global__ auto conv_forward(DeviceTensorConstViewf inputs, DeviceTensorConstViewf filters,
                              DeviceTensorConstViewf biases, DeviceTensorViewf out, usize stride, usize padding) -> void
 {
-    const usize ow = global_thread_x();
-    const usize oh = global_thread_y();
-    const usize oc = blockIdx.z % out.extents[3];
-    const usize n = blockIdx.z / out.extents[3];
+    // x is the output channel: it is what `out` and `filters` are contiguous in, so a warp writes
+    // one line and reads one line of taps, and the input read below becomes a broadcast.
+    const usize oc = global_thread_x();
+    const usize ow = global_thread_y();
+    const usize H_out = out.extents[1];
+    const usize oh = blockIdx.z % H_out;
+    const usize n = blockIdx.z / H_out;
 
-    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    if (oc >= out.extents[3] || ow >= out.extents[2] || n >= out.extents[0])
     {
         return;
     }
