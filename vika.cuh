@@ -200,6 +200,8 @@ using usize = size_t;
 // sits inside every DeviceTensorView, the message inside every Error - so two units built with
 // different values would link cleanly and then disagree about where the fields are. 5 is NHWC plus
 // one spare axis; 8 measured 3.6% slower on train_step, views being kernel parameters.
+constexpr usize warp_size = 32;
+
 constexpr usize MAX_RANK = 5;
 constexpr usize MAX_ERROR_MESSAGE = 256;
 
@@ -1634,6 +1636,33 @@ struct [[nodiscard]] KernelJob
 // widening on the receiving end can help. It takes 4.29e9 threads to wrap - 17 GB of f32, so not
 // on a 12 GB card but ordinary on an A100 - and the wrapped index still passes an
 // element_count() check, so the thread silently works on the wrong element.
+// Butterfly reductions across a warp: every lane ends up holding the result, so no lane has to
+// read it back from anywhere. Full mask - these are called with all 32 lanes active.
+__device__ inline auto warp_reduce_max(f32 value) -> f32
+{
+    for (i32 offset = 16; offset > 0; offset >>= 1)
+    {
+        const f32 other = __shfl_xor_sync(0xffffffffu, value, offset);
+        value = other > value ? other : value;
+    }
+    return value;
+}
+
+__device__ inline auto warp_reduce_sum(f32 value) -> f32
+{
+    for (i32 offset = 16; offset > 0; offset >>= 1)
+    {
+        value += __shfl_xor_sync(0xffffffffu, value, offset);
+    }
+    return value;
+}
+
+// The row a warp of this block is responsible for, and the lane's offset within it.
+__device__ inline auto warp_row() -> usize
+{
+    return blockIdx.x * (blockDim.x / warp_size) + threadIdx.x / warp_size;
+}
+
 __device__ inline auto global_thread_x() -> usize
 {
     return (usize)blockIdx.x * blockDim.x + threadIdx.x;
@@ -1648,6 +1677,13 @@ __device__ inline auto global_thread_y() -> usize
 // element count needs 64 bits on a large card; dim3 is unsigned int because that is CUDA's only
 // constructor. This is the one place the two meet, so the one place that narrows - overflowing a
 // u32 block count would take ~1e12 elements, 4 TB at f32.
+// A warp per row: the launch covers blockDim.x / warp_size rows per block.
+inline auto warp_per_row_grid(dim3 block, usize row_count) -> dim3
+{
+    const usize rows_per_block = block.x / warp_size;
+    return dim3((u32)((row_count + rows_per_block - 1) / rows_per_block));
+}
+
 inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
 {
     const auto blocks = [](usize count, u32 block_size) -> u32 { return (u32)((count + block_size - 1) / block_size); };
@@ -1842,10 +1878,10 @@ __global__ auto sigmoid_backward(DeviceTensorConstViewf a, DeviceTensorConstView
 
 // Normalizes along the last axis only - both tensors treated as flattened [rows, width]
 // regardless of actual rank, same convention as concat_copy/concat_split, since row-major storage
-// makes the last axis the contiguous one to reduce over. One thread per row (not per element):
-// each row's max/sum/normalize all depend on every other element in that same row, so there is
-// nothing to parallelize below row granularity without a shared-memory reduction, which nothing
-// else in this file uses either (see sum_rows' identical one-thread-per-row shape).
+// makes the last axis the contiguous one to reduce over. One warp per row: each row's
+// max/sum/normalize depend on every other element in that row, so the lanes stride across it and
+// combine with shuffles, which needs no shared memory. sum_rows still has the older
+// one-thread-per-row shape.
 __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf out) -> void;
 
 // outputs: this layer's own forward() result (the softmax probabilities), not its input - the
@@ -3086,11 +3122,11 @@ auto SoftmaxLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) ->
     const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    // One thread per row, not per element - see softmax_forward's own doc comment for why.
+    // One warp per row, so a block of 256 covers eight rows.
     const usize width = input.extents.back();
     const usize row_count = input.element_count() / width;
     const dim3 block(256);
-    const auto grid = grid_covering(block, row_count);
+    const auto grid = warp_per_row_grid(block, row_count);
     return launch_kernel(softmax_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs);
 }
@@ -3109,7 +3145,7 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream)
     const usize width = upstream.extents.back();
     const usize row_count = upstream.element_count() / width;
     const dim3 block(256);
-    const auto grid = grid_covering(block, row_count);
+    const auto grid = warp_per_row_grid(block, row_count);
     return {launch_kernel(softmax_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(),
                           VIKA_UNWRAP_OR_RETURN(outputs.const_view().first_n(k)), upstream,
                           sliced_d_inputs)};
@@ -4822,35 +4858,38 @@ __global__ auto softmax_forward(DeviceTensorConstViewf input, DeviceTensorViewf 
     const usize width = input.extents.back();
     const usize row_count = input.element_count() / width;
 
-    const usize row = global_thread_x();
+    const usize row = warp_row();
     if (row >= row_count)
     {
         return;
     }
 
+    const usize lane = threadIdx.x % warp_size;
+    const usize base = row * width;
+
     // Subtract the row max before exponentiating - same shift-invariance trick as every softmax
-    // implementation, so a row of large logits doesn't overflow expf into inf/nan.
-    f32 max_val = input[row * width];
-    for (usize col = 1; col < width; ++col)
+    // implementation, so a row of large logits doesn't overflow expf into inf/nan. Lanes past the
+    // end of a short row contribute -inf, which cannot win the max.
+    f32 max_val = -INFINITY;
+    for (usize col = lane; col < width; col += warp_size)
     {
-        const f32 val = input[row * width + col];
-        if (val > max_val)
-        {
-            max_val = val;
-        }
+        const f32 val = input[base + col];
+        max_val = val > max_val ? val : max_val;
     }
+    max_val = warp_reduce_max(max_val);
 
     f32 sum = 0.0f;
-    for (usize col = 0; col < width; ++col)
+    for (usize col = lane; col < width; col += warp_size)
     {
-        const f32 e = std::exp(input[row * width + col] - max_val);
-        out[row * width + col] = e;
+        const f32 e = std::exp(input[base + col] - max_val);
+        out[base + col] = e;
         sum += e;
     }
+    sum = warp_reduce_sum(sum);
 
-    for (usize col = 0; col < width; ++col)
+    for (usize col = lane; col < width; col += warp_size)
     {
-        out[row * width + col] /= sum;
+        out[base + col] /= sum;
     }
 }
 
@@ -4860,20 +4899,25 @@ __global__ auto softmax_backward(DeviceTensorConstViewf outputs, DeviceTensorCon
     const usize width = outputs.extents.back();
     const usize row_count = outputs.element_count() / width;
 
-    const usize row = global_thread_x();
+    const usize row = warp_row();
     if (row >= row_count)
     {
         return;
     }
 
+    const usize lane = threadIdx.x % warp_size;
+    const usize base = row * width;
+
     f32 dot = 0.0f;
-    for (usize col = 0; col < width; ++col)
+    for (usize col = lane; col < width; col += warp_size)
     {
-        dot += outputs[row * width + col] * upstream[row * width + col];
+        dot += outputs[base + col] * upstream[base + col];
     }
-    for (usize col = 0; col < width; ++col)
+    dot = warp_reduce_sum(dot);
+
+    for (usize col = lane; col < width; col += warp_size)
     {
-        const usize idx = row * width + col;
+        const usize idx = base + col;
         out[idx] = outputs[idx] * (upstream[idx] - dot);
     }
 }
