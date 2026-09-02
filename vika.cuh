@@ -208,6 +208,11 @@ constexpr usize LOSS_REDUCE_BLOCK = 256;
 
 // conv_bias_gradients' block: x walks output channels, which NHWC makes contiguous, and y splits
 // the positions being summed. Both feed a fixed-size shared array, so they must be constants.
+// conv_backward's block: x over input channels, y over width. C_in can be as low as 1 (an
+// image's first conv), so x is kept narrow and y wide to keep a warp full there.
+constexpr u32 CONV_BACKWARD_X = 4;
+constexpr u32 CONV_BACKWARD_Y = 64;
+
 constexpr usize BIAS_REDUCE_X = 64;
 constexpr usize BIAS_REDUCE_Y = 4;
 
@@ -3347,8 +3352,8 @@ auto Conv2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, d_inputs.extents(), k);
+    const dim3 block(CONV_BACKWARD_X, CONV_BACKWARD_Y, 1);
+    const dim3 grid = nhwc_channel_grid(block, d_inputs.extents(), k);
 
     return {launch_kernel(conv_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           filters.value.const_view(), sliced_d_inputs, stride, padding)};
@@ -5184,12 +5189,16 @@ __global__ auto conv_forward(DeviceTensorConstViewf inputs, DeviceTensorConstVie
 __global__ auto conv_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewf filters,
                               DeviceTensorViewf d_inputs, usize stride, usize padding) -> void
 {
-    const usize w = global_thread_x();
-    const usize h = global_thread_y();
-    const usize ic = blockIdx.z % d_inputs.extents[3];
-    const usize n = blockIdx.z / d_inputs.extents[3];
+    // x is the input channel, which d_inputs is contiguous in, so a warp writes one line and the
+    // upstream read is a broadcast. filters are contiguous in oc rather than ic, so the tap read
+    // strides - they are small enough to sit in cache, and the write is the larger traffic.
+    const usize ic = global_thread_x();
+    const usize w = global_thread_y();
+    const usize H_in = d_inputs.extents[1];
+    const usize h = blockIdx.z % H_in;
+    const usize n = blockIdx.z / H_in;
 
-    if (w >= d_inputs.extents[2] || h >= d_inputs.extents[1] || n >= d_inputs.extents[0])
+    if (ic >= d_inputs.extents[3] || w >= d_inputs.extents[2] || n >= d_inputs.extents[0])
     {
         return;
     }
