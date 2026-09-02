@@ -206,6 +206,11 @@ constexpr usize WARP_SIZE = 32;
 // the two have to agree.
 constexpr usize LOSS_REDUCE_BLOCK = 256;
 
+// conv_bias_gradients' block: x walks output channels, which NHWC makes contiguous, and y splits
+// the positions being summed. Both feed a fixed-size shared array, so they must be constants.
+constexpr usize BIAS_REDUCE_X = 64;
+constexpr usize BIAS_REDUCE_Y = 4;
+
 constexpr usize MAX_RANK = 5;
 constexpr usize MAX_ERROR_MESSAGE = 256;
 
@@ -1842,7 +1847,11 @@ __global__ auto conv_backward(DeviceTensorConstViewf upstream, DeviceTensorConst
 __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTensorConstViewf upstream,
                                       DeviceTensorViewf d_filters, usize stride, usize padding) -> void;
 
-// upstream: [N, out_H, out_W, C_out], d_biases: [C_out], 1D grid over C_out
+// upstream: [N, out_H, out_W, C_out], d_biases: [C_out]
+// grid: (ceil(C_out/BIAS_REDUCE_X), 1, 1), block: (BIAS_REDUCE_X, BIAS_REDUCE_Y, 1)
+//
+// x over channels so a warp reads a contiguous run, y over positions so the sum is not left to a
+// single thread per channel - which put the whole reduction on one SM.
 __global__ auto conv_bias_gradients(DeviceTensorConstViewf upstream, DeviceTensorViewf d_biases) -> void;
 
 // ConvTranspose2D is Conv2D run inside out: its forward is exactly conv_backward's data-gradient
@@ -3357,7 +3366,9 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
     {
         return weight_job;
     }
-    return launch_kernel(conv_bias_gradients, gradients, grid_covering(block, C_out), block, stream.handle(), upstream,
+    const dim3 bias_block((u32)BIAS_REDUCE_X, (u32)BIAS_REDUCE_Y);
+    const auto bias_grid = grid_covering(bias_block, C_out);
+    return launch_kernel(conv_bias_gradients, gradients, bias_grid, bias_block, stream.handle(), upstream,
                          biases.grad.view());
 }
 
@@ -3506,7 +3517,9 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
     }
     // Identical in shape to Conv2D's own bias gradient - see conv_transpose_forward's doc comment
     // for why conv_bias_gradients is reused here unchanged rather than getting its own variant.
-    return launch_kernel(conv_bias_gradients, gradients, grid_covering(block, C_out), block, stream.handle(), upstream,
+    const dim3 bias_block((u32)BIAS_REDUCE_X, (u32)BIAS_REDUCE_Y);
+    const auto bias_grid = grid_covering(bias_block, C_out);
+    return launch_kernel(conv_bias_gradients, gradients, bias_grid, bias_block, stream.handle(), upstream,
                          biases.grad.view());
 }
 
@@ -5262,28 +5275,36 @@ __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTenso
 
 __global__ auto conv_bias_gradients(DeviceTensorConstViewf upstream, DeviceTensorViewf d_biases) -> void
 {
-    const usize oc = global_thread_x();
-    if (oc >= d_biases.extents[0])
-    {
-        return;
-    }
+    __shared__ f32 partial[BIAS_REDUCE_Y][BIAS_REDUCE_X];
 
-    const usize N = upstream.extents[0];
-    const usize H_out = upstream.extents[1];
-    const usize W_out = upstream.extents[2];
+    const usize channels = upstream.extents[3];
+    const usize positions = upstream.extents[0] * upstream.extents[1] * upstream.extents[2];
+    const usize oc = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool live = oc < d_biases.extents[0];
 
+    // Flat over (n, oh, ow): row-major NHWC puts the channel last, so position p starts at
+    // p * channels - the same flattening concat_copy and the loss reductions use.
     f32 sum = 0.0f;
-    for (usize n = 0; n < N; ++n)
+    if (live)
     {
-        for (usize oh = 0; oh < H_out; ++oh)
+        for (usize p = threadIdx.y; p < positions; p += blockDim.y)
         {
-            for (usize ow = 0; ow < W_out; ++ow)
-            {
-                sum += upstream(n, oh, ow, oc);
-            }
+            sum += upstream[p * channels + oc];
         }
     }
-    d_biases[oc] = sum;
+
+    partial[threadIdx.y][threadIdx.x] = sum;
+    __syncthreads();
+
+    if (threadIdx.y == 0 && live)
+    {
+        f32 total = 0.0f;
+        for (usize y = 0; y < blockDim.y; ++y)
+        {
+            total += partial[y][threadIdx.x];
+        }
+        d_biases[oc] = total;
+    }
 }
 
 __global__ auto conv_transpose_forward(DeviceTensorConstViewf inputs, DeviceTensorConstViewf filters,
