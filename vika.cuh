@@ -3485,8 +3485,8 @@ auto ConvTranspose2DLayer::forward(const std::vector<DeviceTensorConstViewf> &in
     const usize k = input.extents[0];
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
-    const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
+    const dim3 block(CONV_BACKWARD_X, CONV_BACKWARD_Y, 1);
+    const dim3 grid = nhwc_channel_grid(block, outputs.extents(), k);
 
     return launch_kernel(conv_transpose_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          filters.value.const_view(), biases.value.const_view(), sliced_outputs, stride, padding);
@@ -3500,8 +3500,8 @@ auto ConvTranspose2DLayer::backward(const DeviceTensorConstViewf &upstream)
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
-    const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, d_inputs.extents(), k);
+    const dim3 block(32, 8, 1);
+    const dim3 grid = nhwc_channel_grid(block, d_inputs.extents(), k);
 
     return {launch_kernel(conv_transpose_backward, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           filters.value.const_view(), sliced_d_inputs, stride, padding)};
@@ -5330,12 +5330,16 @@ __global__ auto conv_transpose_forward(DeviceTensorConstViewf inputs, DeviceTens
                                        DeviceTensorConstViewf biases, DeviceTensorViewf out, usize stride,
                                        usize padding) -> void
 {
-    const usize ow = global_thread_x();
-    const usize oh = global_thread_y();
-    const usize oc = blockIdx.z % out.extents[3];
-    const usize n = blockIdx.z / out.extents[3];
+    // x is the output channel, which `out` is contiguous in. Filters are [kH, kW, C_out, C_in]
+    // here, so the tap read strides - the same trade conv_backward makes, this being that
+    // computation run forward.
+    const usize oc = global_thread_x();
+    const usize ow = global_thread_y();
+    const usize H_out = out.extents[1];
+    const usize oh = blockIdx.z % H_out;
+    const usize n = blockIdx.z / H_out;
 
-    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    if (oc >= out.extents[3] || ow >= out.extents[2] || n >= out.extents[0])
     {
         return;
     }
@@ -5383,12 +5387,15 @@ __global__ auto conv_transpose_forward(DeviceTensorConstViewf inputs, DeviceTens
 __global__ auto conv_transpose_backward(DeviceTensorConstViewf upstream, DeviceTensorConstViewf filters,
                                         DeviceTensorViewf d_inputs, usize stride, usize padding) -> void
 {
-    const usize iw = global_thread_x();
-    const usize ih = global_thread_y();
-    const usize ic = blockIdx.z % d_inputs.extents[3];
-    const usize n = blockIdx.z / d_inputs.extents[3];
+    // x is the input channel. Filters are [kH, kW, C_out, C_in], so unlike the forward above both
+    // the write and the tap read are contiguous in it, and upstream is a broadcast.
+    const usize ic = global_thread_x();
+    const usize iw = global_thread_y();
+    const usize H_in = d_inputs.extents[1];
+    const usize ih = blockIdx.z % H_in;
+    const usize n = blockIdx.z / H_in;
 
-    if (iw >= d_inputs.extents[2] || ih >= d_inputs.extents[1] || n >= d_inputs.extents[0])
+    if (ic >= d_inputs.extents[3] || iw >= d_inputs.extents[2] || n >= d_inputs.extents[0])
     {
         return;
     }
