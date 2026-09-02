@@ -1727,18 +1727,12 @@ inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
     return dim3(blocks(x, block.x), blocks(y, block.y), blocks(z, block.z));
 }
 
-// The launch geometry every [N, H, W, C] layer uses: one thread per output column and row, with
-// the grid's z dimension covering batch * channels. Sized from the extents of the tensor the
-// kernel writes - taking them from the other one silently under-covers it whenever the two differ,
-// which is what 76ee8e7 fixed in DenseLayer::weight_gradients.
-inline auto nhwc_grid(dim3 block, const Extents &target, usize batch) -> dim3
-{
-    return grid_covering(block, target[2], target[1], batch * target[3]);
-}
-
-// x over the channel axis, which row-major NHWC makes the contiguous one, y over width, and the
-// row sharing grid.z with the batch. nhwc_grid above puts width on x instead, so a warp there
-// strides by the channel count on every access.
+// The launch geometry every [N, H, W, C] layer uses. x covers the channel axis, which row-major
+// NHWC makes the contiguous one, y the width, and z the row folded together with the batch. It
+// put width on x until each kernel was measured, which made a warp stride by the channel count on
+// every access. Sized from the extents of the tensor the kernel writes - taking them from the
+// other one silently under-covers it whenever the two differ, which is what 76ee8e7 fixed in
+// DenseLayer::weight_gradients.
 inline auto nhwc_channel_grid(dim3 block, const Extents &target, usize batch) -> dim3
 {
     return grid_covering(block, target[3], target[2], batch * target[1]);
@@ -3593,7 +3587,7 @@ auto MaxPool2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
     auto sliced_argmax = VIKA_UNWRAP_OR_RETURN(argmax.view().first_n(k));
 
     const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
+    const dim3 grid = nhwc_channel_grid(block, outputs.extents(), k);
 
     return launch_kernel(maxpool_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs, sliced_argmax, pool_h, pool_w, stride);
@@ -3645,7 +3639,7 @@ auto Upsample2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs)
     auto sliced_outputs = VIKA_UNWRAP_OR_RETURN(outputs.view().first_n(k));
 
     const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, outputs.extents(), k);
+    const dim3 grid = nhwc_channel_grid(block, outputs.extents(), k);
 
     return launch_kernel(upsample2d_forward, sliced_outputs.const_view(), grid, block, stream.handle(), input,
                          sliced_outputs, scale);
@@ -3659,7 +3653,7 @@ auto Upsample2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::v
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
 
     const dim3 block(16, 16, 1);
-    const dim3 grid = nhwc_grid(block, d_inputs.extents(), k);
+    const dim3 grid = nhwc_channel_grid(block, d_inputs.extents(), k);
 
     // No zero() first, unlike MaxPool2DLayer::backward - see upsample2d_backward's own doc comment
     // for why: every d_inputs slot is written exactly once, so there is nothing left over to clear.
@@ -5503,12 +5497,13 @@ __global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, D
 __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, DeviceTensorViewu argmax,
                                 usize pool_h, usize pool_w, usize stride) -> void
 {
-    const usize ow = global_thread_x();
-    const usize oh = global_thread_y();
-    const usize c = blockIdx.z % out.extents[3];
-    const usize n = blockIdx.z / out.extents[3];
+    const usize c = global_thread_x();
+    const usize ow = global_thread_y();
+    const usize H_out = out.extents[1];
+    const usize oh = blockIdx.z % H_out;
+    const usize n = blockIdx.z / H_out;
 
-    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    if (c >= out.extents[3] || ow >= out.extents[2] || n >= out.extents[0])
     {
         return;
     }
@@ -5593,12 +5588,13 @@ __global__ auto maxpool_backward(DeviceTensorConstViewf upstream, DeviceTensorCo
 
 __global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, usize scale) -> void
 {
-    const usize ow = global_thread_x();
-    const usize oh = global_thread_y();
-    const usize c = blockIdx.z % out.extents[3];
-    const usize n = blockIdx.z / out.extents[3];
+    const usize c = global_thread_x();
+    const usize ow = global_thread_y();
+    const usize H_out = out.extents[1];
+    const usize oh = blockIdx.z % H_out;
+    const usize n = blockIdx.z / H_out;
 
-    if (ow >= out.extents[2] || oh >= out.extents[1] || n >= out.extents[0])
+    if (c >= out.extents[3] || ow >= out.extents[2] || n >= out.extents[0])
     {
         return;
     }
@@ -5608,12 +5604,13 @@ __global__ auto upsample2d_forward(DeviceTensorConstViewf inputs, DeviceTensorVi
 
 __global__ auto upsample2d_backward(DeviceTensorConstViewf upstream, DeviceTensorViewf d_inputs, usize scale) -> void
 {
-    const usize iw = global_thread_x();
-    const usize ih = global_thread_y();
-    const usize c = blockIdx.z % d_inputs.extents[3];
-    const usize n = blockIdx.z / d_inputs.extents[3];
+    const usize c = global_thread_x();
+    const usize iw = global_thread_y();
+    const usize H_in = d_inputs.extents[1];
+    const usize ih = blockIdx.z % H_in;
+    const usize n = blockIdx.z / H_in;
 
-    if (iw >= d_inputs.extents[2] || ih >= d_inputs.extents[1] || n >= d_inputs.extents[0])
+    if (c >= d_inputs.extents[3] || iw >= d_inputs.extents[2] || n >= d_inputs.extents[0])
     {
         return;
     }
