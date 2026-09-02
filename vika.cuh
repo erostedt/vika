@@ -206,10 +206,6 @@ constexpr usize WARP_SIZE = 32;
 // the two have to agree.
 constexpr usize LOSS_REDUCE_BLOCK = 256;
 
-// conv_bias_gradients' block: x walks output channels, which NHWC makes contiguous, and y splits
-// the positions being summed. Both feed a fixed-size shared array, so they must be constants.
-// conv_backward's block: x over input channels, y over width. C_in can be as low as 1 (an
-// image's first conv), so x is kept narrow and y wide to keep a warp full there.
 // matmul_kernel's blocking: a 32x32 output tile per block, staged 16 deep through shared memory,
 // with each of the 16x16 threads holding a 2x2 patch in registers.
 //
@@ -221,11 +217,16 @@ constexpr usize MATMUL_TILE = 32;
 constexpr usize MATMUL_K_TILE = 16;
 constexpr usize MATMUL_THREAD_TILE = 2;
 
+// conv_backward's block: x over input channels, y over width. C_in can be as low as 1 for an
+// image's first conv, so x is kept narrow and y wide to keep a warp full there.
 constexpr u32 CONV_BACKWARD_X = 4;
 constexpr u32 CONV_BACKWARD_Y = 64;
 
-constexpr usize BIAS_REDUCE_X = 64;
-constexpr usize BIAS_REDUCE_Y = 4;
+// Blocking for the two gradient reductions: x over the axis their output is contiguous in - output
+// channels for the biases, filter taps for the weights - and y splitting the sum so it is not left
+// to one thread. Both feed a fixed-size shared array, so they must be constants.
+constexpr usize GRAD_REDUCE_X = 64;
+constexpr usize GRAD_REDUCE_Y = 4;
 
 constexpr usize MAX_RANK = 5;
 constexpr usize MAX_ERROR_MESSAGE = 256;
@@ -1879,7 +1880,7 @@ __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTenso
                                       DeviceTensorViewf d_filters, usize stride, usize padding) -> void;
 
 // upstream: [N, out_H, out_W, C_out], d_biases: [C_out]
-// grid: (ceil(C_out/BIAS_REDUCE_X), 1, 1), block: (BIAS_REDUCE_X, BIAS_REDUCE_Y, 1)
+// grid: (ceil(C_out/GRAD_REDUCE_X), 1, 1), block: (GRAD_REDUCE_X, GRAD_REDUCE_Y, 1)
 //
 // x over channels so a warp reads a contiguous run, y over positions so the sum is not left to a
 // single thread per channel - which put the whole reduction on one SM.
@@ -3391,13 +3392,15 @@ auto Conv2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const D
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
-    auto weight_job = launch_kernel(conv_weight_gradients, gradients, grid_covering(block, filter_count), block,
-                                    stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
+    const dim3 weight_block((u32)GRAD_REDUCE_X, (u32)GRAD_REDUCE_Y);
+    auto weight_job = launch_kernel(conv_weight_gradients, gradients, grid_covering(weight_block, filter_count),
+                                    weight_block, stream.handle(), inputs, upstream, filters.grad.view(), stride,
+                                    padding);
     if (weight_job.is_error())
     {
         return weight_job;
     }
-    const dim3 bias_block((u32)BIAS_REDUCE_X, (u32)BIAS_REDUCE_Y);
+    const dim3 bias_block((u32)GRAD_REDUCE_X, (u32)GRAD_REDUCE_Y);
     const auto bias_grid = grid_covering(bias_block, C_out);
     return launch_kernel(conv_bias_gradients, gradients, bias_grid, bias_block, stream.handle(), upstream,
                          biases.grad.view());
@@ -3548,7 +3551,7 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
     }
     // Identical in shape to Conv2D's own bias gradient - see conv_transpose_forward's doc comment
     // for why conv_bias_gradients is reused here unchanged rather than getting its own variant.
-    const dim3 bias_block((u32)BIAS_REDUCE_X, (u32)BIAS_REDUCE_Y);
+    const dim3 bias_block((u32)GRAD_REDUCE_X, (u32)GRAD_REDUCE_Y);
     const auto bias_grid = grid_covering(bias_block, C_out);
     return launch_kernel(conv_bias_gradients, gradients, bias_grid, bias_block, stream.handle(), upstream,
                          biases.grad.view());
@@ -5314,11 +5317,10 @@ __global__ auto conv_backward(DeviceTensorConstViewf upstream, DeviceTensorConst
 __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTensorConstViewf upstream,
                                       DeviceTensorViewf d_filters, usize stride, usize padding) -> void
 {
-    const usize idx = global_thread_x();
-    if (idx >= d_filters.element_count())
-    {
-        return;
-    }
+    __shared__ f32 partial[GRAD_REDUCE_Y][GRAD_REDUCE_X];
+
+    const usize idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool live = idx < d_filters.element_count();
 
     const usize C_out = d_filters.extents[3];
     const usize C_in = d_filters.extents[2];
@@ -5335,10 +5337,16 @@ __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTenso
     const usize H_out = upstream.extents[1];
     const usize W_out = upstream.extents[2];
 
+    // y splits the (n, oh) rows rather than the batch alone, so the sum spreads even at batch 1.
+    // This reorders the additions against one thread walking n, then oh, then ow: a fixed order
+    // still, so reproducible, but not the same total to the last bit.
+    const usize rows = N * H_out;
+
     f32 sum = 0.0f;
-    for (usize n = 0; n < N; ++n)
+    for (usize row = threadIdx.y; live && row < rows; row += blockDim.y)
     {
-        for (usize oh = 0; oh < H_out; ++oh)
+        const usize n = row / H_out;
+        const usize oh = row % H_out;
         {
             const usize ih_unpadded = oh * stride + kh;
             if (ih_unpadded < padding || ih_unpadded - padding >= H_in)
@@ -5358,12 +5366,24 @@ __global__ auto conv_weight_gradients(DeviceTensorConstViewf inputs, DeviceTenso
             }
         }
     }
-    d_filters(kh, kw, ic, oc) = sum;
+
+    partial[threadIdx.y][threadIdx.x] = sum;
+    __syncthreads();
+
+    if (threadIdx.y == 0 && live)
+    {
+        f32 total = 0.0f;
+        for (usize y = 0; y < blockDim.y; ++y)
+        {
+            total += partial[y][threadIdx.x];
+        }
+        d_filters(kh, kw, ic, oc) = total;
+    }
 }
 
 __global__ auto conv_bias_gradients(DeviceTensorConstViewf upstream, DeviceTensorViewf d_biases) -> void
 {
-    __shared__ f32 partial[BIAS_REDUCE_Y][BIAS_REDUCE_X];
+    __shared__ f32 partial[GRAD_REDUCE_Y][GRAD_REDUCE_X];
 
     const usize channels = upstream.extents[3];
     const usize positions = upstream.extents[0] * upstream.extents[1] * upstream.extents[2];
