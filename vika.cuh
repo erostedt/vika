@@ -3543,8 +3543,10 @@ auto ConvTranspose2DLayer::weight_gradients(const DeviceTensorConstViewf &inputs
 
     const auto gradients = std::make_tuple(filters.grad.const_view(), biases.grad.const_view());
 
-    auto weight_job = launch_kernel(conv_transpose_weight_gradients, gradients, grid_covering(block, filter_count),
-                                    block, stream.handle(), inputs, upstream, filters.grad.view(), stride, padding);
+    const dim3 weight_block((u32)GRAD_REDUCE_X, (u32)GRAD_REDUCE_Y);
+    auto weight_job = launch_kernel(conv_transpose_weight_gradients, gradients,
+                                    grid_covering(weight_block, filter_count), weight_block, stream.handle(), inputs,
+                                    upstream, filters.grad.view(), stride, padding);
     if (weight_job.is_error())
     {
         return weight_job;
@@ -5523,11 +5525,10 @@ __global__ auto conv_transpose_backward(DeviceTensorConstViewf upstream, DeviceT
 __global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, DeviceTensorConstViewf upstream,
                                                 DeviceTensorViewf d_filters, usize stride, usize padding) -> void
 {
-    const usize idx = global_thread_x();
-    if (idx >= d_filters.element_count())
-    {
-        return;
-    }
+    __shared__ f32 partial[GRAD_REDUCE_Y][GRAD_REDUCE_X];
+
+    const usize idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool live = idx < d_filters.element_count();
 
     const usize C_in = d_filters.extents[3];
     const usize C_out = d_filters.extents[2];
@@ -5547,10 +5548,15 @@ __global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, D
     // Sums over the (oh, ow) positions this filter tap contributes to, mapping each back to its
     // (ih, iw) source the same way conv_transpose_backward does (this is that same large-to-small
     // coordinate mapping, not conv_weight_gradients' small-to-large one).
+    // y splits the (n, oh) rows, as in conv_weight_gradients, reordering the additions against a
+    // single thread's walk - a fixed order still, so reproducible.
+    const usize rows = N * H_out;
+
     f32 sum = 0.0f;
-    for (usize n = 0; n < N; ++n)
+    for (usize row = threadIdx.y; live && row < rows; row += blockDim.y)
     {
-        for (usize oh = 0; oh < H_out; ++oh)
+        const usize n = row / H_out;
+        const usize oh = row % H_out;
         {
             if (oh + padding < kh)
             {
@@ -5586,7 +5592,19 @@ __global__ auto conv_transpose_weight_gradients(DeviceTensorConstViewf inputs, D
             }
         }
     }
-    d_filters(kh, kw, oc, ic) = sum;
+
+    partial[threadIdx.y][threadIdx.x] = sum;
+    __syncthreads();
+
+    if (threadIdx.y == 0 && live)
+    {
+        f32 total = 0.0f;
+        for (usize y = 0; y < blockDim.y; ++y)
+        {
+            total += partial[y][threadIdx.x];
+        }
+        d_filters(kh, kw, oc, ic) = total;
+    }
 }
 
 __global__ auto maxpool_forward(DeviceTensorConstViewf inputs, DeviceTensorViewf out, DeviceTensorViewu argmax,
