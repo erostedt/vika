@@ -42,7 +42,7 @@ auto measure(const char *name, usize iterations, Body &&body) -> void
     }
 
     std::sort(std::begin(samples), std::end(samples));
-    printf("  %-38s %7zu %12.4f %12.4f\n", name, iterations, samples[samples.size() / 2], samples.front());
+    printf("  %-44s %7zu %12.4f %12.4f\n", name, iterations, samples[samples.size() / 2], samples.front());
 }
 
 auto header() -> void
@@ -57,8 +57,8 @@ auto header() -> void
     printf("build:  DEBUG - host-side cost is inflated (roughly a third, on the xor example),\n");
     printf("        so treat the absolute numbers as indicative and compare like with like.\n");
 #endif
-    printf("\n  %-38s %7s %12s %12s\n", "benchmark", "iters", "median ms", "min ms");
-    printf("  %-38s %7s %12s %12s\n", "--------------------------------------", "-------", "------------",
+    printf("\n  %-44s %7s %12s %12s\n", "benchmark", "iters", "median ms", "min ms");
+    printf("  %-44s %7s %12s %12s\n", "--------------------------------------------", "-------", "------------",
            "------------");
 }
 
@@ -159,6 +159,75 @@ auto benchmark_pointwise() -> void
     measure("mse backward", 500, [&] { loss.backward(flat.const_view(), flat.const_view()).wait().unwrap(); });
 }
 
+// Softmax and CCE share a shape with the sigmoid and mse rows above, so the three are directly
+// comparable - which is the point: softmax normalizes along a row, so it runs one thread per row
+// where sigmoid runs one per element.
+auto benchmark_softmax() -> void
+{
+    constexpr usize batch = 256;
+    constexpr usize features = 1024;
+
+    auto softmax = SoftmaxLayer::with_extents(Extents::of(batch, features)).unwrap();
+    auto loss = CCELoss::with_extents(Extents::of(batch, features)).unwrap();
+    const auto flat = DeviceOwningTensorf::zero(Extents::of(batch, features)).unwrap();
+
+    measure("softmax forward (256x1024)", 500, [&] { softmax.forward({flat.const_view()}).wait().unwrap(); });
+    measure("softmax backward", 500, [&] { softmax.backward(flat.const_view())[0].wait().unwrap(); });
+    measure("cce forward (262144 elements)", 500,
+            [&] { loss.forward(flat.const_view(), flat.const_view()).wait().unwrap(); });
+    measure("cce backward", 500,
+            [&] { loss.backward(flat.const_view(), flat.const_view()).wait().unwrap(); });
+}
+
+// The merge layers, which a branching graph pays for on every pass. Add's backward reads 0.0000:
+// it hands the same upstream view back once per input and launches nothing at all.
+auto benchmark_merge() -> void
+{
+    constexpr usize batch = 256;
+    constexpr usize features = 1024;
+    constexpr usize half = features / 2;
+
+    auto add = AddLayer::with_extents(Extents::of(batch, features), 2).unwrap();
+    auto concat = ConcatLayer::with_extents({Extents::of(batch, half), Extents::of(batch, half)}).unwrap();
+
+    const auto whole = DeviceOwningTensorf::zero(Extents::of(batch, features)).unwrap();
+    const auto part = DeviceOwningTensorf::zero(Extents::of(batch, half)).unwrap();
+
+    measure("add forward (2 x 256x1024)", 500,
+            [&] { add.forward({whole.const_view(), whole.const_view()}).wait().unwrap(); });
+    measure("add backward", 500, [&] { add.backward(whole.const_view())[0].wait().unwrap(); });
+    measure("concat forward (2 x 256x512)", 500,
+            [&] { concat.forward({part.const_view(), part.const_view()}).wait().unwrap(); });
+    measure("concat backward", 500, [&] { concat.backward(whole.const_view())[0].wait().unwrap(); });
+}
+
+// The decoder half - what a U-Net spends its time in, and untimed until now.
+auto benchmark_upsampling() -> void
+{
+    constexpr usize batch = 16;
+    constexpr usize size = 16;
+    constexpr usize channels_in = 32;
+    constexpr usize channels_out = 64;
+
+    auto transposed = ConvTranspose2DLayer::randomized(batch, size, size, 3, 3, channels_in, channels_out, 1, 0, 1)
+                          .unwrap();
+    auto upsample = Upsample2DLayer::with_extents(batch, size, size, channels_in, 2).unwrap();
+
+    const auto small = DeviceOwningTensorf::zero(Extents::of(batch, size, size, channels_in)).unwrap();
+    const auto large =
+        DeviceOwningTensorf::zero(Extents::of(batch, size + 2, size + 2, channels_out)).unwrap();
+    const auto scaled = DeviceOwningTensorf::zero(Extents::of(batch, size * 2, size * 2, channels_in)).unwrap();
+
+    measure("conv_transpose2d forward (16x16x16x32 -> 64)", 100,
+            [&] { transposed.forward({small.const_view()}).wait().unwrap(); });
+    measure("conv_transpose2d backward", 100, [&] { transposed.backward(large.const_view())[0].wait().unwrap(); });
+    measure("conv_transpose2d weight_gradients", 100,
+            [&] { transposed.weight_gradients(small.const_view(), large.const_view()).wait().unwrap(); });
+    measure("upsample2d forward (16x16x16x32, scale 2)", 500,
+            [&] { upsample.forward({small.const_view()}).wait().unwrap(); });
+    measure("upsample2d backward", 500, [&] { upsample.backward(scaled.const_view())[0].wait().unwrap(); });
+}
+
 } // namespace
 
 auto main() -> int
@@ -168,5 +237,8 @@ auto main() -> int
     benchmark_dense();
     benchmark_conv();
     benchmark_pointwise();
+    benchmark_softmax();
+    benchmark_merge();
+    benchmark_upsampling();
     return 0;
 }
