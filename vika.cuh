@@ -210,6 +210,17 @@ constexpr usize LOSS_REDUCE_BLOCK = 256;
 // the positions being summed. Both feed a fixed-size shared array, so they must be constants.
 // conv_backward's block: x over input channels, y over width. C_in can be as low as 1 (an
 // image's first conv), so x is kept narrow and y wide to keep a warp full there.
+// matmul_kernel's blocking: a 32x32 output tile per block, staged 16 deep through shared memory,
+// with each of the 16x16 threads holding a 2x2 patch in registers.
+//
+// A 64x64 tile with 4x4 patches is faster on large operands - dense backward 0.379 against
+// 0.547 ms - but a block then computes 4096 output slots, and this library's own line_cnn dense
+// layers are 16x16 and 16x1. That measured a real 4% loss on its training step, where 32x32 costs
+// nothing outside the noise. Dispatching on operand size would take both.
+constexpr usize MATMUL_TILE = 32;
+constexpr usize MATMUL_K_TILE = 16;
+constexpr usize MATMUL_THREAD_TILE = 2;
+
 constexpr u32 CONV_BACKWARD_X = 4;
 constexpr u32 CONV_BACKWARD_Y = 64;
 
@@ -1721,6 +1732,19 @@ inline auto warp_per_row_grid(dim3 block, usize row_count) -> dim3
     return dim3((u32)((row_count + rows_per_block - 1) / rows_per_block));
 }
 
+// One block per 64x64 output tile. The block is always 16x16 - MATMUL_TILE / MATMUL_THREAD_TILE
+// on each axis - so the caller does not get to choose it.
+inline auto matmul_block() -> dim3
+{
+    return dim3((u32)(MATMUL_TILE / MATMUL_THREAD_TILE), (u32)(MATMUL_TILE / MATMUL_THREAD_TILE));
+}
+
+inline auto matmul_grid(usize m, usize n) -> dim3
+{
+    const auto tiles = [](usize count) -> u32 { return (u32)((count + MATMUL_TILE - 1) / MATMUL_TILE); };
+    return dim3(tiles(n), tiles(m));
+}
+
 inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
 {
     const auto blocks = [](usize count, u32 block_size) -> u32 { return (u32)((count + block_size - 1) / block_size); };
@@ -3032,8 +3056,8 @@ auto DenseLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) -> K
 
     const usize M = k;
     const usize N = outputs.extent(1);
-    const dim3 block(16, 16);
-    const dim3 grid = grid_covering(block, N, M);
+    const dim3 block = matmul_block();
+    const dim3 grid = matmul_grid(M, N);
     auto matmul_job = launch_kernel(matmul_kernel, sliced_outputs_const, grid, block, stream.handle(), input,
                                     weights.value.const_view(), sliced_outputs);
     if (matmul_job.is_error())
@@ -3056,8 +3080,8 @@ auto DenseLayer::backward(const DeviceTensorConstViewf &upstream)
     const usize N = d_inputs.extent(1);
     const auto transposed_weights = VIKA_UNWRAP_OR_RETURN(transposed(weights.value.const_view()));
 
-    const dim3 block(16, 16);
-    const dim3 grid = grid_covering(block, N, M);
+    const dim3 block = matmul_block();
+    const dim3 grid = matmul_grid(M, N);
     return {launch_kernel(matmul_kernel, sliced_d_inputs.const_view(), grid, block, stream.handle(), upstream,
                           transposed_weights, sliced_d_inputs)};
 }
@@ -3076,8 +3100,8 @@ auto DenseLayer::weight_gradients(const DeviceTensorConstViewf &inputs, const De
     // exceeds batch_capacity, leaving stale data in the uncovered elements.
     const usize M = weights.grad.extent(0);
     const usize N = weights.grad.extent(1);
-    const dim3 block(16, 16);
-    const dim3 grid = grid_covering(block, N, M);
+    const dim3 block = matmul_block();
+    const dim3 grid = matmul_grid(M, N);
     const auto gradients = std::make_tuple(weights.grad.const_view(), biases.grad.const_view());
     const auto transposed_inputs = VIKA_UNWRAP_OR_RETURN(transposed(inputs));
     const auto transposed_upstream = VIKA_UNWRAP_OR_RETURN(transposed(upstream));
@@ -5113,26 +5137,77 @@ __global__ auto add_bias(DeviceTensorConstViewf biases, DeviceTensorViewf out) -
 
 __global__ auto matmul_kernel(DeviceTensorConstViewf a, DeviceTensorConstViewf b, DeviceTensorViewf out) -> void
 {
-    // NOTE: Multiply in tiles?
-    const usize row = global_thread_y();
-    const usize col = global_thread_x();
+    // Staged through shared memory and accumulated in registers: a thread computing one output on
+    // its own re-reads a whole row of `a` and column of `b` from global memory, so the arithmetic
+    // per byte fetched is what limits this, not occupancy.
+    //
+    // Both tiles are stored k-major so the inner loop reads a contiguous run for a fixed k.
+    __shared__ f32 a_tile[MATMUL_K_TILE][MATMUL_TILE];
+    __shared__ f32 b_tile[MATMUL_K_TILE][MATMUL_TILE];
 
     const usize m = a.extents[0];
     const usize k = a.extents[1];
     const usize n = b.extents[1];
 
-    if (row >= m || col >= n)
+    const usize row0 = blockIdx.y * MATMUL_TILE;
+    const usize col0 = blockIdx.x * MATMUL_TILE;
+    const usize threads = blockDim.x * blockDim.y;
+    const usize tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+    f32 acc[MATMUL_THREAD_TILE][MATMUL_THREAD_TILE] = {};
+
+    // k ascending, and within a stage kk ascending, so the additions land in the same order a
+    // single-thread loop over k would produce - which is what keeps the result bit-identical.
+    for (usize k0 = 0; k0 < k; k0 += MATMUL_K_TILE)
     {
-        return;
+        for (usize i = tid; i < MATMUL_K_TILE * MATMUL_TILE; i += threads)
+        {
+            const usize kk = i / MATMUL_TILE;
+            const usize edge = i % MATMUL_TILE;
+            const usize gk = k0 + kk;
+            const usize grow = row0 + edge;
+            const usize gcol = col0 + edge;
+            a_tile[kk][edge] = (grow < m && gk < k) ? a(grow, gk) : 0.0f;
+            b_tile[kk][edge] = (gk < k && gcol < n) ? b(gk, gcol) : 0.0f;
+        }
+        __syncthreads();
+
+        for (usize kk = 0; kk < MATMUL_K_TILE; ++kk)
+        {
+            f32 left[MATMUL_THREAD_TILE];
+            f32 right[MATMUL_THREAD_TILE];
+            for (usize i = 0; i < MATMUL_THREAD_TILE; ++i)
+            {
+                left[i] = a_tile[kk][threadIdx.y * MATMUL_THREAD_TILE + i];
+                right[i] = b_tile[kk][threadIdx.x * MATMUL_THREAD_TILE + i];
+            }
+            for (usize i = 0; i < MATMUL_THREAD_TILE; ++i)
+            {
+                for (usize j = 0; j < MATMUL_THREAD_TILE; ++j)
+                {
+                    acc[i][j] += left[i] * right[j];
+                }
+            }
+        }
+        __syncthreads();
     }
 
-    f32 sum = 0;
-    for (usize i = 0; i < k; ++i)
+    for (usize i = 0; i < MATMUL_THREAD_TILE; ++i)
     {
-        sum += a(row, i) * b(i, col);
+        const usize row = row0 + threadIdx.y * MATMUL_THREAD_TILE + i;
+        if (row >= m)
+        {
+            continue;
+        }
+        for (usize j = 0; j < MATMUL_THREAD_TILE; ++j)
+        {
+            const usize col = col0 + threadIdx.x * MATMUL_THREAD_TILE + j;
+            if (col < n)
+            {
+                out(row, col) = acc[i][j];
+            }
+        }
     }
-
-    out(row, col) = sum;
 }
 
 __global__ auto conv_forward(DeviceTensorConstViewf inputs, DeviceTensorConstViewf filters,
