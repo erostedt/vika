@@ -1202,14 +1202,26 @@ auto _check_contiguous(const DeviceTensorView<T> &view, const char *context, con
 
 #define VIKA_CHECK_CONTIGUOUS(view) ::vika::_check_contiguous((view), __func__, #view, __FILE__, __LINE__)
 
+// Every dimension, unlike _check_trailing_extents, which ignores the leading one because it is
+// comparing batch-shaped tensors. Parameters, weights and whole buffers are not batch-shaped.
+inline auto _check_extents(const Extents &actual, const Extents &expected, const char *context, const char *name,
+                           const char *file, i32 line) -> Result<Void, Error>
+{
+    if (actual != expected)
+    {
+        return error(Error::make(ErrorKind::Shape, file, line, "%s: %s is %s, expected %s", context, name,
+                                 describe(actual).c_str(), describe(expected).c_str()));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_EXTENTS(actual, expected)                                                                           \
+    ::vika::_check_extents((actual), (expected), __func__, #actual, __FILE__, __LINE__)
+
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const DeviceOwningTensor<T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
-    if (src.extents() != dst.extents())
-    {
-        return error(VIKA_SHAPE_ERROR("copy device -> host: source is %s, destination is %s",
-                                      describe(src.extents()).c_str(), describe(dst.extents()).c_str()));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(src.extents(), dst.extents()));
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data(), src.byte_count(), cudaMemcpyDeviceToHost));
     return ok(Void{});
@@ -1219,11 +1231,7 @@ template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Void, Error>
 {
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_CONTIGUOUS(src));
-    if (dst.extents() != src.extents)
-    {
-        return error(VIKA_SHAPE_ERROR("copy view -> host: source is %s, destination is %s",
-                                      describe(src.extents).c_str(), describe(dst.extents()).c_str()));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(src.extents, dst.extents()));
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data, src.byte_count(), cudaMemcpyDeviceToHost));
     return ok(Void{});
@@ -1232,11 +1240,7 @@ auto copy(const DeviceTensorView<const T> &src, HostTensor<T> &dst) -> Result<Vo
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, Error>
 {
-    if (src.extents() != dst.extents())
-    {
-        return error(VIKA_SHAPE_ERROR("copy host -> device: source is %s, destination is %s",
-                                      describe(src.extents()).c_str(), describe(dst.extents()).c_str()));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(src.extents(), dst.extents()));
 
     VIKA_RETURN_ON_CUDA_ERROR(cudaMemcpy(dst.data(), src.data(), dst.byte_count(), cudaMemcpyHostToDevice));
     VIKA_UNWRAP_OR_RETURN(sync());
@@ -1249,11 +1253,7 @@ auto copy(const HostTensor<T> &src, DeviceOwningTensor<T> &dst) -> Result<Void, 
 template <typename T, typename = std::enable_if_t<std::is_arithmetic_v<T>>>
 auto copy(DeviceTensorView<const T> src, DeviceTensorView<T> dst, cudaStream_t stream) -> Result<Void, Error>
 {
-    if (src.extents != dst.extents)
-    {
-        return error(VIKA_SHAPE_ERROR("copy device -> device: source is %s, destination is %s",
-                                      describe(src.extents).c_str(), describe(dst.extents).c_str()));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(src.extents, dst.extents));
 
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_CONTIGUOUS(src));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_CONTIGUOUS(dst));
@@ -2476,6 +2476,22 @@ auto _check_trailing_extents(const Extents &actual, const Extents &expected, con
 
 // The two per-input sites in AddLayer/ConcatLayer::forward call _check_trailing_extents directly
 // instead: their name is built at runtime and carries the offending input's index.
+// `layout` is the axis naming a caller would otherwise spell out in its own message, e.g.
+// "[N, H, W, C]" - the reason these checks were worth writing by hand before.
+auto _check_rank(const Extents &extents, usize expected, const char *layout, const char *context, const char *name,
+                 const char *file, i32 line) -> Result<Void, Error>
+{
+    if (extents.size() != expected)
+    {
+        return error(Error::make(ErrorKind::Shape, file, line, "%s: %s must be rank %zu %s, got rank %zu (%s)",
+                                 context, name, expected, layout, extents.size(), describe(extents).c_str()));
+    }
+    return ok(Void{});
+}
+
+#define VIKA_CHECK_RANK(extents, expected, layout)                                                                     \
+    ::vika::_check_rank((extents), (expected), (layout), __func__, #extents, __FILE__, __LINE__)
+
 #define VIKA_CHECK_TRAILING_EXTENTS(actual, expected)                                                                  \
     ::vika::_check_trailing_extents((actual), (expected), __func__, #actual, __FILE__, __LINE__)
 
@@ -2620,10 +2636,7 @@ auto checked_element_count(const Extents &extents) -> Result<usize, Error>
 
 auto transposed(const DeviceTensorConstViewf &view) -> Result<DeviceTensorConstViewf, Error>
 {
-    if (view.rank() != 2)
-    {
-        return error(VIKA_SHAPE_ERROR("transposed: expects a rank 2 view, got rank %zu", view.rank()));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(view.extents, 2, "[rows, cols]"));
 
     auto transposed_view = view;
     std::swap(transposed_view.strides[0], transposed_view.strides[1]);
@@ -2749,6 +2762,16 @@ auto update_parameters(std::vector<ParameterView> &parameters, std::vector<AdamS
         // vectors meet, so it's the one place that can catch it before indexing off the end.
         return {error(VIKA_UNSUPPORTED_ERROR("update_parameters: %zu states but %zu parameters", states.size(),
                                              parameters.size()))};
+    }
+
+    // adam_update bounds-checks the parameter alone, then indexes the gradient and both moments
+    // at the same offset. Checked in full before any launch, so a mismatch leaves nothing running.
+    for (usize i = 0; i < parameters.size(); ++i)
+    {
+        const auto &shape = parameters[i].value.extents;
+        VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(parameters[i].grad.extents, shape));
+        VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(states[i].m.extents(), shape));
+        VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(states[i].v.extents(), shape));
     }
 
     const auto [m_hat_scale, v_hat_scale] = adam_bias_correction(params, t);
@@ -2949,12 +2972,7 @@ auto SigmoidLayer::backward(const DeviceTensorConstViewf &upstream)
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
-    if (d_inputs.extents() != outputs.extents())
-    {
-        return {KernelJob<DeviceTensorConstViewf>::failed(
-            VIKA_SHAPE_ERROR("sigmoid backward: gradient holds %zu elements but outputs hold %zu",
-                             d_inputs.element_count(), outputs.element_count()))};
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(d_inputs.extents(), outputs.extents()));
 
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -3001,12 +3019,7 @@ auto SoftmaxLayer::backward(const DeviceTensorConstViewf &upstream)
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRAILING_EXTENTS(upstream.extents, d_inputs.extents()));
 
     // Invariant: with_extents allocates both from the same extents.
-    if (d_inputs.extents() != outputs.extents())
-    {
-        return {KernelJob<DeviceTensorConstViewf>::failed(
-            VIKA_SHAPE_ERROR("softmax backward: gradient holds %zu elements but outputs hold %zu",
-                             d_inputs.element_count(), outputs.element_count()))};
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_EXTENTS(d_inputs.extents(), outputs.extents()));
 
     const usize k = upstream.extents[0];
     auto sliced_d_inputs = VIKA_UNWRAP_OR_RETURN(d_inputs.view().first_n(k));
@@ -3779,10 +3792,7 @@ auto ComputationGraph::dense(NodeId input, usize output_features, std::optional<
     }
 
     const auto in_extents = nodes[input.value].output_extents;
-    if (in_extents.size() != 2)
-    {
-        return error(VIKA_SHAPE_ERROR("dense: input must be rank 2 [N, features]"));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(in_extents, 2, "[N, features]"));
 
     const u32 resolved_seed = requested_seed.has_value() ? *requested_seed : next_seed();
     const NodeId id{nodes.size()};
@@ -3865,10 +3875,7 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
     }
 
     const auto in_extents = nodes[input.value].output_extents;
-    if (in_extents.size() != 4)
-    {
-        return error(VIKA_SHAPE_ERROR("conv2d: input must be rank 4 [N, H, W, C]"));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(in_extents, 4, "[N, H, W, C]"));
 
     const auto H = in_extents[1];
     const auto W = in_extents[2];
@@ -3900,10 +3907,7 @@ auto ComputationGraph::conv_transpose2d(NodeId input, usize kernel_height, usize
     }
 
     const auto in_extents = nodes[input.value].output_extents;
-    if (in_extents.size() != 4)
-    {
-        return error(VIKA_SHAPE_ERROR("conv_transpose2d: input must be rank 4 [N, H, W, C]"));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(in_extents, 4, "[N, H, W, C]"));
 
     const auto H = in_extents[1];
     const auto W = in_extents[2];
@@ -3934,10 +3938,7 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     }
 
     const auto in_extents = nodes[input.value].output_extents;
-    if (in_extents.size() != 4)
-    {
-        return error(VIKA_SHAPE_ERROR("maxpool2d: input must be rank 4 [N, H, W, C]"));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(in_extents, 4, "[N, H, W, C]"));
 
     const auto H = in_extents[1];
     const auto W = in_extents[2];
@@ -3966,10 +3967,7 @@ auto ComputationGraph::upsample2d(NodeId input, usize scale) -> Result<NodeId, E
     }
 
     const auto in_extents = nodes[input.value].output_extents;
-    if (in_extents.size() != 4)
-    {
-        return error(VIKA_SHAPE_ERROR("upsample2d: input must be rank 4 [N, H, W, C]"));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(in_extents, 4, "[N, H, W, C]"));
     if (scale == 0)
     {
         return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
