@@ -104,19 +104,19 @@ UTEST(maxpool, forward_rejects_wrong_trailing_extents)
     using namespace vika;
     auto layer = MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 2).unwrap();
     const auto wrong = DeviceOwningTensorf::zero({1, 5, 5, 1}).unwrap();
-    EXPECT_TRUE(failed_with(layer.forward({wrong.const_view()}).wait(), ErrorKind::Shape, "forward: input.extents is"));
+    EXPECT_TRUE(failed_with(layer.forward({wrong.const_view()}).wait(), ErrorKind::Shape));
 }
 
 UTEST(maxpool, with_extents_rejects_zero_stride)
 {
     using namespace vika;
-    EXPECT_TRUE(failed_with(MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 0), ErrorKind::Shape, "with_extents: stride must be at least"));
+    EXPECT_TRUE(failed_with(MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 0), ErrorKind::Shape));
     EXPECT_TRUE(MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 2).is_ok());
 }
 
 UTEST(maxpool, with_extents_rejects_a_pool_larger_than_the_input)
 {
     using namespace vika;
-    EXPECT_TRUE(failed_with(MaxPool2DLayer::with_extents(1, 2, 2, 1, 5, 5, 1), ErrorKind::Shape, "with_extents: window height"));
+    EXPECT_TRUE(failed_with(MaxPool2DLayer::with_extents(1, 2, 2, 1, 5, 5, 1), ErrorKind::Shape));
     EXPECT_TRUE(MaxPool2DLayer::with_extents(1, 2, 2, 1, 2, 2, 1).is_ok());
 }

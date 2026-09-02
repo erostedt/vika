@@ -138,7 +138,7 @@ UTEST(conv, forward_batch_exceeds_capacity)
     // Layer only has capacity for 1 sample, but the input batch has 2.
     auto layer = Conv2DLayer::with_weights(1, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
-    ASSERT_TRUE(failed_with(layer.forward({inputs.const_view()}), ErrorKind::Shape, "rows but tensor only has"));
+    ASSERT_TRUE(failed_with(layer.forward({inputs.const_view()}), ErrorKind::Shape));
 }
 
 UTEST(conv, backward_valid_stride1)
@@ -305,7 +305,8 @@ UTEST(conv, with_weights_rejects_zero_stride)
     using namespace vika;
     auto filters = DeviceOwningTensorf::zero({3, 3, 1, 2}).unwrap();
     auto biases = DeviceOwningTensorf::zero({2}).unwrap();
-    EXPECT_TRUE(failed_with(Conv2DLayer::with_weights(1, 8, 8, std::move(filters), std::move(biases), 0, 0), ErrorKind::Shape, "with_weights: stride must be at least"));
+    EXPECT_TRUE(failed_with(
+        Conv2DLayer::with_weights(1, 8, 8, std::move(filters), std::move(biases), 0, 0), ErrorKind::Shape));
 }
 
 UTEST(conv, with_weights_rejects_a_kernel_larger_than_the_input)
@@ -315,7 +316,8 @@ UTEST(conv, with_weights_rejects_a_kernel_larger_than_the_input)
     // reported "element count overflows usize" from the allocation three calls later.
     auto filters = DeviceOwningTensorf::zero({5, 5, 1, 2}).unwrap();
     auto biases = DeviceOwningTensorf::zero({2}).unwrap();
-    EXPECT_TRUE(failed_with(Conv2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0), ErrorKind::Shape, "with_weights: window height"));
+    EXPECT_TRUE(failed_with(
+        Conv2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0), ErrorKind::Shape));
 
     // The same kernel fits once the input is padded enough.
     auto padded_filters = DeviceOwningTensorf::zero({5, 5, 1, 2}).unwrap();

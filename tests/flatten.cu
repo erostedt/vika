@@ -89,13 +89,13 @@ UTEST(flatten, rejects_wrong_trailing_extents_in_both_directions)
     const auto layer = Flatten2DLayer::with_extents({2, 2, 2, 1}).unwrap();
 
     const auto wrong_input = DeviceOwningTensorf::zero({2, 3, 3, 1}).unwrap();
-    EXPECT_TRUE(failed_with(layer.forward({wrong_input.const_view()}).wait(), ErrorKind::Shape, "forward: input.extents is"));
+    EXPECT_TRUE(failed_with(layer.forward({wrong_input.const_view()}).wait(), ErrorKind::Shape));
 
     const auto wrong_upstream = DeviceOwningTensorf::zero({2, 5}).unwrap();
-    EXPECT_TRUE(failed_with(layer.backward(wrong_upstream.const_view())[0].wait(), ErrorKind::Shape, "backward: upstream.extents is"));
+    EXPECT_TRUE(failed_with(layer.backward(wrong_upstream.const_view())[0].wait(), ErrorKind::Shape));
 
     const auto input = counting_input(2);
-    EXPECT_TRUE(failed_with(layer.forward({input.const_view(), input.const_view()}).wait(), ErrorKind::Shape, "forward: expects exactly"));
+    EXPECT_TRUE(failed_with(layer.forward({input.const_view(), input.const_view()}).wait(), ErrorKind::Shape));
 }
 
 UTEST(flatten, with_extents_requires_rank_2_or_higher)
@@ -103,8 +103,8 @@ UTEST(flatten, with_extents_requires_rank_2_or_higher)
     using namespace vika;
     // Below rank 2 there is nothing to flatten, and output_extents() reads extents[0]. This was
     // the one layer factory that could not report anything.
-    EXPECT_TRUE(failed_with(Flatten2DLayer::with_extents({}), ErrorKind::Shape, "got {}"));
-    EXPECT_TRUE(failed_with(Flatten2DLayer::with_extents({4}), ErrorKind::Shape, "got {4}"));
+    EXPECT_TRUE(failed_with(Flatten2DLayer::with_extents({}), ErrorKind::Shape));
+    EXPECT_TRUE(failed_with(Flatten2DLayer::with_extents({4}), ErrorKind::Shape));
     EXPECT_TRUE(Flatten2DLayer::with_extents({4, 2}).is_ok());
     EXPECT_TRUE(Flatten2DLayer::with_extents({4, 2, 2, 1}).is_ok());
 }

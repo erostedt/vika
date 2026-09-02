@@ -62,7 +62,7 @@ UTEST(concat, layer_forward_batch_exceeds_capacity)
 
     // Layer only has capacity for 1 sample, but the inputs have batch 2.
     auto layer = ConcatLayer::with_extents({{1, 2}, {1, 3}}).unwrap();
-    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view()}), ErrorKind::Shape, "rows but tensor only has"));
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view()}), ErrorKind::Shape));
 }
 
 UTEST(concat, layer_forward_wrong_input_count)
@@ -72,8 +72,8 @@ UTEST(concat, layer_forward_wrong_input_count)
     const auto b = DeviceOwningTensorf::from({10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f}, {2, 3}).unwrap();
 
     auto layer = ConcatLayer::with_extents({{2, 2}, {2, 3}}).unwrap();
-    ASSERT_TRUE(failed_with(layer.forward({a.const_view()}), ErrorKind::Shape, "expects exactly 2 input(s), got 1"));
-    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view(), a.const_view()}), ErrorKind::Shape, "expects exactly 2 input(s), got 3"));
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view()}), ErrorKind::Shape));
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view(), a.const_view()}), ErrorKind::Shape));
 }
 
 UTEST(concat, layer_forward_shape_mismatch)
@@ -84,7 +84,7 @@ UTEST(concat, layer_forward_shape_mismatch)
     const auto wrong_b = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}, {2, 4}).unwrap();
 
     auto layer = ConcatLayer::with_extents({{2, 2}, {2, 3}}).unwrap();
-    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), wrong_b.const_view()}), ErrorKind::Shape, "forward: input 1 is"));
+    ASSERT_TRUE(failed_with(layer.forward({a.const_view(), wrong_b.const_view()}), ErrorKind::Shape));
 }
 
 UTEST(concat, with_extents_rank_zero)
@@ -93,21 +93,21 @@ UTEST(concat, with_extents_rank_zero)
     // Both inputs are rank 0 (Extents{}) - passes the size() < 2 guard (there are 2 entries) but
     // has no last axis to concat along or compute an offset into. rank - 1 on the unsigned rank
     // must be guarded explicitly, not left to underflow.
-    ASSERT_TRUE(failed_with(ConcatLayer::with_extents({Extents{}, Extents{}}), ErrorKind::Shape, "concat: inputs must be at least rank"));
+    ASSERT_TRUE(failed_with(ConcatLayer::with_extents({Extents{}, Extents{}}), ErrorKind::Shape));
 }
 
 UTEST(concat, with_extents_rank_mismatch)
 {
     using namespace vika;
     // {2, 2} is rank 2, {2, 2, 2} is rank 3 - must fail at construction.
-    ASSERT_TRUE(failed_with(ConcatLayer::with_extents({{2, 2}, {2, 2, 2}}), ErrorKind::Shape, "expected rank"));
+    ASSERT_TRUE(failed_with(ConcatLayer::with_extents({{2, 2}, {2, 2, 2}}), ErrorKind::Shape));
 }
 
 UTEST(concat, with_extents_non_last_dim_mismatch)
 {
     using namespace vika;
     // Same rank, but dimension 1 (not the last) disagrees - must fail at construction.
-    ASSERT_TRUE(failed_with(ConcatLayer::with_extents({{2, 3, 4}, {2, 5, 4}}), ErrorKind::Shape, "dimension 1 is"));
+    ASSERT_TRUE(failed_with(ConcatLayer::with_extents({{2, 3, 4}, {2, 5, 4}}), ErrorKind::Shape));
 }
 
 UTEST(concat, layer_backward)

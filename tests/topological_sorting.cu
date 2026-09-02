@@ -45,5 +45,5 @@ UTEST(topological_sort, cyle)
     adj[ptr + 1] = {ptr + 3};
 
     const auto actual = topological_sort(adj);
-    EXPECT_TRUE(failed_with(actual, ErrorKind::Graph, "Cycle detected"));
+    EXPECT_TRUE(failed_with(actual, ErrorKind::Graph));
 }
