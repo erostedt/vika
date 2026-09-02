@@ -16,8 +16,8 @@ int main()
     constexpr usize N_VERT = IMG_W;
     constexpr usize batch_size = N_HORIZ + N_VERT;
 
-    auto cpu_inputs = HostTensorf::zero({batch_size, IMG_H, IMG_W, 1}).unwrap();
-    auto cpu_targets = HostTensorf::zero({batch_size, 1}).unwrap();
+    auto cpu_inputs = HostTensorf::zero(Extents::of(batch_size, IMG_H, IMG_W, 1)).unwrap();
+    auto cpu_targets = HostTensorf::zero(Extents::of(batch_size, 1)).unwrap();
 
     for (usize r = 0; r < N_HORIZ; ++r)
     {
@@ -46,7 +46,7 @@ int main()
     //   Flatten:                                     [N, 3, 3, 8] -> [N, 72]
     //   Dense(72 -> 16) -> Sigmoid -> Dense(16 -> 1) -> Sigmoid
     ComputationGraph graph{batch_size};
-    auto x = graph.input({IMG_H, IMG_W, 1}).unwrap();
+    auto x = graph.input(Extents::of(IMG_H, IMG_W, 1)).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 1u).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -56,7 +56,7 @@ int main()
     x = graph.sigmoid(x).unwrap();
 
     auto model = graph.compile(x).unwrap();
-    auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(batch_size, 1)).unwrap();
 
     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
 

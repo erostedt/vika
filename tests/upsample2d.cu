@@ -13,7 +13,7 @@ UTEST(upsample2d, forward)
     // input [1, 2, 2, 1]:
     //   1 2
     //   3 4
-    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(1, 2, 2, 1)).unwrap();
     auto layer = Upsample2DLayer::with_extents(1, 2, 2, 1, 2).unwrap();
     const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
     const auto out = download(gpu_out).unwrap();
@@ -42,7 +42,7 @@ UTEST(upsample2d, forward_smaller_batch)
 {
     using namespace vika;
     // Layer built with capacity 2, but the actual batch (1) is smaller.
-    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(1, 2, 2, 1)).unwrap();
     auto layer = Upsample2DLayer::with_extents(2, 2, 2, 1, 2).unwrap();
     const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
     const auto out = download(gpu_out).unwrap();
@@ -55,7 +55,7 @@ UTEST(upsample2d, forward_smaller_batch)
 UTEST(upsample2d, forward_batch_exceeds_capacity)
 {
     using namespace vika;
-    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 1, 2, 1}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 1, 2, 1)).unwrap();
     // Layer only has capacity for 1 sample, but the input has batch 2.
     auto layer = Upsample2DLayer::with_extents(1, 1, 2, 1, 2).unwrap();
     ASSERT_TRUE(failed_with(layer.forward({inputs.const_view()}), ErrorKind::Shape));
@@ -71,7 +71,7 @@ UTEST(upsample2d, backward)
     //   13 14 15 16
     std::vector<f32> upstream_data(16);
     std::iota(upstream_data.begin(), upstream_data.end(), 1.0f);
-    const auto upstream = DeviceOwningTensorf::from(upstream_data, {1, 4, 4, 1}).unwrap();
+    const auto upstream = DeviceOwningTensorf::from(upstream_data, Extents::of(1, 4, 4, 1)).unwrap();
 
     auto layer = Upsample2DLayer::with_extents(1, 2, 2, 1, 2).unwrap();
     const auto d_inputs_job = layer.backward(upstream.const_view());

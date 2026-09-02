@@ -7,8 +7,8 @@
 UTEST(softmax, forward)
 {
     using namespace vika;
-    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 1.0f, 1.0f, 1.0f}, {2, 3}).unwrap();
-    auto layer = SoftmaxLayer::with_extents({2, 3}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 1.0f, 1.0f, 1.0f}, Extents::of(2, 3)).unwrap();
+    auto layer = SoftmaxLayer::with_extents(Extents::of(2, 3)).unwrap();
     const auto outputs = layer.forward({inputs.const_view()}).wait().unwrap();
 
     const auto out = download(outputs).unwrap();
@@ -35,8 +35,8 @@ UTEST(softmax, forward_is_shift_invariant)
     // Same row as `forward`'s first row, shifted by a large constant - only correct if
     // softmax_forward actually subtracts the row max before exponentiating, otherwise expf(1e4)
     // overflows to inf and the result is nan instead of matching the unshifted row.
-    const auto inputs = DeviceOwningTensorf::from({10001.0f, 10002.0f, 10003.0f}, {1, 3}).unwrap();
-    auto layer = SoftmaxLayer::with_extents({1, 3}).unwrap();
+    const auto inputs = DeviceOwningTensorf::from({10001.0f, 10002.0f, 10003.0f}, Extents::of(1, 3)).unwrap();
+    auto layer = SoftmaxLayer::with_extents(Extents::of(1, 3)).unwrap();
     const auto outputs = layer.forward({inputs.const_view()}).wait().unwrap();
 
     const auto out = download(outputs).unwrap();
@@ -48,9 +48,9 @@ UTEST(softmax, backward)
 {
     using namespace vika;
 
-    const auto upstream_gradient = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f}, {1, 3}).unwrap();
-    auto layer = SoftmaxLayer::with_extents({1, 3}).unwrap();
-    copy(HostTensorf::from({0.2f, 0.3f, 0.5f}, {1, 3}).unwrap(), layer.outputs).unwrap();
+    const auto upstream_gradient = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f}, Extents::of(1, 3)).unwrap();
+    auto layer = SoftmaxLayer::with_extents(Extents::of(1, 3)).unwrap();
+    copy(HostTensorf::from({0.2f, 0.3f, 0.5f}, Extents::of(1, 3)).unwrap(), layer.outputs).unwrap();
 
     const auto outputs = layer.backward(upstream_gradient.const_view())[0].wait().unwrap();
 

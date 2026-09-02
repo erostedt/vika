@@ -17,7 +17,7 @@ UTEST(tensor, zero_1d)
 
 UTEST(tensor, zero_2d)
 {
-    const auto t = HostTensorf::zero({2, 3}).unwrap();
+    const auto t = HostTensorf::zero(Extents::of(2, 3)).unwrap();
     EXPECT_EQ(t.extent(0), 2u);
     EXPECT_EQ(t.extent(1), 3u);
     EXPECT_EQ(t.size(), 6u);
@@ -29,13 +29,13 @@ UTEST(tensor, zero_2d)
 
 UTEST(tensor, size_from_extents)
 {
-    const auto count = element_count({3, 4});
+    const auto count = element_count(Extents::of(3, 4));
     EXPECT_EQ(count, 12u);
 }
 
 UTEST(tensor, zero_like)
 {
-    const auto base = HostTensorf::zero({3, 2}).unwrap();
+    const auto base = HostTensorf::zero(Extents::of(3, 2)).unwrap();
     const auto copy = HostTensorf::zero_like(base).unwrap();
     EXPECT_TRUE(copy.extents() == base.extents());
     for (usize i = 0; i < copy.size(); ++i)
@@ -46,7 +46,7 @@ UTEST(tensor, zero_like)
 
 UTEST(tensor, row_major_indexing)
 {
-    auto t = HostTensorf::zero({2, 3}).unwrap();
+    auto t = HostTensorf::zero(Extents::of(2, 3)).unwrap();
     t(0, 0) = 1.0f;
     t(0, 1) = 2.0f;
     t(0, 2) = 3.0f;
@@ -66,13 +66,13 @@ UTEST(tensor, row_major_indexing)
 // mismatch used to read past the vector's end and report success.
 UTEST(tensor, device_from_rejects_wrong_length)
 {
-    const auto too_short = DeviceOwningTensorf::from(std::vector<f32>{1.0f, 2.0f}, {8});
+    const auto too_short = DeviceOwningTensorf::from(std::vector<f32>{1.0f, 2.0f}, Extents::of(8));
     EXPECT_TRUE(failed_with(too_short, ErrorKind::Shape));
 
-    const auto too_long = DeviceOwningTensorf::from(std::vector<f32>(8, 1.0f), {2});
+    const auto too_long = DeviceOwningTensorf::from(std::vector<f32>(8, 1.0f), Extents::of(2));
     EXPECT_TRUE(failed_with(too_long, ErrorKind::Shape));
 
-    const auto exact = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3});
+    const auto exact = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, Extents::of(2, 3));
     ASSERT_TRUE(exact.is_ok());
 
     const auto host = download(exact.unwrap()).unwrap();
@@ -84,18 +84,18 @@ UTEST(tensor, device_from_rejects_wrong_length)
 // allocation respectively, failing much later as an invalid launch configuration.
 UTEST(tensor, device_empty_rejects_degenerate_extents)
 {
-    EXPECT_TRUE(failed_with(DeviceOwningTensorf::empty({0, 5}), ErrorKind::Shape));
+    EXPECT_TRUE(failed_with(DeviceOwningTensorf::empty(Extents::of(0, 5)), ErrorKind::Shape));
     EXPECT_TRUE(failed_with(DeviceOwningTensorf::empty({}), ErrorKind::Shape));
-    EXPECT_TRUE(failed_with(HostTensorf::zero({0, 5}), ErrorKind::Shape));
+    EXPECT_TRUE(failed_with(HostTensorf::zero(Extents::of(0, 5)), ErrorKind::Shape));
 
-    ASSERT_TRUE(DeviceOwningTensorf::empty({2, 3}).is_ok());
+    ASSERT_TRUE(DeviceOwningTensorf::empty(Extents::of(2, 3)).is_ok());
 }
 
 // transposed() swaps extents[0]/[1] and strides[0]/[1]; on a lower-rank view those are the zeroed
 // slots past size(), which produced a view of extent 0 that every kernel then skipped silently.
 UTEST(tensor, transposed_requires_rank_2)
 {
-    const auto matrix = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    const auto matrix = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, Extents::of(2, 3)).unwrap();
     const auto flipped = transposed(matrix.const_view());
     ASSERT_TRUE(flipped.is_ok());
     EXPECT_EQ(flipped.unwrap().extents[0], 3u);
@@ -103,9 +103,9 @@ UTEST(tensor, transposed_requires_rank_2)
     EXPECT_EQ(flipped.unwrap().strides[0], 1u);
     EXPECT_EQ(flipped.unwrap().strides[1], 3u);
 
-    const auto vector = DeviceOwningTensorf::from({1.0f, 2.0f}, {2}).unwrap();
+    const auto vector = DeviceOwningTensorf::from({1.0f, 2.0f}, Extents::of(2)).unwrap();
     EXPECT_TRUE(failed_with(transposed(vector.const_view()), ErrorKind::Shape));
 
-    const auto cube = DeviceOwningTensorf::zero({2, 2, 2}).unwrap();
+    const auto cube = DeviceOwningTensorf::zero(Extents::of(2, 2, 2)).unwrap();
     EXPECT_TRUE(failed_with(transposed(cube.const_view()), ErrorKind::Shape));
 }

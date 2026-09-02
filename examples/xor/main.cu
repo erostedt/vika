@@ -11,20 +11,20 @@ int main()
     constexpr usize epochs = 10000;
 
     const auto cpu_inputs =
-        HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
-    const auto cpu_targets = HostTensorf::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1}).unwrap();
+        HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, Extents::of(batch_size, 2)).unwrap();
+    const auto cpu_targets = HostTensorf::from({0.0f, 1.0f, 1.0f, 0.0f}, Extents::of(batch_size, 1)).unwrap();
     const auto inputs = upload(cpu_inputs).unwrap();
     const auto targets = upload(cpu_targets).unwrap();
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     x = graph.dense(x, 8, 42u).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, 43u).unwrap();
     x = graph.sigmoid(x).unwrap();
 
     auto model = graph.compile(x).unwrap();
-    auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(batch_size, 1)).unwrap();
 
     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
 

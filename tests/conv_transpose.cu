@@ -12,11 +12,11 @@ UTEST(conv_transpose, forward)
     // input [1, 2, 2, 1]:
     //   1 2
     //   3 4
-    const auto input = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
+    const auto input = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(1, 2, 2, 1)).unwrap();
     // filters [kH, kW, C_out, C_in] = [2, 2, 1, 1]:
     //   1 2
     //   3 4
-    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2, 1, 1}).unwrap();
+    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2, 1, 1)).unwrap();
     auto biases = DeviceOwningTensorf::from({0.0f}).unwrap();
 
     auto layer = ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0).unwrap();
@@ -49,9 +49,9 @@ UTEST(conv_transpose, backward)
     // inside the 3x3 output for this stride/padding/kernel combo, so each d_input should equal
     // the sum of every filter weight regardless of position.
     const std::vector<f32> ones(9, 1.0f);
-    const auto upstream = DeviceOwningTensorf::from(ones, {1, 3, 3, 1}).unwrap();
+    const auto upstream = DeviceOwningTensorf::from(ones, Extents::of(1, 3, 3, 1)).unwrap();
 
-    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2, 1, 1}).unwrap();
+    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2, 1, 1)).unwrap();
     auto biases = DeviceOwningTensorf::from({0.0f}).unwrap();
     auto layer = ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0).unwrap();
 
@@ -71,11 +71,11 @@ UTEST(conv_transpose, backward)
 UTEST(conv_transpose, weight_gradients)
 {
     using namespace vika;
-    const auto input = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
+    const auto input = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(1, 2, 2, 1)).unwrap();
     const std::vector<f32> ones(9, 1.0f);
-    const auto upstream = DeviceOwningTensorf::from(ones, {1, 3, 3, 1}).unwrap();
+    const auto upstream = DeviceOwningTensorf::from(ones, Extents::of(1, 3, 3, 1)).unwrap();
 
-    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2, 1, 1}).unwrap();
+    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2, 1, 1)).unwrap();
     auto biases = DeviceOwningTensorf::from({0.0f}).unwrap();
     auto layer = ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0).unwrap();
 
@@ -94,7 +94,7 @@ UTEST(conv_transpose, weight_gradients)
 UTEST(conv_transpose, with_weights_rejects_bias_channel_mismatch)
 {
     using namespace vika;
-    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2, 1, 1}).unwrap();
+    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2, 1, 1)).unwrap();
     // Wrong bias count (2 instead of 1 - filters' C_out is 1).
     auto biases = DeviceOwningTensorf::from({0.0f, 0.0f}).unwrap();
     ASSERT_TRUE(failed_with(
@@ -108,8 +108,8 @@ UTEST(conv_transpose, forward_smaller_batch)
     // Built for a batch of 2, handed 1 - the same view-slicing every other layer does, but this
     // is the newest layer and had no batch-related coverage of its own. Same single-sample input
     // and filters as forward() above, so the expected output is the same.
-    const auto input = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
-    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2, 1, 1}).unwrap();
+    const auto input = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(1, 2, 2, 1)).unwrap();
+    auto filters = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2, 1, 1)).unwrap();
     auto biases = DeviceOwningTensorf::from({0.0f}).unwrap();
 
     auto layer = ConvTranspose2DLayer::with_weights(2, 2, 2, std::move(filters), std::move(biases), 1, 0).unwrap();
@@ -126,8 +126,8 @@ UTEST(conv_transpose, forward_smaller_batch)
 UTEST(conv_transpose, with_weights_rejects_zero_stride)
 {
     using namespace vika;
-    auto filters = DeviceOwningTensorf::zero({2, 2, 1, 1}).unwrap();
-    auto biases = DeviceOwningTensorf::zero({1}).unwrap();
+    auto filters = DeviceOwningTensorf::zero(Extents::of(2, 2, 1, 1)).unwrap();
+    auto biases = DeviceOwningTensorf::zero(Extents::of(1)).unwrap();
     EXPECT_TRUE(failed_with(
         ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 0, 0),
         ErrorKind::Shape));
@@ -137,15 +137,15 @@ UTEST(conv_transpose, with_weights_rejects_padding_larger_than_the_output)
 {
     using namespace vika;
     // transposed_window_output_extent subtracts 2 * padding from (input - 1) * stride + window.
-    auto filters = DeviceOwningTensorf::zero({3, 3, 1, 1}).unwrap();
-    auto biases = DeviceOwningTensorf::zero({1}).unwrap();
+    auto filters = DeviceOwningTensorf::zero(Extents::of(3, 3, 1, 1)).unwrap();
+    auto biases = DeviceOwningTensorf::zero(Extents::of(1)).unwrap();
     EXPECT_TRUE(failed_with(
         ConvTranspose2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 10),
         ErrorKind::Shape));
 
     // A zero-sized input underflows (input - 1) the same way.
-    auto small_filters = DeviceOwningTensorf::zero({3, 3, 1, 1}).unwrap();
-    auto small_biases = DeviceOwningTensorf::zero({1}).unwrap();
+    auto small_filters = DeviceOwningTensorf::zero(Extents::of(3, 3, 1, 1)).unwrap();
+    auto small_biases = DeviceOwningTensorf::zero(Extents::of(1)).unwrap();
     EXPECT_TRUE(failed_with(
         ConvTranspose2DLayer::with_weights(1, 0, 2, std::move(small_filters), std::move(small_biases), 1, 0),
         ErrorKind::Shape));

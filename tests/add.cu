@@ -7,10 +7,10 @@
 UTEST(add, layer_forward)
 {
     using namespace vika;
-    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
-    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f, 30.0f, 40.0f}, {2, 2}).unwrap();
+    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
+    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f, 30.0f, 40.0f}, Extents::of(2, 2)).unwrap();
 
-    auto layer = AddLayer::with_extents({2, 2}, 2).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(2, 2), 2).unwrap();
     const auto out = layer.forward({a.const_view(), b.const_view()}).wait().unwrap();
     const auto out_cpu = download(out).unwrap();
 
@@ -22,12 +22,12 @@ UTEST(add, layer_forward_n_ary)
 {
     using namespace vika;
     // 4 inputs, not 2 - exercises the accumulate loop beyond the first/last special cases.
-    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
-    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f, 30.0f, 40.0f}, {2, 2}).unwrap();
-    const auto c = DeviceOwningTensorf::from({100.0f, 200.0f, 300.0f, 400.0f}, {2, 2}).unwrap();
-    const auto d = DeviceOwningTensorf::from({1000.0f, 2000.0f, 3000.0f, 4000.0f}, {2, 2}).unwrap();
+    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
+    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f, 30.0f, 40.0f}, Extents::of(2, 2)).unwrap();
+    const auto c = DeviceOwningTensorf::from({100.0f, 200.0f, 300.0f, 400.0f}, Extents::of(2, 2)).unwrap();
+    const auto d = DeviceOwningTensorf::from({1000.0f, 2000.0f, 3000.0f, 4000.0f}, Extents::of(2, 2)).unwrap();
 
-    auto layer = AddLayer::with_extents({2, 2}, 4).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(2, 2), 4).unwrap();
     const auto out =
         layer.forward({a.const_view(), b.const_view(), c.const_view(), d.const_view()}).wait().unwrap();
     const auto out_cpu = download(out).unwrap();
@@ -39,9 +39,9 @@ UTEST(add, layer_forward_n_ary)
 UTEST(add, layer_backward_n_ary)
 {
     using namespace vika;
-    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
+    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
 
-    auto layer = AddLayer::with_extents({2, 2}, 4).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(2, 2), 4).unwrap();
     auto jobs = layer.backward(upstream.const_view());
 
     ASSERT_TRUE(jobs.size() == 4);
@@ -58,10 +58,10 @@ UTEST(add, layer_forward_smaller_batch)
     using namespace vika;
     // Same values as layer_forward's first row, but the layer has spare capacity (2) while the
     // actual batch (1) is smaller.
-    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f}, {1, 2}).unwrap();
-    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f}, {1, 2}).unwrap();
+    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f}, Extents::of(1, 2)).unwrap();
+    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f}, Extents::of(1, 2)).unwrap();
 
-    auto layer = AddLayer::with_extents({2, 2}, 2).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(2, 2), 2).unwrap();
     const auto out = layer.forward({a.const_view(), b.const_view()}).wait().unwrap();
     const auto out_cpu = download(out).unwrap();
 
@@ -73,20 +73,20 @@ UTEST(add, layer_forward_smaller_batch)
 UTEST(add, layer_forward_batch_exceeds_capacity)
 {
     using namespace vika;
-    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
-    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f, 30.0f, 40.0f}, {2, 2}).unwrap();
+    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
+    const auto b = DeviceOwningTensorf::from({10.0f, 20.0f, 30.0f, 40.0f}, Extents::of(2, 2)).unwrap();
 
     // Layer only has capacity for 1 sample, but the inputs have batch 2.
-    auto layer = AddLayer::with_extents({1, 2}, 2).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(1, 2), 2).unwrap();
     ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view()}), ErrorKind::Shape));
 }
 
 UTEST(add, layer_forward_wrong_input_count)
 {
     using namespace vika;
-    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
+    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
 
-    auto layer = AddLayer::with_extents({2, 2}, 2).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(2, 2), 2).unwrap();
     ASSERT_TRUE(failed_with(layer.forward({a.const_view()}), ErrorKind::Shape));
     ASSERT_TRUE(failed_with(layer.forward({a.const_view(), a.const_view(), a.const_view()}), ErrorKind::Shape));
 }
@@ -94,19 +94,19 @@ UTEST(add, layer_forward_wrong_input_count)
 UTEST(add, layer_forward_shape_mismatch)
 {
     using namespace vika;
-    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
-    const auto b = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}).unwrap();
+    const auto a = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
+    const auto b = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, Extents::of(2, 3)).unwrap();
 
-    auto layer = AddLayer::with_extents({2, 2}, 2).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(2, 2), 2).unwrap();
     ASSERT_TRUE(failed_with(layer.forward({a.const_view(), b.const_view()}), ErrorKind::Shape));
 }
 
 UTEST(add, layer_backward)
 {
     using namespace vika;
-    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
+    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
 
-    auto layer = AddLayer::with_extents({2, 2}, 2).unwrap();
+    auto layer = AddLayer::with_extents(Extents::of(2, 2), 2).unwrap();
     auto jobs = layer.backward(upstream.const_view());
 
     ASSERT_TRUE(jobs.size() == 2);

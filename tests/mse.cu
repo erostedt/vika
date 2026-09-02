@@ -14,9 +14,9 @@
 UTEST(mse, forward_averages_over_every_element)
 {
     using namespace vika;
-    const auto predictions = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
-    const auto targets = DeviceOwningTensorf::zero({2, 2}).unwrap();
-    auto loss = MSELoss::with_extents({2, 2}).unwrap();
+    const auto predictions = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
+    const auto targets = DeviceOwningTensorf::zero(Extents::of(2, 2)).unwrap();
+    auto loss = MSELoss::with_extents(Extents::of(2, 2)).unwrap();
 
     const auto forwarded = loss.forward(predictions.const_view(), targets.const_view()).wait();
     ASSERT_TRUE(forwarded.is_ok());
@@ -29,9 +29,9 @@ UTEST(mse, forward_averages_over_every_element)
 UTEST(mse, backward_is_the_derivative_of_that_average)
 {
     using namespace vika;
-    const auto predictions = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}).unwrap();
-    const auto targets = DeviceOwningTensorf::zero({2, 2}).unwrap();
-    auto loss = MSELoss::with_extents({2, 2}).unwrap();
+    const auto predictions = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(2, 2)).unwrap();
+    const auto targets = DeviceOwningTensorf::zero(Extents::of(2, 2)).unwrap();
+    auto loss = MSELoss::with_extents(Extents::of(2, 2)).unwrap();
 
     const auto backwarded = loss.backward(predictions.const_view(), targets.const_view()).wait();
     ASSERT_TRUE(backwarded.is_ok());
@@ -45,9 +45,9 @@ UTEST(mse, smaller_batch_averages_over_the_rows_it_was_given)
     using namespace vika;
     // Built for a batch of 2, handed 1: the average is over that row's 2 elements, not over the
     // capacity - (1 + 4) / 2 = 2.5 - and the gradient is sliced to match.
-    const auto predictions = DeviceOwningTensorf::from({1.0f, 2.0f}, {1, 2}).unwrap();
-    const auto targets = DeviceOwningTensorf::zero({1, 2}).unwrap();
-    auto loss = MSELoss::with_extents({2, 2}).unwrap();
+    const auto predictions = DeviceOwningTensorf::from({1.0f, 2.0f}, Extents::of(1, 2)).unwrap();
+    const auto targets = DeviceOwningTensorf::zero(Extents::of(1, 2)).unwrap();
+    auto loss = MSELoss::with_extents(Extents::of(2, 2)).unwrap();
 
     const auto value = download(loss.forward(predictions.const_view(), targets.const_view()).wait().unwrap()).unwrap();
     EXPECT_NEAR(value[0], 2.5f, 1e-5f);
@@ -62,9 +62,9 @@ UTEST(mse, rejects_predictions_and_targets_of_different_batch)
     using namespace vika;
     // The kernel sizes its launch off predictions and indexes straight into targets, so a
     // mismatch here used to be an out-of-bounds read reported as success.
-    const auto predictions = DeviceOwningTensorf::zero({2, 2}).unwrap();
-    const auto targets = DeviceOwningTensorf::zero({1, 2}).unwrap();
-    auto loss = MSELoss::with_extents({2, 2}).unwrap();
+    const auto predictions = DeviceOwningTensorf::zero(Extents::of(2, 2)).unwrap();
+    const auto targets = DeviceOwningTensorf::zero(Extents::of(1, 2)).unwrap();
+    auto loss = MSELoss::with_extents(Extents::of(2, 2)).unwrap();
 
     EXPECT_TRUE(failed_with(loss.forward(predictions.const_view(), targets.const_view()).wait(), ErrorKind::Shape));
     EXPECT_TRUE(failed_with(loss.backward(predictions.const_view(), targets.const_view()).wait(), ErrorKind::Shape));

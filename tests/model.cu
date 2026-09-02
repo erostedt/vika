@@ -8,7 +8,7 @@ UTEST(model, xor_compile_execution_order)
     using namespace vika;
 
     ComputationGraph graph{4};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     x = graph.dense(x, 8, 42).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, 43).unwrap();
@@ -48,7 +48,7 @@ UTEST(model, line_cnn_compile_execution_order)
     using namespace vika;
 
     ComputationGraph graph{8};
-    auto x = graph.input({8, 8, 1}).unwrap();
+    auto x = graph.input(Extents::of(8, 8, 1)).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 42).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -72,7 +72,7 @@ UTEST(model, compile_invalid_output_node)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    graph.input({2}).unwrap();
+    graph.input(Extents::of(2)).unwrap();
     const auto result = graph.compile(NodeId{99});
     EXPECT_TRUE(failed_with(result, ErrorKind::Graph));
 }
@@ -81,7 +81,7 @@ UTEST(model, compile_no_input_node)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     x = graph.dense(x, 4, 42).unwrap();
     graph.nodes[0].spec = DenseSpec{2, 0};
     const auto result = graph.compile(x);
@@ -92,8 +92,8 @@ UTEST(model, compile_multiple_input_nodes)
 {
     using namespace vika;
     ComputationGraph graph{4};
-    graph.input({2}).unwrap();
-    auto x = graph.input({2}).unwrap();
+    graph.input(Extents::of(2)).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     x = graph.dense(x, 4, 42).unwrap();
     const auto result = graph.compile(x);
     EXPECT_TRUE(failed_with(result, ErrorKind::Graph));
@@ -110,14 +110,14 @@ UTEST(model, compile_rejects_a_node_with_no_predecessors)
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
-    graph.nodes.push_back(Node{InputSpec{}, Extents{batch_size, 4}, {}});
-    graph.nodes.push_back(Node{DenseSpec{3, 42}, Extents{batch_size, 3}, {}});   // no inputs
+    graph.nodes.push_back(Node{InputSpec{}, Extents::of(batch_size, 4), {}});
+    graph.nodes.push_back(Node{DenseSpec{3, 42}, Extents::of(batch_size, 3), {}});   // no inputs
     EXPECT_TRUE(failed_with(graph.compile(NodeId{1}), ErrorKind::Graph));
 
     // The same graph, wired up, still compiles.
     ComputationGraph wired{batch_size};
-    wired.nodes.push_back(Node{InputSpec{}, Extents{batch_size, 4}, {}});
-    wired.nodes.push_back(Node{DenseSpec{3, 42}, Extents{batch_size, 3}, {NodeId{0}}});
+    wired.nodes.push_back(Node{InputSpec{}, Extents::of(batch_size, 4), {}});
+    wired.nodes.push_back(Node{DenseSpec{3, 42}, Extents::of(batch_size, 3), {NodeId{0}}});
     EXPECT_TRUE(wired.compile(NodeId{1}).is_ok());
 }
 
@@ -133,8 +133,8 @@ UTEST(model, compile_out_of_order_nodes)
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
-    graph.nodes.push_back(Node{DenseSpec{3, 42}, Extents{batch_size, 3}, {NodeId{1}}});
-    graph.nodes.push_back(Node{InputSpec{}, Extents{batch_size, 4}, {}});
+    graph.nodes.push_back(Node{DenseSpec{3, 42}, Extents::of(batch_size, 3), {NodeId{1}}});
+    graph.nodes.push_back(Node{InputSpec{}, Extents::of(batch_size, 4), {}});
 
     auto model = graph.compile(NodeId{0}).unwrap();
 
@@ -149,7 +149,7 @@ UTEST(model, compile_out_of_order_nodes)
     EXPECT_EQ(model.execution_order[0].value, 1u);
     EXPECT_EQ(model.execution_order[1].value, 0u);
 
-    const auto inputs = DeviceOwningTensorf::zero({batch_size, 4}).unwrap();
+    const auto inputs = DeviceOwningTensorf::zero(Extents::of(batch_size, 4)).unwrap();
     const auto out = model.forward(inputs.const_view()).unwrap();
 
     EXPECT_EQ(out.rank(), 2u);
@@ -168,7 +168,7 @@ UTEST(model, step_rejects_an_optimizer_built_from_another_model)
 
     const auto build = [](usize dense_layers) {
         ComputationGraph graph{batch_size};
-        auto x = graph.input({2}).unwrap();
+        auto x = graph.input(Extents::of(2)).unwrap();
         for (usize i = 0; i < dense_layers; ++i)
         {
             x = graph.dense(x, 3, 42).unwrap();
@@ -179,8 +179,8 @@ UTEST(model, step_rejects_an_optimizer_built_from_another_model)
     auto model = build(1);
     auto other = build(3);
 
-    const auto inputs = DeviceOwningTensorf::zero({batch_size, 2}).unwrap();
-    const auto loss_grad = DeviceOwningTensorf::zero({batch_size, 3}).unwrap();
+    const auto inputs = DeviceOwningTensorf::zero(Extents::of(batch_size, 2)).unwrap();
+    const auto loss_grad = DeviceOwningTensorf::zero(Extents::of(batch_size, 3)).unwrap();
 
     auto foreign = AdamOptimizer::from_model(other, {}).unwrap();
     auto own = AdamOptimizer::from_model(model, {}).unwrap();
@@ -205,12 +205,13 @@ UTEST(model, forward_matches_manual_xor)
     constexpr u32 seed1 = 42;
     constexpr u32 seed2 = 43;
 
-    const auto cpu_inputs = HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_inputs =
+        HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, Extents::of(batch_size, 2)).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
 
     // graph API forward
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     x = graph.dense(x, 8, seed1).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, seed2).unwrap();
@@ -222,9 +223,9 @@ UTEST(model, forward_matches_manual_xor)
 
     // manual API forward using same seeds
     auto dense1 = DenseLayer::randomized(batch_size, 2, 8, seed1).unwrap();
-    auto sigmoid1 = SigmoidLayer::with_extents({batch_size, 8}).unwrap();
+    auto sigmoid1 = SigmoidLayer::with_extents(Extents::of(batch_size, 8)).unwrap();
     auto dense2 = DenseLayer::randomized(batch_size, 8, 1, seed2).unwrap();
-    auto sigmoid2 = SigmoidLayer::with_extents({batch_size, 1}).unwrap();
+    auto sigmoid2 = SigmoidLayer::with_extents(Extents::of(batch_size, 1)).unwrap();
 
     const auto out1 = dense1.forward({gpu_inputs.const_view()}).wait().unwrap();
     const auto act1 = sigmoid1.forward({out1}).wait().unwrap();
@@ -246,13 +247,13 @@ UTEST(model, out_of_order_passes_return_errors)
     constexpr usize batch_size = 4;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     x = graph.dense(x, 3, 42).unwrap();
     auto model = graph.compile(x).unwrap();
     auto optimizer = AdamOptimizer::from_model(model, {}).unwrap();
 
-    const auto inputs = DeviceOwningTensorf::zero({batch_size, 2}).unwrap();
-    const auto loss_grad = DeviceOwningTensorf::zero({batch_size, 3}).unwrap();
+    const auto inputs = DeviceOwningTensorf::zero(Extents::of(batch_size, 2)).unwrap();
+    const auto loss_grad = DeviceOwningTensorf::zero(Extents::of(batch_size, 3)).unwrap();
 
     EXPECT_TRUE(failed_with(model.step(optimizer), ErrorKind::Graph));
     EXPECT_TRUE(failed_with(model.backward(loss_grad.const_view()), ErrorKind::Graph));
@@ -284,7 +285,7 @@ UTEST(model, forward_output_shape)
     constexpr usize batch_size = 8;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({8, 8, 1}).unwrap();
+    auto x = graph.input(Extents::of(8, 8, 1)).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 42).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -295,7 +296,7 @@ UTEST(model, forward_output_shape)
 
     auto model = graph.compile(x).unwrap();
 
-    const auto gpu_inputs = DeviceOwningTensorf::zero({batch_size, 8, 8, 1}).unwrap();
+    const auto gpu_inputs = DeviceOwningTensorf::zero(Extents::of(batch_size, 8, 8, 1)).unwrap();
     const auto out = model.forward(gpu_inputs.const_view()).unwrap();
 
     EXPECT_EQ(out.rank(), 2u);
@@ -318,14 +319,14 @@ UTEST(model, smaller_batch_matches_the_first_rows_of_a_full_batch)
     // conv -> maxpool -> flatten -> dense: the line_cnn shape, and the only path through a
     // flatten in the suite.
     ComputationGraph graph{capacity};
-    auto x = graph.input({4, 4, 1}).unwrap();
+    auto x = graph.input(Extents::of(4, 4, 1)).unwrap();
     x = graph.conv2d(x, 3, 3, 2, 1, 0, 7).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
     x = graph.dense(x, 1, 8).unwrap();
     auto model = graph.compile(x).unwrap();
 
-    auto cpu_inputs = HostTensorf::zero({capacity, 4, 4, 1}).unwrap();
+    auto cpu_inputs = HostTensorf::zero(Extents::of(capacity, 4, 4, 1)).unwrap();
     for (usize n = 0; n < capacity; ++n)
     {
         for (usize h = 0; h < 4; ++h)
@@ -356,9 +357,9 @@ UTEST(model, smaller_batch_matches_the_first_rows_of_a_full_batch)
 
     // ... and the rest of the step runs at that batch too, which is the half of finding 1 that
     // lived in backward().
-    auto loss_fn = MSELoss::with_extents({capacity, 1}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(capacity, 1)).unwrap();
     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
-    auto targets = DeviceOwningTensorf::zero({capacity, 1}).unwrap();
+    auto targets = DeviceOwningTensorf::zero(Extents::of(capacity, 1)).unwrap();
     const auto sliced_targets = targets.view().first_n(2).unwrap().const_view();
 
     ASSERT_TRUE(train_step(model, loss_fn, sliced, sliced_targets, optimizer).is_ok());
@@ -371,20 +372,21 @@ UTEST(model, xor_trains_to_convergence)
 
     constexpr usize batch_size = 4;
 
-    const auto cpu_inputs = HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
-    const auto cpu_targets = HostTensorf::from({0.0f, 1.0f, 1.0f, 0.0f}, {batch_size, 1}).unwrap();
+    const auto cpu_inputs =
+        HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, Extents::of(batch_size, 2)).unwrap();
+    const auto cpu_targets = HostTensorf::from({0.0f, 1.0f, 1.0f, 0.0f}, Extents::of(batch_size, 1)).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     x = graph.dense(x, 8, 42).unwrap();
     x = graph.sigmoid(x).unwrap();
     x = graph.dense(x, 1, 43).unwrap();
     x = graph.sigmoid(x).unwrap();
 
     auto model = graph.compile(x).unwrap();
-    auto loss_fn = MSELoss::with_extents({batch_size, 1}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(batch_size, 1)).unwrap();
 
     const AdamParameters adam_params{.learning_rate = 0.01f, .beta1 = 0.9f, .beta2 = 0.999f, .epsilon = 1e-8f};
     auto optimizer = AdamOptimizer::from_model(model, adam_params).unwrap();
@@ -416,7 +418,7 @@ UTEST(model, branching_add_forward_and_backward)
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     auto a = graph.dense(x, 3, 42).unwrap();
     auto b = graph.dense(x, 3, 43).unwrap();
     auto sum = graph.add({a, b}).unwrap();
@@ -424,7 +426,7 @@ UTEST(model, branching_add_forward_and_backward)
 
     auto model = graph.compile(out).unwrap();
 
-    const auto cpu_inputs = HostTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_inputs = HostTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(batch_size, 2)).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
 
     const auto prediction = model.forward(gpu_inputs.const_view()).unwrap();
@@ -436,9 +438,9 @@ UTEST(model, branching_add_forward_and_backward)
     const auto weights_a_before = download(dense_a.weights.value).unwrap();
     const auto weights_b_before = download(dense_b.weights.value).unwrap();
 
-    const auto cpu_targets = HostTensorf::zero({batch_size, 3}).unwrap();
+    const auto cpu_targets = HostTensorf::zero(Extents::of(batch_size, 3)).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
-    auto loss_fn = MSELoss::with_extents({batch_size, 3}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(batch_size, 3)).unwrap();
     const auto loss_grad = loss_fn.backward(prediction, gpu_targets.const_view()).wait().unwrap();
     model.backward(loss_grad).unwrap();
 
@@ -464,7 +466,7 @@ UTEST(model, branching_concat_forward_and_backward)
     constexpr usize batch_size = 2;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     auto a = graph.dense(x, 3, 42).unwrap();
     auto b = graph.dense(x, 2, 43).unwrap();
     auto joined = graph.concat({a, b}).unwrap();
@@ -472,7 +474,7 @@ UTEST(model, branching_concat_forward_and_backward)
 
     auto model = graph.compile(out).unwrap();
 
-    const auto cpu_inputs = HostTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {batch_size, 2}).unwrap();
+    const auto cpu_inputs = HostTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(batch_size, 2)).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
 
     const auto prediction = model.forward(gpu_inputs.const_view()).unwrap();
@@ -484,9 +486,9 @@ UTEST(model, branching_concat_forward_and_backward)
     const auto weights_a_before = download(dense_a.weights.value).unwrap();
     const auto weights_b_before = download(dense_b.weights.value).unwrap();
 
-    const auto cpu_targets = HostTensorf::zero({batch_size, 5}).unwrap();
+    const auto cpu_targets = HostTensorf::zero(Extents::of(batch_size, 5)).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
-    auto loss_fn = MSELoss::with_extents({batch_size, 5}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(batch_size, 5)).unwrap();
     const auto loss_grad = loss_fn.backward(prediction, gpu_targets.const_view()).wait().unwrap();
     model.backward(loss_grad).unwrap();
 
@@ -521,7 +523,7 @@ UTEST(model, fan_in_accumulation_across_multiple_backward_calls)
     constexpr usize batch_size = 4;
 
     ComputationGraph graph{batch_size};
-    auto x = graph.input({2}).unwrap();
+    auto x = graph.input(Extents::of(2)).unwrap();
     auto trunk = graph.dense(x, 4, 42).unwrap();
     auto branch_a = graph.dense(trunk, 3, 43).unwrap();
     auto branch_b = graph.dense(trunk, 3, 44).unwrap();
@@ -531,12 +533,12 @@ UTEST(model, fan_in_accumulation_across_multiple_backward_calls)
     auto model = graph.compile(out).unwrap();
 
     const auto cpu_inputs =
-        HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, {batch_size, 2}).unwrap();
-    const auto cpu_targets = HostTensorf::zero({batch_size, 3}).unwrap();
+        HostTensorf::from({0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 1.0f}, Extents::of(batch_size, 2)).unwrap();
+    const auto cpu_targets = HostTensorf::zero(Extents::of(batch_size, 3)).unwrap();
     const auto gpu_inputs = upload(cpu_inputs).unwrap();
     const auto gpu_targets = upload(cpu_targets).unwrap();
 
-    auto loss_fn = MSELoss::with_extents({batch_size, 3}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(batch_size, 3)).unwrap();
     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.1f}).unwrap();
 
     auto &dense_trunk = std::get<DenseLayer>(model.layers[trunk.value].kind);

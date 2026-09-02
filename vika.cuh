@@ -27,7 +27,7 @@
 //     x = graph.sigmoid(x).unwrap();
 //
 //     auto model = graph.compile(x).unwrap();          // x is the output node
-//     auto loss = MSELoss::with_extents({batch_size, 1}).unwrap();
+//     auto loss = MSELoss::with_extents(Extents::of(batch_size, 1)).unwrap();
 //     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
 //
 //     for (usize epoch = 0; epoch < epochs; ++epoch)
@@ -76,9 +76,12 @@
 // failing. Result is [[nodiscard]], and unwrap() aborts on an error, so .unwrap() is a claim that
 // this one cannot fail. describe() renders an error with its originating file and line.
 //
-// Two things do abort, both deliberately. VIKA_PANIC covers invariants whose violation means the
-// library is broken rather than misused (unwrap() on an error, FixedVector bounds), and
-// VIKA_ASSERT the same but compiled out under NDEBUG.
+// The dividing line is who is accountable for the mistake. Anything a caller supplies - a shape,
+// a graph, a tensor, the values going into a container - is theirs to get wrong, so it comes back
+// as Result. An invariant the library maintains for itself is ours, and breaking one means vika
+// has a bug rather than that it was misused, so it aborts instead: VIKA_PANIC for those,
+// VIKA_ASSERT for the same compiled out under NDEBUG, and unwrap() wherever vika is the one
+// supplying the value being unwrapped.
 //
 // ---------------------------------------------------------------------------------------------
 // Tensors
@@ -88,7 +91,7 @@
 // borrows either - the views are what kernels take. All of them are move-only; copying host data
 // takes an explicit clone(), and upload()/download() move between the two sides.
 //
-//     const auto host = HostTensorf::from({1, 2, 3, 4}, {2, 2}).unwrap();
+//     const auto host = HostTensorf::from({1, 2, 3, 4}, Extents::of(2, 2)).unwrap();
 //     const auto device = upload(host).unwrap();
 //     const auto back = download(device).unwrap();
 //
@@ -204,213 +207,6 @@ constexpr usize MAX_ERROR_MESSAGE = 256;
 // Generic Utilities
 // =============================================================================
 
-// The read accessors are __host__ __device__ because Extents/Strides live inside
-// DeviceTensorView, which kernels take by value. The mutators and at() cannot be: they report
-// failure through VIKA_PANIC, and fprintf/exit have no device equivalent.
-template <typename T, usize Capacity>
-class FixedVector
-{
-    using Self = FixedVector<T, Capacity>;
-
-  public:
-    FixedVector() : m_size(0)
-    {
-    }
-
-    FixedVector(std::initializer_list<T> init) : m_size(0)
-    {
-        for (const auto &v : init)
-        {
-            push_back(v);
-        }
-    }
-
-    __host__ __device__ auto operator[](usize idx) -> T &
-    {
-        return m_data[idx];
-    }
-
-    __host__ __device__ auto operator[](usize idx) const -> const T &
-    {
-        return m_data[idx];
-    }
-
-    auto at(usize idx) -> T &
-    {
-        check_bounds(idx);
-        return m_data[idx];
-    }
-
-    auto at(usize idx) const -> const T &
-    {
-        check_bounds(idx);
-        return m_data[idx];
-    }
-
-    __host__ __device__ auto front() -> T &
-    {
-        return m_data[0];
-    }
-
-    __host__ __device__ auto front() const -> const T &
-    {
-        return m_data[0];
-    }
-
-    __host__ __device__ auto back() -> T &
-    {
-        return m_data[m_size - 1];
-    }
-
-    __host__ __device__ auto back() const -> const T &
-    {
-        return m_data[m_size - 1];
-    }
-
-    auto data() -> T *
-    {
-        return m_data;
-    }
-
-    auto data() const -> const T *
-    {
-        return m_data;
-    }
-
-    __host__ __device__ auto size() const -> usize
-    {
-        return m_size;
-    }
-
-    static constexpr auto capacity() -> usize
-    {
-        return Capacity;
-    }
-
-    __host__ __device__ auto empty() const -> bool
-    {
-        return m_size == 0;
-    }
-
-    auto full() const -> bool
-    {
-        return m_size == Capacity;
-    }
-
-    auto push_back(const T &value) -> void
-    {
-        check_not_full();
-        m_data[m_size++] = value;
-    }
-
-    auto push_back(T &&value) -> void
-    {
-        check_not_full();
-        m_data[m_size++] = std::move(value);
-    }
-
-    // Assignment, not placement new: every slot of m_data already holds a live T, and
-    // constructing over one without destroying it leaks whatever it owned. Same reason pop_back()
-    // and clear() only move m_size - the objects stay alive until the array itself dies.
-    template <typename... Args>
-    auto emplace_back(Args &&...args) -> T &
-    {
-        check_not_full();
-        T *slot = &m_data[m_size++];
-        *slot = T(std::forward<Args>(args)...);
-        return *slot;
-    }
-
-    auto pop_back() -> void
-    {
-        VIKA_PANIC_IF(m_size == 0, "FixedVector::pop_back on an empty vector");
-        --m_size;
-    }
-
-    auto clear() -> void
-    {
-        m_size = 0;
-    }
-
-    auto begin() -> T *
-    {
-        return m_data;
-    }
-
-    auto end() -> T *
-    {
-        return m_data + m_size;
-    }
-
-    auto begin() const -> const T *
-    {
-        return m_data;
-    }
-
-    auto end() const -> const T *
-    {
-        return m_data + m_size;
-    }
-
-    auto cbegin() const -> const T *
-    {
-        return m_data;
-    }
-
-    auto cend() const -> const T *
-    {
-        return m_data + m_size;
-    }
-
-    auto rbegin() -> std::reverse_iterator<T *>
-    {
-        return std::reverse_iterator<T *>(end());
-    }
-
-    auto rend() -> std::reverse_iterator<T *>
-    {
-        return std::reverse_iterator<T *>(begin());
-    }
-
-    auto rbegin() const -> std::reverse_iterator<const T *>
-    {
-        return std::reverse_iterator<const T *>(end());
-    }
-
-    auto rend() const -> std::reverse_iterator<const T *>
-    {
-        return std::reverse_iterator<const T *>(begin());
-    }
-
-    auto operator==(const Self &other) const -> bool
-    {
-        return std::equal(cbegin(), cend(), other.cbegin(), other.cend());
-    }
-
-    auto operator!=(const Self &other) const -> bool
-    {
-        return !(*this == other);
-    }
-
-  private:
-    // Zero-initialised because DeviceTensorView holds two of these and is copied whole into every
-    // kernel launch, so entries past size() travel along as padding.
-    T m_data[Capacity] = {};
-    usize m_size;
-
-    auto check_bounds(usize idx) const -> void
-    {
-        VIKA_PANIC_IF(idx >= m_size, "FixedVector::at index %zu out of bounds (size=%zu)", idx, m_size);
-    }
-
-    auto check_not_full() const -> void
-    {
-        VIKA_PANIC_IF(m_size >= Capacity, "FixedVector is at capacity (%zu)", Capacity);
-    }
-};
-
-using Extents = FixedVector<usize, MAX_RANK>;
-using Strides = Extents;
 
 template <typename Node>
 using AdjacencyGraph = std::unordered_map<Node, std::vector<Node>>;
@@ -659,6 +455,257 @@ class Error
 #define VIKA_GRAPH_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Graph, __VA_ARGS__)
 #define VIKA_UNSUPPORTED_ERROR(...) VIKA_ERROR(::vika::ErrorKind::Unsupported, __VA_ARGS__)
 #define VIKA_DEVICE_ERROR(code) ::vika::Error::from_cuda((code), __FILE__, __LINE__)
+
+// =============================================================================
+// Fixed-Capacity Vector
+// =============================================================================
+
+// Here rather than with the other generic utilities above: every way of filling one can fail,
+// and reporting that needs Result and Error complete.
+// The read accessors are __host__ __device__ because Extents/Strides live inside
+// DeviceTensorView, which kernels take by value. The mutators and at() cannot be: they report
+// failure through VIKA_PANIC, and fprintf/exit have no device equivalent.
+template <typename T, usize Capacity>
+class FixedVector
+{
+    using Self = FixedVector<T, Capacity>;
+
+  public:
+    FixedVector() : m_size(0)
+    {
+    }
+
+    // Compile-time checked, not fallible: a literal with too many values is a mistake in the
+    // source, so this refuses to compile rather than handing back an error nobody can act on.
+    template <typename... Args>
+    static auto of(Args... values) -> Self
+    {
+        static_assert(sizeof...(Args) <= Capacity, "FixedVector::of was given more values than the capacity");
+        return Self(std::initializer_list<T>{static_cast<T>(values)...});
+    }
+
+    // For counts only known at runtime - what a load path has.
+    static auto from(std::initializer_list<T> values) -> Result<Self, Error>
+    {
+        if (values.size() > Capacity)
+        {
+            return error(VIKA_SHAPE_ERROR("FixedVector::from got %zu values, capacity is %zu", values.size(),
+                                          Capacity));
+        }
+        return ok(Self(values));
+    }
+
+    static auto from(const std::vector<T> &values) -> Result<Self, Error>
+    {
+        if (values.size() > Capacity)
+        {
+            return error(VIKA_SHAPE_ERROR("FixedVector::from got %zu values, capacity is %zu", values.size(),
+                                          Capacity));
+        }
+        Self built;
+        for (const auto &v : values)
+        {
+            built.m_data[built.m_size++] = v;
+        }
+        return ok(built);
+    }
+
+    __host__ __device__ auto operator[](usize idx) -> T &
+    {
+        return m_data[idx];
+    }
+
+    __host__ __device__ auto operator[](usize idx) const -> const T &
+    {
+        return m_data[idx];
+    }
+
+    auto at(usize idx) const -> Result<T, Error>
+    {
+        if (idx >= m_size)
+        {
+            return error(VIKA_SHAPE_ERROR("FixedVector::at index %zu is out of bounds (size %zu)", idx, m_size));
+        }
+        return ok(m_data[idx]);
+    }
+
+    __host__ __device__ auto front() -> T &
+    {
+        return m_data[0];
+    }
+
+    __host__ __device__ auto front() const -> const T &
+    {
+        return m_data[0];
+    }
+
+    __host__ __device__ auto back() -> T &
+    {
+        return m_data[m_size - 1];
+    }
+
+    __host__ __device__ auto back() const -> const T &
+    {
+        return m_data[m_size - 1];
+    }
+
+    auto data() -> T *
+    {
+        return m_data;
+    }
+
+    auto data() const -> const T *
+    {
+        return m_data;
+    }
+
+    __host__ __device__ auto size() const -> usize
+    {
+        return m_size;
+    }
+
+    static constexpr auto capacity() -> usize
+    {
+        return Capacity;
+    }
+
+    __host__ __device__ auto empty() const -> bool
+    {
+        return m_size == 0;
+    }
+
+    auto full() const -> bool
+    {
+        return m_size == Capacity;
+    }
+
+    auto push_back(const T &value) -> Result<Void, Error>
+    {
+        VIKA_UNWRAP_OR_RETURN(check_not_full());
+        m_data[m_size++] = value;
+        return ok(Void{});
+    }
+
+    auto push_back(T &&value) -> Result<Void, Error>
+    {
+        VIKA_UNWRAP_OR_RETURN(check_not_full());
+        m_data[m_size++] = std::move(value);
+        return ok(Void{});
+    }
+
+    // Assignment, not placement new: every slot of m_data already holds a live T, and
+    // constructing over one without destroying it leaks whatever it owned. Same reason pop_back()
+    // and clear() only move m_size - the objects stay alive until the array itself dies.
+    template <typename... Args>
+    auto emplace_back(Args &&...args) -> Result<Void, Error>
+    {
+        VIKA_UNWRAP_OR_RETURN(check_not_full());
+        m_data[m_size++] = T(std::forward<Args>(args)...);
+        return ok(Void{});
+    }
+
+    // Hands back what it removed, so a caller that wants the value does not have to read it first.
+    auto pop_back() -> Result<T, Error>
+    {
+        if (m_size == 0)
+        {
+            return error(VIKA_SHAPE_ERROR("FixedVector::pop_back on an empty vector"));
+        }
+        return ok(m_data[--m_size]);
+    }
+
+    auto clear() -> void
+    {
+        m_size = 0;
+    }
+
+    auto begin() -> T *
+    {
+        return m_data;
+    }
+
+    auto end() -> T *
+    {
+        return m_data + m_size;
+    }
+
+    auto begin() const -> const T *
+    {
+        return m_data;
+    }
+
+    auto end() const -> const T *
+    {
+        return m_data + m_size;
+    }
+
+    auto cbegin() const -> const T *
+    {
+        return m_data;
+    }
+
+    auto cend() const -> const T *
+    {
+        return m_data + m_size;
+    }
+
+    auto rbegin() -> std::reverse_iterator<T *>
+    {
+        return std::reverse_iterator<T *>(end());
+    }
+
+    auto rend() -> std::reverse_iterator<T *>
+    {
+        return std::reverse_iterator<T *>(begin());
+    }
+
+    auto rbegin() const -> std::reverse_iterator<const T *>
+    {
+        return std::reverse_iterator<const T *>(end());
+    }
+
+    auto rend() const -> std::reverse_iterator<const T *>
+    {
+        return std::reverse_iterator<const T *>(begin());
+    }
+
+    auto operator==(const Self &other) const -> bool
+    {
+        return std::equal(cbegin(), cend(), other.cbegin(), other.cend());
+    }
+
+    auto operator!=(const Self &other) const -> bool
+    {
+        return !(*this == other);
+    }
+
+  private:
+    // Zero-initialised because DeviceTensorView holds two of these and is copied whole into every
+    // kernel launch, so entries past size() travel along as padding.
+    T m_data[Capacity] = {};
+    usize m_size;
+
+    // Private: of() and from() have already established that the values fit.
+    FixedVector(std::initializer_list<T> init) : m_size(0)
+    {
+        for (const auto &v : init)
+        {
+            m_data[m_size++] = v;
+        }
+    }
+
+    auto check_not_full() const -> Result<Void, Error>
+    {
+        if (m_size >= Capacity)
+        {
+            return error(VIKA_SHAPE_ERROR("FixedVector is at capacity (%zu)", Capacity));
+        }
+        return ok(Void{});
+    }
+};
+
+using Extents = FixedVector<usize, MAX_RANK>;
+using Strides = Extents;
 
 // ===========================================================================
 // Generic Utilities, Result-aware
@@ -939,7 +986,10 @@ class HostTensor
 
     auto extent(usize dimension) const -> usize
     {
-        return _extents.at(dimension);
+        // Not Result: every caller passes a literal, and the ones inside vika are ours to get
+        // right, so a dimension past the rank is a bug here rather than a caller's mistake.
+        // extents().at(i) is the fallible door for an index that is not known to be good.
+        return _extents.at(dimension).unwrap();
     }
 
     auto data() -> T *
@@ -991,7 +1041,7 @@ class HostTensor
 
     static auto zero(usize element_count) -> Result<Self, Error>
     {
-        return Self::zero(Extents{element_count});
+        return Self::zero(Extents::of(element_count));
     }
 
     template <typename OtherType>
@@ -1101,7 +1151,7 @@ class DeviceOwningTensor
 
     static auto from(const std::vector<T> &data) -> Result<Self, Error>
     {
-        return from(data, {data.size()});
+        return from(data, Extents::of(data.size()));
     }
 
     static auto empty_like(const Self &other) -> Result<Self, Error>
@@ -1127,12 +1177,12 @@ class DeviceOwningTensor
     // off nullptr, and the resulting cudaErrorIllegalAddress is sticky - every later CUDA call in
     // the process fails, allocation included.
     //
-    // Extents{0} rather than Extents{}: an empty product is 1, so empty extents would still claim
+    // Extents::of(0) rather than Extents{}: an empty product is 1, so empty extents would still claim
     // one element and launch. A zero extent describes nothing, so the shape checks and the launch
     // geometry both refuse it while the context stays usable.
     DeviceOwningTensor(Self &&other) noexcept : _data(std::move(other._data)), _extents(other._extents)
     {
-        other._extents = Extents{0};
+        other._extents = Extents::of(0);
     }
 
     auto operator=(Self &&other) noexcept -> Self &
@@ -1141,7 +1191,7 @@ class DeviceOwningTensor
         {
             _data = std::move(other._data);
             _extents = other._extents;
-            other._extents = Extents{0};
+            other._extents = Extents::of(0);
         }
         return *this;
     }
@@ -1158,7 +1208,8 @@ class DeviceOwningTensor
 
     auto extent(usize dimension) const -> usize
     {
-        return _extents.at(dimension);
+        // Not Result, for the same reason as DeviceOwningTensor::extent - see there.
+        return _extents.at(dimension).unwrap();
     }
 
     auto extents() const -> const Extents &
@@ -1604,7 +1655,7 @@ inline auto grid_covering(dim3 block, usize x, usize y = 1, usize z = 1) -> dim3
 // which is what 76ee8e7 fixed in DenseLayer::weight_gradients.
 inline auto nhwc_grid(dim3 block, const Extents &target, usize batch) -> dim3
 {
-    return grid_covering(block, target.at(2), target.at(1), batch * target.at(3));
+    return grid_covering(block, target[2], target[1], batch * target[3]);
 }
 
 // Launches `kernel` and reads cudaGetLastError() immediately, because cudaStreamSynchronize -
@@ -2453,7 +2504,9 @@ auto trailing_extents(const Extents &extents) -> Extents
     Extents result{};
     for (usize i = 1; i < extents.size(); ++i)
     {
-        result.push_back(extents[i]);
+        // One fewer element than `extents`, which already fits, so a caller cannot cause this -
+        // it would be a bug here rather than a mistake of theirs.
+        result.push_back(extents[i]).expect("trailing_extents: a dimension did not fit");
     }
     return result;
 }
@@ -2833,9 +2886,9 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensorf weights, Dev
             VIKA_SHAPE_ERROR("dense: biases has %zu neurons, weights expects %zu", biases.extent(0), neuron_count));
     }
 
-    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, neuron_count}));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, neuron_count)));
 
-    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, feature_count}));
+    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, feature_count)));
     auto d_weights = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(weights));
     auto d_biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
 
@@ -2852,7 +2905,7 @@ auto DenseLayer::with_weights(usize batch_size, DeviceOwningTensorf weights, Dev
 auto DenseLayer::randomized(usize batch_size, usize input_features, usize neuron_count, u32 seed)
     -> Result<DenseLayer, Error>
 {
-    auto weights = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({input_features, neuron_count}));
+    auto weights = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(input_features, neuron_count)));
     auto biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(neuron_count, 0.0f)));
 
     // Built first so xavier_tensor can run on the layer's own stream instead of standing up a
@@ -3062,7 +3115,7 @@ auto Flatten2DLayer::with_extents(const Extents &extents) -> Result<Flatten2DLay
 
 auto Flatten2DLayer::output_extents() const -> Extents
 {
-    return {extents[0], element_count(trailing_extents(extents))};
+    return Extents::of(extents[0], element_count(trailing_extents(extents)));
 }
 
 auto Flatten2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const
@@ -3075,7 +3128,7 @@ auto Flatten2DLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) 
 
     const usize k = input.extents[0];
     const usize features = element_count(trailing_extents(extents));
-    return KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(input.data, {k, features}));
+    return KernelJob<DeviceTensorConstViewf>::ready(DeviceTensorConstViewf(input.data, Extents::of(k, features)));
 }
 
 auto InputLayer::forward(const std::vector<DeviceTensorConstViewf> &inputs) const -> KernelJob<DeviceTensorConstViewf>
@@ -3133,8 +3186,9 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
     const usize out_H = window_output_extent(input_height, kH, stride, padding);
     const usize out_W = window_output_extent(input_width, kW, stride, padding);
 
-    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, C_out}));
-    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, C_in}));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, out_H, out_W, C_out)));
+    auto d_inputs =
+        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, input_height, input_width, C_in)));
     auto d_filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(filters));
     auto d_biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
 
@@ -3153,7 +3207,7 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
 auto Conv2DLayer::randomized(usize batch_size, usize input_height, usize input_width, usize kH, usize kW, usize C_in,
                              usize C_out, usize stride, usize padding, u32 seed) -> Result<Conv2DLayer, Error>
 {
-    auto filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({kH, kW, C_in, C_out}));
+    auto filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(kH, kW, C_in, C_out)));
     auto biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(C_out, 0.0f)));
 
     // Built first so xavier_tensor can run on the layer's own stream instead of standing up a
@@ -3271,8 +3325,9 @@ auto ConvTranspose2DLayer::with_weights(usize batch_size, usize input_height, us
     const usize out_H = transposed_window_output_extent(input_height, kH, stride, padding);
     const usize out_W = transposed_window_output_extent(input_width, kW, stride, padding);
 
-    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, C_out}));
-    auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, C_in}));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, out_H, out_W, C_out)));
+    auto d_inputs =
+        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, input_height, input_width, C_in)));
     auto d_filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(filters));
     auto d_biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty_like(biases));
 
@@ -3292,7 +3347,7 @@ auto ConvTranspose2DLayer::randomized(usize batch_size, usize input_height, usiz
                                       usize C_in, usize C_out, usize stride, usize padding, u32 seed)
     -> Result<ConvTranspose2DLayer, Error>
 {
-    auto filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({kH, kW, C_out, C_in}));
+    auto filters = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(kH, kW, C_out, C_in)));
     auto biases = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::from(std::vector<f32>(C_out, 0.0f)));
 
     // Built first so xavier_tensor can run on the layer's own stream instead of standing up a
@@ -3396,10 +3451,10 @@ auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize in
     const usize out_H = window_output_extent(input_height, pool_h, stride, 0);
     const usize out_W = window_output_extent(input_width, pool_w, stride, 0);
 
-    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, out_H, out_W, channels}));
-    auto argmax = VIKA_UNWRAP_OR_RETURN((DeviceOwningTensoru::empty({batch_size, out_H, out_W, channels})));
+    auto outputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, out_H, out_W, channels)));
+    auto argmax = VIKA_UNWRAP_OR_RETURN((DeviceOwningTensoru::empty(Extents::of(batch_size, out_H, out_W, channels))));
     auto d_inputs =
-        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, channels}));
+        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, input_height, input_width, channels)));
 
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(MaxPool2DLayer{
@@ -3457,9 +3512,9 @@ auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize i
     }
 
     auto outputs = VIKA_UNWRAP_OR_RETURN(
-        DeviceOwningTensorf::empty({batch_size, input_height * scale, input_width * scale, channels}));
+        DeviceOwningTensorf::empty(Extents::of(batch_size, input_height * scale, input_width * scale, channels)));
     auto d_inputs =
-        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({batch_size, input_height, input_width, channels}));
+        VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(batch_size, input_height, input_width, channels)));
 
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
     return ok(Upsample2DLayer{
@@ -3663,7 +3718,7 @@ auto ConcatLayer::backward(const DeviceTensorConstViewf &upstream) -> std::vecto
 
 auto MSELoss::with_extents(const Extents &extents) -> Result<MSELoss, Error>
 {
-    auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
+    auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(1)));
     auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
@@ -3703,7 +3758,7 @@ auto MSELoss::backward(DeviceTensorConstViewf predictions, DeviceTensorConstView
 
 auto CCELoss::with_extents(const Extents &extents) -> Result<CCELoss, Error>
 {
-    auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty({1}));
+    auto loss = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(Extents::of(1)));
     auto d_inputs = VIKA_UNWRAP_OR_RETURN(DeviceOwningTensorf::empty(extents));
 
     auto stream = VIKA_UNWRAP_OR_RETURN(Stream::create());
@@ -3787,10 +3842,10 @@ auto ComputationGraph::input(Extents spatial_extents) -> Result<NodeId, Error>
     }
 
     Extents output_extents{};
-    output_extents.push_back(batch_size);
+    VIKA_UNWRAP_OR_RETURN(output_extents.push_back(batch_size));
     for (const auto dim : spatial_extents)
     {
-        output_extents.push_back(dim);
+        VIKA_UNWRAP_OR_RETURN(output_extents.push_back(dim));
     }
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
@@ -3816,7 +3871,7 @@ auto ComputationGraph::dense(NodeId input, usize output_features, std::optional<
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
         .spec = DenseSpec{output_features, resolved_seed},
-        .output_extents = {in_extents[0], output_features},
+        .output_extents = Extents::of(in_extents[0], output_features),
         .inputs = {input},
     });
     return ok(id);
@@ -3878,7 +3933,7 @@ auto ComputationGraph::flatten(NodeId input) -> Result<NodeId, Error>
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
         .spec = FlattenSpec{},
-        .output_extents = {in_extents[0], features},
+        .output_extents = Extents::of(in_extents[0], features),
         .inputs = {input},
     });
     return ok(id);
@@ -3909,7 +3964,7 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
         .spec = Conv2DSpec{kernel_height, kernel_width, channels_out, stride, padding, resolved_seed},
-        .output_extents = {in_extents[0], out_H, out_W, channels_out},
+        .output_extents = Extents::of(in_extents[0], out_H, out_W, channels_out),
         .inputs = {input},
     });
     return ok(id);
@@ -3941,7 +3996,7 @@ auto ComputationGraph::conv_transpose2d(NodeId input, usize kernel_height, usize
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
         .spec = ConvTranspose2DSpec{kernel_height, kernel_width, channels_out, stride, padding, resolved_seed},
-        .output_extents = {in_extents[0], out_H, out_W, channels_out},
+        .output_extents = Extents::of(in_extents[0], out_H, out_W, channels_out),
         .inputs = {input},
     });
     return ok(id);
@@ -3971,7 +4026,7 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
         .spec = MaxPool2DSpec{pool_height, pool_width, stride},
-        .output_extents = {in_extents[0], out_H, out_W, in_extents[3]},
+        .output_extents = Extents::of(in_extents[0], out_H, out_W, in_extents[3]),
         .inputs = {input},
     });
     return ok(id);
@@ -3994,7 +4049,7 @@ auto ComputationGraph::upsample2d(NodeId input, usize scale) -> Result<NodeId, E
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
         .spec = Upsample2DSpec{scale},
-        .output_extents = {in_extents[0], in_extents[1] * scale, in_extents[2] * scale, in_extents[3]},
+        .output_extents = Extents::of(in_extents[0], in_extents[1] * scale, in_extents[2] * scale, in_extents[3]),
         .inputs = {input},
     });
     return ok(id);
@@ -4069,7 +4124,7 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 2, "[N, features]"));
-                return DenseLayer::randomized(batch_size, pred_extents[0].at(1), s.output_features, s.seed)
+                return DenseLayer::randomized(batch_size, pred_extents[0][1], s.output_features, s.seed)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, SigmoidSpec>)
@@ -4091,8 +4146,8 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
-                return Conv2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
-                                               s.kernel_height, s.kernel_width, pred_extents[0].at(3), s.channels_out,
+                return Conv2DLayer::randomized(batch_size, pred_extents[0][1], pred_extents[0][2],
+                                               s.kernel_height, s.kernel_width, pred_extents[0][3], s.channels_out,
                                                s.stride, s.padding, s.seed)
                     .map(as_trainable);
             }
@@ -4100,8 +4155,8 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
-                return ConvTranspose2DLayer::randomized(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
-                                                        s.kernel_height, s.kernel_width, pred_extents[0].at(3),
+                return ConvTranspose2DLayer::randomized(batch_size, pred_extents[0][1], pred_extents[0][2],
+                                                        s.kernel_height, s.kernel_width, pred_extents[0][3],
                                                         s.channels_out, s.stride, s.padding, s.seed)
                     .map(as_trainable);
             }
@@ -4109,16 +4164,16 @@ auto make_layer(const LayerSpec &spec, usize batch_size, const std::vector<Exten
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
-                return MaxPool2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
-                                                    pred_extents[0].at(3), s.pool_height, s.pool_width, s.stride)
+                return MaxPool2DLayer::with_extents(batch_size, pred_extents[0][1], pred_extents[0][2],
+                                                    pred_extents[0][3], s.pool_height, s.pool_width, s.stride)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, Upsample2DSpec>)
             {
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_PRED_COUNT(pred_extents, 1));
                 VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK_AT("make_layer", pred_extents[0], 4, "[N, H, W, C]"));
-                return Upsample2DLayer::with_extents(batch_size, pred_extents[0].at(1), pred_extents[0].at(2),
-                                                     pred_extents[0].at(3), s.scale)
+                return Upsample2DLayer::with_extents(batch_size, pred_extents[0][1], pred_extents[0][2],
+                                                     pred_extents[0][3], s.scale)
                     .map(as_trainable);
             }
             else if constexpr (std::is_same_v<T, AddSpec>)

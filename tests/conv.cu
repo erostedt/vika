@@ -13,7 +13,7 @@ UTEST(conv, forward_valid_stride1_multi_channel)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    auto cpu_inputs = HostTensorf::zero({batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero(Extents::of(batch, height, width, channels)).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize h = 0; h < height; ++h)
@@ -34,7 +34,8 @@ UTEST(conv, forward_valid_stride1_multi_channel)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto filters =
+        DeviceOwningTensorf::from(weights, Extents::of(kernel_height, kernel_width, out_channels, channels)).unwrap();
     auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer = Conv2DLayer::with_weights(batch, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
@@ -78,7 +79,7 @@ UTEST(conv, forward_smaller_batch)
     // has spare capacity (2) while the actual batch (1) is smaller. Each output element only
     // depends on its own sample, so this should reproduce that test's n=0 values exactly - both
     // in what gets computed and in the shape of what's returned.
-    auto cpu_inputs = HostTensorf::zero({actual_batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero(Extents::of(actual_batch, height, width, channels)).unwrap();
     for (usize h = 0; h < height; ++h)
     {
         for (usize w = 0; w < width; ++w)
@@ -96,7 +97,8 @@ UTEST(conv, forward_smaller_batch)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto filters =
+        DeviceOwningTensorf::from(weights, Extents::of(kernel_height, kernel_width, out_channels, channels)).unwrap();
     auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer =
         Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
@@ -126,14 +128,15 @@ UTEST(conv, forward_batch_exceeds_capacity)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    const auto inputs = upload(HostTensorf::zero({2, height, width, channels}).unwrap()).unwrap();
+    const auto inputs = upload(HostTensorf::zero(Extents::of(2, height, width, channels)).unwrap()).unwrap();
 
     constexpr usize kernel_height = 3;
     constexpr usize kernel_width = 3;
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto filters =
+        DeviceOwningTensorf::from(weights, Extents::of(kernel_height, kernel_width, out_channels, channels)).unwrap();
     auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     // Layer only has capacity for 1 sample, but the input batch has 2.
     auto layer = Conv2DLayer::with_weights(1, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
@@ -149,7 +152,7 @@ UTEST(conv, backward_valid_stride1)
     constexpr usize width = 4;
     constexpr usize channels = 2;
 
-    auto cpu_inputs = HostTensorf::zero({batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero(Extents::of(batch, height, width, channels)).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize h = 0; h < height; ++h)
@@ -170,13 +173,15 @@ UTEST(conv, backward_valid_stride1)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto filters =
+        DeviceOwningTensorf::from(weights, Extents::of(kernel_height, kernel_width, out_channels, channels)).unwrap();
     auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer = Conv2DLayer::with_weights(batch, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
 
     const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
 
-    auto cpu_upstream = HostTensorf::zero({batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
+    auto cpu_upstream =
+        HostTensorf::zero(Extents::of(batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3])).unwrap();
     for (usize n = 0; n < batch; ++n)
     {
         for (usize out_h = 0; out_h < gpu_out.extents[1]; ++out_h)
@@ -246,7 +251,7 @@ UTEST(conv, backward_smaller_batch)
     // capacity (2) while the actual upstream batch (1) is smaller. Each output element only
     // depends on its own sample, so this should reproduce that test's n=0 values exactly - both
     // in what gets computed and in the shape of what's returned.
-    auto cpu_inputs = HostTensorf::zero({actual_batch, height, width, channels}).unwrap();
+    auto cpu_inputs = HostTensorf::zero(Extents::of(actual_batch, height, width, channels)).unwrap();
     for (usize h = 0; h < height; ++h)
     {
         for (usize w = 0; w < width; ++w)
@@ -264,7 +269,8 @@ UTEST(conv, backward_smaller_batch)
     constexpr usize out_channels = 2;
     std::vector<f32> weights(kernel_height * kernel_width * channels * out_channels);
     std::iota(std::begin(weights), std::end(weights), 0.0f);
-    auto filters = DeviceOwningTensorf::from(weights, {kernel_height, kernel_width, out_channels, channels}).unwrap();
+    auto filters =
+        DeviceOwningTensorf::from(weights, Extents::of(kernel_height, kernel_width, out_channels, channels)).unwrap();
     auto biases = DeviceOwningTensorf::from({0, 0}).unwrap();
     auto layer =
         Conv2DLayer::with_weights(capacity, height, width, std::move(filters), std::move(biases), 1, 0).unwrap();
@@ -272,7 +278,8 @@ UTEST(conv, backward_smaller_batch)
     const auto gpu_out = layer.forward({inputs.const_view()}).wait().unwrap();
 
     auto cpu_upstream =
-        HostTensorf::zero({actual_batch, gpu_out.extents[1], gpu_out.extents[2], gpu_out.extents[3]}).unwrap();
+        HostTensorf::zero(Extents::of(actual_batch, gpu_out.extents[1], gpu_out.extents[2],
+            gpu_out.extents[3])).unwrap();
     for (usize out_h = 0; out_h < gpu_out.extents[1]; ++out_h)
     {
         for (usize out_w = 0; out_w < gpu_out.extents[2]; ++out_w)
@@ -303,8 +310,8 @@ UTEST(conv, backward_smaller_batch)
 UTEST(conv, with_weights_rejects_zero_stride)
 {
     using namespace vika;
-    auto filters = DeviceOwningTensorf::zero({3, 3, 1, 2}).unwrap();
-    auto biases = DeviceOwningTensorf::zero({2}).unwrap();
+    auto filters = DeviceOwningTensorf::zero(Extents::of(3, 3, 1, 2)).unwrap();
+    auto biases = DeviceOwningTensorf::zero(Extents::of(2)).unwrap();
     EXPECT_TRUE(failed_with(
         Conv2DLayer::with_weights(1, 8, 8, std::move(filters), std::move(biases), 0, 0), ErrorKind::Shape));
 }
@@ -314,14 +321,14 @@ UTEST(conv, with_weights_rejects_a_kernel_larger_than_the_input)
     using namespace vika;
     // The graph builder always checked this; the factory underflowed window_output_extent and
     // reported "element count overflows usize" from the allocation three calls later.
-    auto filters = DeviceOwningTensorf::zero({5, 5, 1, 2}).unwrap();
-    auto biases = DeviceOwningTensorf::zero({2}).unwrap();
+    auto filters = DeviceOwningTensorf::zero(Extents::of(5, 5, 1, 2)).unwrap();
+    auto biases = DeviceOwningTensorf::zero(Extents::of(2)).unwrap();
     EXPECT_TRUE(failed_with(
         Conv2DLayer::with_weights(1, 2, 2, std::move(filters), std::move(biases), 1, 0), ErrorKind::Shape));
 
     // The same kernel fits once the input is padded enough.
-    auto padded_filters = DeviceOwningTensorf::zero({5, 5, 1, 2}).unwrap();
-    auto padded_biases = DeviceOwningTensorf::zero({2}).unwrap();
+    auto padded_filters = DeviceOwningTensorf::zero(Extents::of(5, 5, 1, 2)).unwrap();
+    auto padded_biases = DeviceOwningTensorf::zero(Extents::of(2)).unwrap();
     EXPECT_TRUE(
         Conv2DLayer::with_weights(1, 2, 2, std::move(padded_filters), std::move(padded_biases), 1, 2).is_ok());
 }

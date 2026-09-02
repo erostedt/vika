@@ -69,7 +69,7 @@ auto benchmark_train_step() -> void
     constexpr usize batch = 16;
 
     ComputationGraph graph{batch};
-    auto x = graph.input({8, 8, 1}).unwrap();
+    auto x = graph.input(Extents::of(8, 8, 1)).unwrap();
     x = graph.conv2d(x, 3, 3, 8, 1, 0, 1).unwrap();
     x = graph.maxpool2d(x, 2, 2, 2).unwrap();
     x = graph.flatten(x).unwrap();
@@ -79,11 +79,11 @@ auto benchmark_train_step() -> void
     x = graph.sigmoid(x).unwrap();
 
     auto model = graph.compile(x).unwrap();
-    auto loss_fn = MSELoss::with_extents({batch, 1}).unwrap();
+    auto loss_fn = MSELoss::with_extents(Extents::of(batch, 1)).unwrap();
     auto optimizer = AdamOptimizer::from_model(model, {.learning_rate = 0.01f}).unwrap();
 
-    const auto inputs = DeviceOwningTensorf::zero({batch, 8, 8, 1}).unwrap();
-    const auto targets = DeviceOwningTensorf::zero({batch, 1}).unwrap();
+    const auto inputs = DeviceOwningTensorf::zero(Extents::of(batch, 8, 8, 1)).unwrap();
+    const auto targets = DeviceOwningTensorf::zero(Extents::of(batch, 1)).unwrap();
 
     measure("train_step (line_cnn, batch 16)", 200, [&] {
         train_step(model, loss_fn, inputs.const_view(), targets.const_view(), optimizer).unwrap();
@@ -97,8 +97,8 @@ auto benchmark_dense() -> void
     constexpr usize neurons = 1024;
 
     auto layer = DenseLayer::randomized(batch, features, neurons, 1).unwrap();
-    const auto inputs = DeviceOwningTensorf::zero({batch, features}).unwrap();
-    const auto upstream = DeviceOwningTensorf::zero({batch, neurons}).unwrap();
+    const auto inputs = DeviceOwningTensorf::zero(Extents::of(batch, features)).unwrap();
+    const auto upstream = DeviceOwningTensorf::zero(Extents::of(batch, neurons)).unwrap();
 
     std::vector<AdamState> states;
     for (const auto &parameter : layer.parameters())
@@ -127,8 +127,8 @@ auto benchmark_conv() -> void
     constexpr usize channels_out = 64;
 
     auto layer = Conv2DLayer::randomized(batch, size, size, 3, 3, channels_in, channels_out, 1, 0, 1).unwrap();
-    const auto inputs = DeviceOwningTensorf::zero({batch, size, size, channels_in}).unwrap();
-    const auto upstream = DeviceOwningTensorf::zero({batch, size - 2, size - 2, channels_out}).unwrap();
+    const auto inputs = DeviceOwningTensorf::zero(Extents::of(batch, size, size, channels_in)).unwrap();
+    const auto upstream = DeviceOwningTensorf::zero(Extents::of(batch, size - 2, size - 2, channels_out)).unwrap();
 
     measure("conv2d forward (16x32x32x32 -> 64)", 100,
             [&] { layer.forward({inputs.const_view()}).wait().unwrap(); });
@@ -142,13 +142,13 @@ auto benchmark_pointwise() -> void
     constexpr usize batch = 256;
     constexpr usize features = 1024;
 
-    auto sigmoid = SigmoidLayer::with_extents({batch, features}).unwrap();
+    auto sigmoid = SigmoidLayer::with_extents(Extents::of(batch, features)).unwrap();
     auto pool = MaxPool2DLayer::with_extents(16, 32, 32, 32, 2, 2, 2).unwrap();
-    auto loss = MSELoss::with_extents({batch, features}).unwrap();
+    auto loss = MSELoss::with_extents(Extents::of(batch, features)).unwrap();
 
-    const auto flat = DeviceOwningTensorf::zero({batch, features}).unwrap();
-    const auto images = DeviceOwningTensorf::zero({16, 32, 32, 32}).unwrap();
-    const auto pooled = DeviceOwningTensorf::zero({16, 16, 16, 32}).unwrap();
+    const auto flat = DeviceOwningTensorf::zero(Extents::of(batch, features)).unwrap();
+    const auto images = DeviceOwningTensorf::zero(Extents::of(16, 32, 32, 32)).unwrap();
+    const auto pooled = DeviceOwningTensorf::zero(Extents::of(16, 16, 16, 32)).unwrap();
 
     measure("sigmoid forward (256x1024)", 500, [&] { sigmoid.forward({flat.const_view()}).wait().unwrap(); });
     measure("sigmoid backward", 500, [&] { sigmoid.backward(flat.const_view())[0].wait().unwrap(); });

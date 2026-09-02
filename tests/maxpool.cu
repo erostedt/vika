@@ -17,7 +17,7 @@ static auto counting_input() -> vika::DeviceOwningTensorf
     using namespace vika;
     std::vector<f32> values(16);
     std::iota(std::begin(values), std::end(values), 1.0f);
-    return DeviceOwningTensorf::from(values, {1, 4, 4, 1}).unwrap();
+    return DeviceOwningTensorf::from(values, Extents::of(1, 4, 4, 1)).unwrap();
 }
 
 UTEST(maxpool, forward_picks_the_window_maximum)
@@ -38,7 +38,7 @@ UTEST(maxpool, forward_picks_the_window_maximum)
     // argmax stores the flat (row, col) offset into one input image, which backward turns back
     // into coordinates - so its exact encoding matters, not just that the maxima were right.
     const auto argmax = download(layer.argmax).unwrap();
-    ASSERT_TRUE(are_equal(argmax, HostTensoru::copy_from({5u, 7u, 13u, 15u}, {1, 2, 2, 1}).unwrap()));
+    ASSERT_TRUE(are_equal(argmax, HostTensoru::copy_from({5u, 7u, 13u, 15u}, Extents::of(1, 2, 2, 1)).unwrap()));
 }
 
 UTEST(maxpool, backward_routes_the_gradient_to_the_argmax)
@@ -48,7 +48,7 @@ UTEST(maxpool, backward_routes_the_gradient_to_the_argmax)
     auto layer = MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 2).unwrap();
     layer.forward({inputs.const_view()}).wait().unwrap();
 
-    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
+    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(1, 2, 2, 1)).unwrap();
     const auto gpu_grad = layer.backward(upstream.const_view())[0].wait().unwrap();
     const auto grad = download(gpu_grad).unwrap();
 
@@ -69,14 +69,14 @@ UTEST(maxpool, backward_ignores_an_out_of_range_argmax)
     // scatters an atomicAdd anywhere; bounded, the contribution is dropped.
     auto layer = MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 2).unwrap();
 
-    auto poison = HostTensoru::zero({1, 2, 2, 1}).unwrap();
+    auto poison = HostTensoru::zero(Extents::of(1, 2, 2, 1)).unwrap();
     for (usize i = 0; i < poison.size(); ++i)
     {
         poison[i] = 0xFFFF0000u;
     }
     copy(poison, layer.argmax).unwrap();
 
-    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, {1, 2, 2, 1}).unwrap();
+    const auto upstream = DeviceOwningTensorf::from({1.0f, 2.0f, 3.0f, 4.0f}, Extents::of(1, 2, 2, 1)).unwrap();
     const auto backwarded = layer.backward(upstream.const_view())[0].wait();
     ASSERT_TRUE(backwarded.is_ok());
     const auto grad = download(backwarded.unwrap()).unwrap();
@@ -103,7 +103,7 @@ UTEST(maxpool, forward_rejects_wrong_trailing_extents)
 {
     using namespace vika;
     auto layer = MaxPool2DLayer::with_extents(1, 4, 4, 1, 2, 2, 2).unwrap();
-    const auto wrong = DeviceOwningTensorf::zero({1, 5, 5, 1}).unwrap();
+    const auto wrong = DeviceOwningTensorf::zero(Extents::of(1, 5, 5, 1)).unwrap();
     EXPECT_TRUE(failed_with(layer.forward({wrong.const_view()}).wait(), ErrorKind::Shape));
 }
 
