@@ -2566,18 +2566,21 @@ auto _check_rank(const Extents &extents, usize expected, const char *layout, con
 #define VIKA_CHECK_TRAILING_EXTENTS(actual, expected)                                                                  \
     ::vika::_check_trailing_extents((actual), (expected), __func__, #actual, __FILE__, __LINE__)
 
-// A zero stride is a window that never advances. window_output_extent divides by it, and the
-// transposed form defers the division to a kernel, so neither can express it.
-auto _check_stride(usize stride, const char *context, const char *file, i32 line) -> Result<Void, Error>
+// Counts and steps that have to be at least one, named by whatever the caller passed. A zero
+// stride is a window that never advances, and window_output_extent divides by it. A zero width
+// reaches checked_size eventually, but by then the message names neither the builder nor the
+// argument that was zero.
+auto _check_positive(usize value, const char *context, const char *name, const char *file, i32 line)
+    -> Result<Void, Error>
 {
-    if (stride == 0)
+    if (value == 0)
     {
-        return error(Error::make(ErrorKind::Shape, file, line, "%s: stride must be at least 1, got 0", context));
+        return error(Error::make(ErrorKind::Shape, file, line, "%s: %s must be at least 1, got 0", context, name));
     }
     return ok(Void{});
 }
 
-#define VIKA_CHECK_STRIDE(stride) ::vika::_check_stride((stride), __func__, __FILE__, __LINE__)
+#define VIKA_CHECK_POSITIVE(value) ::vika::_check_positive((value), __func__, #value, __FILE__, __LINE__)
 
 // The window has to fit the padded input, or window_output_extent's subtraction underflows into
 // an enormous extent that surfaces much later as an allocation failure. A window of zero fits any
@@ -3179,7 +3182,7 @@ auto Conv2DLayer::with_weights(usize batch_size, usize input_height, usize input
         return error(VIKA_SHAPE_ERROR("conv2d: biases has %zu channels, filters expects %zu", biases.extent(0), C_out));
     }
 
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(stride));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_height, kH, padding, "height"));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_width, kW, padding, "width"));
 
@@ -3318,7 +3321,7 @@ auto ConvTranspose2DLayer::with_weights(usize batch_size, usize input_height, us
                                       biases.extent(0), C_out));
     }
 
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(stride));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(input_height, kH, stride, padding, "height"));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(input_width, kW, stride, padding, "width"));
 
@@ -3444,7 +3447,7 @@ auto ConvTranspose2DLayer::update(std::vector<AdamState> &states, const AdamPara
 auto MaxPool2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize pool_h,
                                   usize pool_w, usize stride) -> Result<MaxPool2DLayer, Error>
 {
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(stride));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_height, pool_h, 0, "height"));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(input_width, pool_w, 0, "width"));
 
@@ -3506,10 +3509,7 @@ auto MaxPool2DLayer::backward(const DeviceTensorConstViewf &upstream) -> std::ve
 auto Upsample2DLayer::with_extents(usize batch_size, usize input_height, usize input_width, usize channels, usize scale)
     -> Result<Upsample2DLayer, Error>
 {
-    if (scale == 0)
-    {
-        return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(scale));
 
     auto outputs = VIKA_UNWRAP_OR_RETURN(
         DeviceOwningTensorf::empty(Extents::of(batch_size, input_height * scale, input_width * scale, channels)));
@@ -3866,6 +3866,7 @@ auto ComputationGraph::dense(NodeId input, usize output_features, std::optional<
 
     const auto in_extents = nodes[input.value].output_extents;
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(in_extents, 2, "[N, features]"));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(output_features));
 
     const u32 resolved_seed = requested_seed.has_value() ? *requested_seed : next_seed();
     const NodeId id{nodes.size()};
@@ -3953,7 +3954,8 @@ auto ComputationGraph::conv2d(NodeId input, usize kernel_height, usize kernel_wi
     const auto H = in_extents[1];
     const auto W = in_extents[2];
 
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(channels_out));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(H, kernel_height, padding, "height"));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(W, kernel_width, padding, "width"));
 
@@ -3985,7 +3987,8 @@ auto ComputationGraph::conv_transpose2d(NodeId input, usize kernel_height, usize
     const auto H = in_extents[1];
     const auto W = in_extents[2];
 
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(channels_out));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(H, kernel_height, stride, padding, "height"));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_TRANSPOSED_WINDOW_FITS(W, kernel_width, stride, padding, "width"));
 
@@ -4016,7 +4019,7 @@ auto ComputationGraph::maxpool2d(NodeId input, usize pool_height, usize pool_wid
     const auto H = in_extents[1];
     const auto W = in_extents[2];
 
-    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_STRIDE(stride));
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(stride));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(H, pool_height, 0, "height"));
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_WINDOW_FITS(W, pool_width, 0, "width"));
 
@@ -4041,10 +4044,7 @@ auto ComputationGraph::upsample2d(NodeId input, usize scale) -> Result<NodeId, E
 
     const auto in_extents = nodes[input.value].output_extents;
     VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_RANK(in_extents, 4, "[N, H, W, C]"));
-    if (scale == 0)
-    {
-        return error(VIKA_SHAPE_ERROR("upsample2d: scale must be at least 1, got %zu", scale));
-    }
+    VIKA_UNWRAP_OR_RETURN(VIKA_CHECK_POSITIVE(scale));
 
     const NodeId id{nodes.size()};
     nodes.push_back(Node{
